@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
-import { OpenAIGPT55Rules } from "../../../../../gateway/packages/lowering/src/rules/openai.js";
-import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
+import { validateProviderRequest } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
 	RuntimeContextEntry,
 	RuntimeContextKind,
@@ -297,54 +295,30 @@ describe("Runtime provider-context projection", () => {
 		}
 	});
 
-	test("keeps completed, errored, and cancelled Tool wire lowering unchanged", () => {
+	// The Gateway's tests lower each of these forms (testdata/provider-requests).
+	test("sends completed, errored, and cancelled Tool results in their ProviderRequest forms", () => {
+		const error = { type: "provider_tool_protocol_error" as const, message: "failed", retryable: false };
 		const cases = [
 			{
-				status: "completed",
-				result: {
-					type: "completed" as const,
-					output: { text: "result" },
-				},
-				output: { text: "result" },
-				isError: undefined,
+				result: { type: "completed" as const, output: { text: "result" } },
+				wire: { completed: { outputJson: JSON.stringify({ text: "result" }) } },
 			},
 			{
-				status: "error",
-				result: {
-					type: "error" as const,
-					error: {
-						type: "provider_tool_protocol_error" as const,
-						message: "failed",
-						retryable: false,
-					},
-				},
-				output: {
-					error: {
-						type: "provider_tool_protocol_error",
-						message: "failed",
-						retryable: false,
-					},
-				},
-				isError: true as const,
+				result: { type: "error" as const, error },
+				wire: { error: { errorJson: JSON.stringify({ error }) } },
 			},
-			{
-				status: "cancelled",
-				result: { type: "cancelled" as const },
-				output: { type: "text", text: "[tool execution cancelled]" },
-				isError: true as const,
-			},
+			{ result: { type: "cancelled" as const }, wire: { cancelled: {} } },
 		];
 
 		for (const testCase of cases) {
 			const projected = toGatewayProviderContext([
 				entry(1, "assistant", [toolCall(), toolResult(testCase.result)]),
 			]);
-			expect(projected.ok).toBe(true);
-			if (!projected.ok) continue;
-
+			if (!projected.ok) throw new Error(`${testCase.result.type} failed provider projection`);
 			const assembled = assembleProviderCallRequest({
 				identity: {
-					threadRole: "main", threadVisibility: "public",
+					threadRole: "main",
+					threadVisibility: "public",
 					workspaceId: "default",
 					sessionId: "session-a",
 					sessionThreadId: "thread-a",
@@ -354,56 +328,19 @@ describe("Runtime provider-context projection", () => {
 					runtimeProcessId: "process-test",
 					runtimeBindingToken: "binding-token",
 				},
-				requestId: `request-${testCase.status}`,
-				modelRequestId: `model-request-${testCase.status}`,
-				currentModel: {
-					providerId: OpenAIGPT55Rules.providerId,
-					modelId: OpenAIGPT55Rules.modelId,
-				},
+				requestId: `request-${testCase.result.type}`,
+				modelRequestId: `model-request-${testCase.result.type}`,
+				currentModel: { providerId: "openai", modelId: "gpt-5.5" },
 				providerContext: projected.context,
-				runtime: {
-					systemInstructions: "ordinary Tool regression",
-					timeoutMs: 30_000,
-				},
+				runtime: { systemInstructions: "ordinary Tool regression", timeoutMs: 30_000 },
 			});
-			expect(assembled.ok).toBe(true);
-			if (!assembled.ok) continue;
-
-			expect(validateProviderRequest({...assembled.request,modelRequestStartEventId:"evt_0000000000000001"})).toEqual({ ok: true });
-			const lowered = lowerProviderRequest(
-				assembled.request,
-				OpenAIGPT55Rules,
-				{ modelOutputTokenLimit: 32_000 },
-			);
-			const toolEntries = lowered.messages.filter(
-				(item) => item.role === "assistant" || item.role === "tool",
-			);
-			expect(toolEntries).toEqual([
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "tool-call",
-							toolCallId: "call-1",
-							toolName: "lookup",
-							input: { q: "hi" },
-						},
-					],
-				},
-				{
-					role: "tool",
-					content: [
-						{
-							type: "tool-result",
-							toolCallId: "call-1",
-							toolName: "lookup",
-							output: testCase.output,
-							...(testCase.isError === undefined
-								? {}
-								: { isError: testCase.isError }),
-						},
-					],
-				},
+			if (!assembled.ok) throw new Error(`${testCase.result.type} failed request assembly`);
+			expect(
+				validateProviderRequest({ ...assembled.request, modelRequestStartEventId: "evt_0000000000000001" }),
+			).toEqual({ ok: true });
+			expect(assembled.request.context.flatMap((item) => item.content)).toEqual([
+				{ toolCall: { modelToolCallId: "call-1", name: "lookup", inputJson: JSON.stringify({ q: "hi" }) } },
+				{ toolResult: { modelToolCallId: "call-1", ...testCase.wire } },
 			]);
 		}
 	});

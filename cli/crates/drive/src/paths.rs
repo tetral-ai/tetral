@@ -135,6 +135,12 @@ pub fn platform_local_only(path: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether `path` is macOS metadata, an AppleDouble file the Mac's NFS client
+/// keeps an entry's extended attributes in.
+pub fn is_macos_metadata(path: &str) -> bool {
+    platform_local_only(path) == Some("macos_metadata")
+}
+
 /// Why the entry of `kind` at `path` is local-only, or `None` for a synced
 /// entry; `holds` tells whether a path holds a present entry.
 pub fn local_only(path: &str, kind: &str, holds: impl Fn(&str) -> bool) -> Option<&'static str> {

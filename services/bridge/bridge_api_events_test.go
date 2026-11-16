@@ -1,3 +1,5 @@
+// Layer 2: the Bridge API's WriteEvent against a real PostgreSQL. The test of
+// the event types the Runtime may write is layer 1.
 package agentruntimebridge
 
 import (
@@ -5,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,6 +16,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/eventwire"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
@@ -575,5 +579,23 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	}
 	if declarations != 1 {
 		t.Fatalf("Tool Call declarations = %d; want 1", declarations)
+	}
+}
+
+// WriteEvent accepts no type the public events API does not serve, apart from
+// the approval reviewer's own records. The types tried are the public ones,
+// the ones the Runtime writes and types Engine stores or the Managed Agents
+// API defines but does not serve here.
+func TestWriteEventTypesArePublicEventTypes(t *testing.T) {
+	public := eventwire.PublicEventTypes()
+	tried := slices.Concat(public, runtimeWritableEventTypes, []string{
+		runtimecontrol.ChildInterruptRequestedEventType,
+		"agent.custom_tool_use",
+		"user.custom_tool_result",
+	})
+	for _, name := range tried {
+		if writeEventTypeAllowed(name) && !slices.Contains(public, name) && !strings.HasPrefix(name, "approval_review.") {
+			t.Errorf("WriteEvent accepts %s, which is neither a public event type nor an approval review record", name)
+		}
 	}
 }

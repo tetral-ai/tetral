@@ -30,6 +30,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/testvector"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -896,41 +897,20 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		t.Fatalf("Runtime composition = %+v; want interrupted and resumed Provider calls, one joined operation, and interrupt response", composed)
 	}
 	hotProviderContext := composed.ProviderContexts[1]
-	for _, providerRequest := range runRuntimeProviderComposition(t, coldAfterInterrupt.GetContextJson()) {
-		var coldRequest struct {
-			Context json.RawMessage `json:"context"`
-		}
-		if err := json.Unmarshal(providerRequest, &coldRequest); err != nil {
-			t.Fatalf("decode cold Provider request: %v", err)
-		}
-		var hotValue, coldValue []any
-		if err := json.Unmarshal(hotProviderContext, &hotValue); err != nil {
-			t.Fatalf("decode hot Provider context: %v", err)
-		}
-		if err := json.Unmarshal(coldRequest.Context, &coldValue); err != nil {
-			t.Fatalf("decode cold Provider context: %v", err)
-		}
-		if len(hotValue) == 0 {
-			t.Fatal("hot Provider context omitted the accepted follower input")
-		}
-		followerJSON, _ := json.Marshal(hotValue[len(hotValue)-1])
-		if !strings.Contains(string(followerJSON), "post-config ordinary") {
-			t.Fatalf("hot Provider context did not end with the accepted follower: %s", followerJSON)
-		}
-		hotJSON, _ := json.Marshal(hotValue[:len(hotValue)-1])
-		coldJSON, _ := json.Marshal(coldValue)
-		if !bytes.Equal(hotJSON, coldJSON) {
-			t.Fatalf("interrupt hot/cold Provider context diverged:\nhot:  %s\ncold: %s", hotJSON, coldJSON)
-		}
-		assertInterruptedProviderContext(
-			t,
-			coldRequest.Context,
-			"failed interrupt partial text",
-			"interrupt Tool reasoning",
-			"sig_interrupt_composition",
-			"call_interrupt_composition",
-		)
+	var hotValue []json.RawMessage
+	if err := json.Unmarshal(hotProviderContext, &hotValue); err != nil || len(hotValue) == 0 {
+		t.Fatalf("decode hot Provider context: %s/%v", hotProviderContext, err)
 	}
+	if !strings.Contains(string(hotValue[len(hotValue)-1]), "post-config ordinary") {
+		t.Fatalf("hot Provider context did not end with the accepted follower: %s", hotValue[len(hotValue)-1])
+	}
+	// The Runtime's tests restore the same context cold from this envelope.
+	hotBeforeFollower, err := json.Marshal(hotValue[:len(hotValue)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/bridge-context/interrupt-closed-out.json", []byte(coldAfterInterrupt.GetContextJson()))
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/runtime-hot-context/interrupt-closed-out.json", hotBeforeFollower)
 	assertInterruptedProviderContext(
 		t,
 		hotProviderContext,
@@ -1163,22 +1143,8 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		"sig_provider_context",
 		"call_interrupt_joined_replay",
 	)
-	for _, providerRequest := range runRuntimeProviderComposition(t, joinedCold.GetContextJson()) {
-		var coldRequest struct {
-			Context json.RawMessage `json:"context"`
-		}
-		if err := json.Unmarshal(providerRequest, &coldRequest); err != nil {
-			t.Fatalf("decode joined replay cold Provider request: %v", err)
-		}
-		assertInterruptedProviderContext(
-			t,
-			coldRequest.Context,
-			"failed partial text",
-			"provider-declared reasoning",
-			"sig_provider_context",
-			"call_interrupt_joined_replay",
-		)
-	}
+	// The Runtime's tests restore the same interrupted context cold.
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/bridge-context/interrupt-joined-replay-closed-out.json", []byte(joinedCold.GetContextJson()))
 	var inboxStatus, queueStatus string
 	var requestEnds, toolResults, receipts, idleEvents int
 	if err := admin.QueryRowContext(context.Background(), `SELECT

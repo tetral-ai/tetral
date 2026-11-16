@@ -1,0 +1,110 @@
+{
+  "requestId": "req_provider_composition",
+  "modelRequestId": "mreq_provider_composition",
+  "requestKind": "PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST",
+  "workspaceId": "default",
+  "sessionId": "composition_session",
+  "sessionThreadId": "composition_thread",
+  "bindingId": "composition_binding",
+  "bindingGeneration": 1,
+  "runtimeBindingToken": "composition-binding-token",
+  "model": {
+    "providerId": "anthropic",
+    "modelId": "claude-opus-4-8"
+  },
+  "system": [
+    {
+      "kind": "SYSTEM_SEGMENT_KIND_BASE",
+      "text": "provider composition",
+      "cacheHint": "SYSTEM_CACHE_HINT_STABLE"
+    }
+  ],
+  "context": [
+    {
+      "role": "PROVIDER_CONTEXT_ROLE_ASSISTANT",
+      "content": [
+        {
+          "toolCall": {
+            "modelToolCallId": "call_mcp_durable_claim",
+            "name": "create_issue",
+            "inputJson": "{\"body\":\"Details\",\"title\":\"Bug\"}"
+          }
+        },
+        {
+          "toolCall": {
+            "modelToolCallId": "call_mcp_production_cancelled",
+            "name": "create_issue",
+            "inputJson": "{\"mode\":\"cancel-between\"}"
+          }
+        },
+        {
+          "toolCall": {
+            "modelToolCallId": "call_mcp_oauth_success",
+            "name": "create_issue",
+            "inputJson": "{\"mode\":\"oauth-success\"}"
+          }
+        },
+        {
+          "toolCall": {
+            "modelToolCallId": "call_mcp_oauth_failure",
+            "name": "create_issue",
+            "inputJson": "{\"mode\":\"oauth-failure\"}"
+          }
+        },
+        {
+          "toolCall": {
+            "modelToolCallId": "call_mcp_production_cleanup",
+            "name": "create_issue",
+            "inputJson": "{\"mode\":\"cleanup\"}"
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_mcp_production_cancelled",
+            "cancelled": {}
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_mcp_durable_claim",
+            "completed": {
+              "outputJson": "{\"text\":\"takeover claimant\"}"
+            }
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_mcp_oauth_success",
+            "completed": {
+              "outputJson": "{\"text\":\"oauth refreshed\"}"
+            }
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_mcp_oauth_failure",
+            "error": {
+              "errorJson": "{\"error\":{\"type\":\"tool_error\",\"message\":\"MCP tool execution is unavailable.\"}}"
+            }
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_mcp_production_cleanup",
+            "completed": {
+              "outputJson": "{\"text\":\"reacquired claimant\"}"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "timeoutMs": 30000
+  },
+  "runtimeProcessId": "process-test",
+  "outputContractVersion": 2,
+  "modelRequestStartEventId": "evt_1000000000000000",
+  "threadRole": "PROVIDER_THREAD_ROLE_MAIN",
+  "threadVisibility": "PROVIDER_THREAD_VISIBILITY_PUBLIC"
+}

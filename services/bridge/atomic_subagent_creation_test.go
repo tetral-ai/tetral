@@ -40,6 +40,8 @@ func TestPostgreSQLAtomicSubagentCreationCommitsAndReplaysWholeInitialLineage(t 
 	}
 	childID := created.GetCommitted().GetChildThreadId()
 	assertAtomicSubagentLineage(t, admin, sessionID, parentID, childID, toolUseID, prompt, 1)
+	sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, "session.thread_created", "agent.thread_message_sent")
+	sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, false, "agent.thread_message_received")
 
 	replayed, err := store.CreateSubagentThread(context.Background(), request)
 	if err != nil || replayed.GetDuplicate().GetChildThreadId() != childID {

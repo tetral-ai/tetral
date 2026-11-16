@@ -5,15 +5,13 @@ import (
 	"testing"
 )
 
-func TestAppliedReportAnswersOnlyTheSessionDrivesSentThroughSend(t *testing.T) {
+func TestAppliedReportAnswersOnlyTheSessionDrivesItNames(t *testing.T) {
 	ts := startServer(t)
 	stream, connectionID := ts.online()
 	ts.prepare("sess_1", "bind_1")
 	stream.expect("session.prepare")
-	ts.call("send", map[string]any{"instance_id": "inst_a", "event": map[string]any{
-		"protocol_version": 1, "connection_id": connectionID, "message_id": "drives_1",
-		"type": "session.drives", "session_id": "sess_1", "binding_id": "bind_1",
-		"payload": map[string]any{"session_id": "sess_1", "binding_id": "bind_1", "drives": []any{}},
+	ts.call("drives", map[string]any{"instance_id": "inst_a", "message_id": "drives_1", "payload": map[string]any{
+		"session_id": "sess_1", "binding_id": "bind_1", "drives": []any{},
 	}}, nil)
 	stream.expect("session.drives")
 	applied := func(messageID, requestMessageID, bindingID string) map[string]any {

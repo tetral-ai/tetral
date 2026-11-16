@@ -1,0 +1,150 @@
+{
+  "messages": [
+    {
+      "messageSequence": 1,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "providerMetadata": {
+            "anthropic": {
+              "signature": "fixture-secret-sentinel"
+            }
+          },
+          "text": "fixture-sensitive-content",
+          "type": "reasoning"
+        },
+        {
+          "text": "alpha",
+          "type": "text"
+        },
+        {
+          "canonicalInput": {
+            "file_path": "fixture-sensitive-content"
+          },
+          "modelToolCallId": "call-ownership",
+          "toolName": "Read",
+          "type": "tool_call"
+        }
+      ]
+    }
+  ],
+  "currentRequestMessage": {
+    "modelRequestId": "request",
+    "assistantMessageSequence": 1
+  },
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "evt_0000000000000001",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "evt_0000000000000002",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "request",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "evt_0000000000000003",
+        "eventSequence": 4,
+        "type": "agent.tool_use",
+        "modelRequestId": "request",
+        "toolUse": {
+          "modelToolCallId": "call-ownership",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000004",
+        "eventSequence": 5,
+        "type": "span.model_request_end",
+        "modelRequestId": "request",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000002",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "evt_0000000000000003"
+            ],
+            "repairEventIds": []
+          }
+        }
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "running"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_0000000000000005",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_0000000000000005",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [
+    {
+      "toolUseEventId": "evt_0000000000000003",
+      "modelRequestId": "request",
+      "modelToolCallId": "call-ownership",
+      "toolName": "Read",
+      "input": {
+        "file_path": "fixture-sensitive-content"
+      },
+      "status": "pending"
+    }
+  ],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

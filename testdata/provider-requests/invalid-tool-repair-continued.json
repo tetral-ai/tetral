@@ -1,0 +1,77 @@
+{
+  "requestId": "req_provider_composition",
+  "modelRequestId": "mreq_provider_composition",
+  "requestKind": "PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST",
+  "workspaceId": "default",
+  "sessionId": "composition_session",
+  "sessionThreadId": "composition_thread",
+  "bindingId": "composition_binding",
+  "bindingGeneration": 1,
+  "runtimeBindingToken": "composition-binding-token",
+  "model": {
+    "providerId": "anthropic",
+    "modelId": "claude-opus-4-8"
+  },
+  "system": [
+    {
+      "kind": "SYSTEM_SEGMENT_KIND_BASE",
+      "text": "provider composition",
+      "cacheHint": "SYSTEM_CACHE_HINT_STABLE"
+    }
+  ],
+  "context": [
+    {
+      "role": "PROVIDER_CONTEXT_ROLE_USER",
+      "content": [
+        {
+          "text": {
+            "text": "continue"
+          }
+        }
+      ]
+    },
+    {
+      "role": "PROVIDER_CONTEXT_ROLE_ASSISTANT",
+      "content": [
+        {
+          "text": {
+            "text": "continuing"
+          }
+        },
+        {
+          "toolCall": {
+            "modelToolCallId": "call_invalid_tool_repair_fixture",
+            "name": "exec_command",
+            "inputJson": "{\"command\":\"must not execute\"}"
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_invalid_tool_repair_fixture",
+            "error": {
+              "errorJson": "{\"error\":{\"type\":\"runtime_invalid_sequence\",\"message\":\"disabled or unknown tool call: exec_command\",\"retryable\":false}}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "PROVIDER_CONTEXT_ROLE_ASSISTANT",
+      "content": [
+        {
+          "text": {
+            "text": "continued"
+          }
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "timeoutMs": 30000
+  },
+  "runtimeProcessId": "process-test",
+  "outputContractVersion": 2,
+  "modelRequestStartEventId": "evt_1000000000000000",
+  "threadRole": "PROVIDER_THREAD_ROLE_MAIN",
+  "threadVisibility": "PROVIDER_THREAD_VISIBILITY_PUBLIC"
+}

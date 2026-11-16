@@ -79,6 +79,7 @@ func TestPostgreSQLRunnerToolRelationWritersDeriveOneFact(t *testing.T) {
 				time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)); err != nil {
 				t.Fatalf("repair lost Pod: %v", err)
 			}
+			sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, family.resultType)
 			facts := sessionfixture.RequireToolRelationFactsForTest(t, admin, "default", sessionID)
 			result := requireOneRunnerResult(t, facts, toolUseID)
 			if result.EventType != family.resultType || runnerResultWriteID(t, admin, result.EventID) != "rwrite_runtime_pod_lost_tool_"+toolUseID {
@@ -120,6 +121,7 @@ func TestPostgreSQLRunnerToolRelationWritersDeriveOneFact(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("expire cleanup Sandbox execution: %v", err)
 		}
+		sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, "agent.tool_result")
 		facts := sessionfixture.RequireToolRelationFactsForTest(t, admin, "default", sessionID)
 		result := requireOneRunnerResult(t, facts, toolUseID)
 		var executionState, consumedBy string

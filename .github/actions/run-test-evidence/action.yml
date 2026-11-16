@@ -81,21 +81,7 @@ runs:
       id: go-cache-key
       if: inputs.go-cache == 'true'
       shell: bash
-      env:
-        GO_SUM_HASH: ${{ hashFiles('go.sum', 'integration/envoy-gateway-secret-helper/go.sum') }}
-      run: |
-        set -euo pipefail
-        toolchain="go-race-v1-Linux-$(go env GOVERSION)-"
-        compiler="${toolchain}cc$(gcc --version | head -n 1 | sha256sum | cut -c 1-12)-"
-        modules="${compiler}${GO_SUM_HASH}-"
-        key="${modules}$(git rev-parse HEAD)"
-        echo "Go build cache key: $key"
-        {
-          echo "key=$key"
-          echo "modules-prefix=$modules"
-          echo "compiler-prefix=$compiler"
-          echo "toolchain-prefix=$toolchain"
-        } >> "$GITHUB_OUTPUT"
+      run: ./scripts/go-build-cache-key.sh
 
     - name: Record free disk before the Go build cache restore
       id: go-cache-before

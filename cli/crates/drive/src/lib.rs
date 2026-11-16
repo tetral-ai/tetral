@@ -34,7 +34,8 @@ pub use sync::{DriveSync, SyncConfig};
 pub use sync_point::{SyncOutcome, SyncPointRequest};
 pub use transfer::DriveTransfer;
 
-#[cfg(test)]
+// `transfer/checked.rs` names this crate as its integration tests do.
+#[cfg(any(test, feature = "test-seams"))]
 extern crate self as drive;
 #[cfg(test)]
 mod tests;

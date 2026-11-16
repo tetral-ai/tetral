@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,10 +95,10 @@ func failed(code string) func(*protocol.SessionStatus) {
 }
 
 // sessionErrors returns the error objects of the Session's session.error
-// events on its primary stream, in order.
+// events on its primary stream, in order, each written processed.
 func (f *hubFixture) sessionErrors(sessionID string) []map[string]any {
 	f.t.Helper()
-	rows, err := f.admin.QueryContext(f.ctx, `SELECT payload_json FROM session_events
+	rows, err := f.admin.QueryContext(f.ctx, `SELECT payload_json, processed_at IS NOT NULL FROM session_events
 		WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.error' ORDER BY sequence`, sessionID)
 	if err != nil {
 		f.t.Fatal(err)
@@ -106,11 +107,15 @@ func (f *hubFixture) sessionErrors(sessionID string) []map[string]any {
 	var errs []map[string]any
 	for rows.Next() {
 		var payload string
+		var processed bool
 		var event struct {
 			Error map[string]any `json:"error"`
 		}
-		if err := rows.Scan(&payload); err != nil || json.Unmarshal([]byte(payload), &event) != nil {
+		if err := rows.Scan(&payload, &processed); err != nil || json.Unmarshal([]byte(payload), &event) != nil {
 			f.t.Fatalf("session.error %s: %v", payload, err)
+		}
+		if !processed {
+			f.t.Fatalf("session.error %s is unprocessed; a Session error is written processed", payload)
 		}
 		errs = append(errs, event.Error)
 	}
@@ -171,10 +176,14 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 		}
 	}
 	acknowledged(t, f.report(cli, first, "status_1", failed("cwd_not_found")), "status_1")
-	computerRow := f.row(`SELECT execution_state,error_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
-	if computerRow["execution_state"] != "failed" || computerRow["error_code"] != "cwd_not_found" || computerRow["binding_id"] != firstPayload.BindingID {
-		t.Fatalf("computer after the failure = %v", computerRow)
+	failedWith := func(after, code, bindingID string) {
+		t.Helper()
+		row := f.row(`SELECT execution_state,error_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
+		if row["execution_state"] != "failed" || row["error_code"] != code || row["binding_id"] != bindingID {
+			t.Fatalf("computer after %s = %v; want failed with %s on binding %s", after, row, code, bindingID)
+		}
 	}
+	failedWith("the failure", "cwd_not_found", firstPayload.BindingID)
 	for _, refused := range []func(*protocol.SessionStatus){
 		func(s *protocol.SessionStatus) { s.Status = "closed" },                                                  // answers no session.prepare
 		func(s *protocol.SessionStatus) { prepared("/Users/me/shop")(s); s.BindingID = "bind_0000000000000000" }, // another binding
@@ -205,19 +214,21 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 		t.Fatalf("preparation again = %s, first binding %s", second.Data, f.bindingState(firstPayload.BindingID))
 	}
 	acknowledged(t, f.report(cli, second, "status_2", failed("cwd_not_found")), "status_2")
+	failedWith("the same failure again", "cwd_not_found", secondPayload.BindingID)
 	if errs := f.sessionErrors("sesn_again"); len(errs) != 1 {
 		t.Fatalf("Session errors after the same failure again = %v; want still one", errs)
 	}
 	prepareAgain()
-	changedFailure, _ := prepareOn(t, stream)
+	changedFailure, changedPayload := prepareOn(t, stream)
 	acknowledged(t, f.report(cli, changedFailure, "status_changed_failure", failed("cwd_inaccessible")), "status_changed_failure")
+	failedWith("a different failure", "cwd_inaccessible", changedPayload.BindingID)
 	if errs := f.sessionErrors("sesn_again"); len(errs) != 2 || errs[1]["type"] != "computer_preparation_error" || errs[1]["code"] != "cwd_inaccessible" {
 		t.Fatalf("Session errors after different failure = %v; want one additional cwd_inaccessible", errs)
 	}
 	prepareAgain()
 	third, thirdPayload := prepareOn(t, stream)
 	acknowledged(t, f.report(cli, third, "status_3", prepared("/Users/me/shop")), "status_3")
-	computerRow = f.row(`SELECT execution_state,cwd,error_code,last_failed_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
+	computerRow := f.row(`SELECT execution_state,cwd,error_code,last_failed_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
 	if computerRow["execution_state"] != "ready" || computerRow["cwd"] != "/Users/me/shop" || computerRow["error_code"] != nil ||
 		computerRow["last_failed_code"] != nil || computerRow["binding_id"] != thirdPayload.BindingID {
 		t.Fatalf("computer after the prepared report = %v", computerRow)
@@ -242,7 +253,9 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 
 // A repository_path_forbidden failure on each of two cloud computers writes one
 // computer_preparation_error per computer. The cloud computer's session.prepare
-// creates its cwd and names its repository with the platform identity.
+// creates its cwd and names its repository with the platform identity, and
+// the instance's next connection prepares it on a new binding naming the same
+// repository.
 func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	for _, sessionID := range []string{"sesn_path_a", "sesn_path_b"} {
@@ -257,6 +270,14 @@ func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 			t.Fatalf("cloud computer session.prepare = %s", prepare.Data)
 		}
 		acknowledged(t, f.report(cli, prepare, "status_1", failed("repository_path_forbidden")), "status_1")
+		if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID); err != nil {
+			t.Fatal(err)
+		}
+		next := f.open(cli)
+		f.acceptReady(cli, next, "ready_2")
+		if again, repeated := prepareOn(t, next); repeated.BindingID == payload.BindingID || !reflect.DeepEqual(repeated.Repositories, payload.Repositories) {
+			t.Fatalf("the next connection's session.prepare = %s; want a new binding naming the same repository", again.Data)
+		}
 	}
 	for _, sessionID := range []string{"sesn_path_a", "sesn_path_b"} {
 		if errs := f.sessionErrors(sessionID); len(errs) != 1 || errs[0]["code"] != "repository_path_forbidden" || errs[0]["computer_id"] != "comp_"+sessionID {
@@ -265,8 +286,11 @@ func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	}
 }
 
-// A prepared report preserves each repository failure type and mount failure;
-// replay answers the same ACK and writes no duplicate event.
+// A prepared report preserves each repository failure type and mount failure
+// and leaves the computer ready on its binding, none of the failed
+// repositories covering its working directory; replay answers the same ACK
+// and writes no duplicate event, while the next connection's preparation
+// writes a mount that fails again once more.
 func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli := f.cloudComputer("sesn_failures", true)
@@ -276,7 +300,7 @@ func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 	}
 	stream := f.open(cli)
 	f.acceptReady(cli, stream, "ready_1")
-	prepare, _ := prepareOn(t, stream)
+	prepare, payload := prepareOn(t, stream)
 	withFailures := func(s *protocol.SessionStatus) {
 		prepared("/workspace")(s)
 		s.DriveMountFailures = protocol.Some([]protocol.DriveMountFailure{{DriveID: "drive_a", Error: "mount a failed"}, {DriveID: "drive_b", Error: "mount b failed"}})
@@ -302,6 +326,25 @@ func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 		if err["type"] != "repository_"+cause+"_error" || err["repository_url"] != "https://github.com/acme/"+cause || err["message"] != cause+" failed" || err["retry_status"].(map[string]any)["type"] != "retrying" {
 			t.Fatalf("repository error %s: %v", cause, err)
 		}
+	}
+	if row := f.row(`SELECT execution_state,binding_id FROM computers WHERE id='comp_sesn_failures'`); row["execution_state"] != "ready" || row["binding_id"] != payload.BindingID {
+		t.Fatalf("computer = %v; want ready on %s despite the failures", row, payload.BindingID)
+	}
+
+	// A mount that fails again in the next connection's preparation is
+	// written again.
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID); err != nil {
+		t.Fatal(err)
+	}
+	next := f.open(cli)
+	f.acceptReady(cli, next, "ready_2")
+	again, _ := prepareOn(t, next)
+	acknowledged(t, f.report(cli, again, "status_2", func(s *protocol.SessionStatus) {
+		prepared("/workspace")(s)
+		s.DriveMountFailures = protocol.Some([]protocol.DriveMountFailure{{DriveID: "drive_a", Error: "mount a failed"}})
+	}), "status_2")
+	if errs = f.sessionErrors("sesn_failures"); len(errs) != 8 || errs[7]["type"] != "drive_mount_error" || errs[7]["drive_id"] != "drive_a" || errs[7]["computer_id"] != "comp_sesn_failures" {
+		t.Fatalf("Session errors after the next preparation = %d, last %v; want one more drive_mount_error of drive_a", len(errs), errs[len(errs)-1])
 	}
 }
 

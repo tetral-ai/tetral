@@ -14,11 +14,13 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 )
 
@@ -60,20 +62,26 @@ func TestRuntimeConfigRebuildsPreserveDataBytesWithinCommandFuses(t *testing.T) 
 			high = middle - 1
 		}
 	}
-	installedPolicy := buildInstalledPolicy(low)
-	config, err := runtimeconfig.InstalledConfig(installedPolicy)
-	if err != nil {
-		t.Fatalf("decode maximum policy: %v", err)
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const policySession = "sesn_policy_fuse"
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", policySession, "thr_policy_fuse")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", policySession,
+		`{"name":"agent","model":"anthropic/claude-opus-4-8","system":"Answer in <b>bold</b> & briefly.","tools":[],"mcp_servers":[],"skills":[],"metadata":{}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json=$1 WHERE workspace_id='default' AND id=$2`,
+		buildInstalledPolicy(low), policySession); err != nil {
+		t.Fatalf("install maximum policy: %v", err)
 	}
-	policyPayload, err := runtimecontrol.MarshalDataJSON(map[string]any{
-		"workspace_id":      "default",
-		"session_id":        "sesn_policy_fuse",
-		"config_generation": 1,
-		"approval_mode":     "approve_for_me",
-		"tool_policy":       runtimeconfig.ToolPolicy("approve_for_me", config),
-	})
-	if err != nil {
-		t.Fatalf("marshal rebuilt policy: %v", err)
+	var policyPayload string
+	if err := dbconnect.NewClientForTesting(runtimeDB).WithWorkspaceTx(context.Background(), "default", "test.policy_fuse", func(tx *dbconnect.Tx) error {
+		var err error
+		policyPayload, _, err = runtimeCommandPayloadForJobTx(context.Background(), tx,
+			RuntimeJob{Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: policySession})
+		return err
+	}); err != nil {
+		t.Fatalf("rebuild maximum policy: %v", err)
+	}
+	if !strings.Contains(policyPayload, `"system":"Answer in <b>bold</b> & briefly."`) {
+		t.Fatalf("rebuilt config command does not carry the agent's system prompt as written: %.200s", policyPayload)
 	}
 	assertRuntimeCommandDataPayloadFits(t, policyPayload)
 

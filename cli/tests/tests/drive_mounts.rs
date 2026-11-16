@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::request;
+use tetral_tests::drives::Unmount;
 use tetral_tests::machine::{
     CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, wait_for_received,
 };
@@ -78,23 +79,6 @@ fn free_text_after_shutdown(machine: Machine) -> Vec<String> {
         .filter(|line| serde_json::from_str::<Value>(line).is_err())
         .map(str::to_owned)
         .collect()
-}
-
-/// Lazily unmounts what the App Server left mounted under a directory once
-/// it is killed.
-struct Unmount(std::path::PathBuf);
-
-impl Drop for Unmount {
-    fn drop(&mut self) {
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
-            if Path::new(point).starts_with(&self.0) {
-                let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", "-z", point])
-                    .status();
-            }
-        }
-    }
 }
 
 #[test]

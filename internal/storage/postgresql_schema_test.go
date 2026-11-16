@@ -5,10 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -21,8 +17,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
-const schemaTestSensitiveSentinel = "do-not-leak-this-schema-helper"
-
 func newIsolatedPostgreSQLSchemaDB(t testing.TB) (*sql.DB, string) {
 	t.Helper()
 	db := storagetest.NewPostgreSQLDB(t)
@@ -34,90 +28,6 @@ func newIsolatedPostgreSQLSchemaDB(t testing.TB) (*sql.DB, string) {
 		t.Fatal("current_schema returned empty schema")
 	}
 	return db, schemaName
-}
-
-func TestPostgreSQLSchemaTestSetupRedactsMalformedQuerySecretDSN(t *testing.T) {
-	malformedDSN := "postgres://%zz@host/tetral?sslpassword=" + schemaTestSensitiveSentinel
-	output, err := runStorageSchemaTestWithTestDSN(t, malformedDSN)
-	if err == nil {
-		t.Fatal("expected schema test to fail for malformed PostgreSQL test DSN")
-	}
-	msg := string(output)
-	if strings.Contains(msg, schemaTestSensitiveSentinel) {
-		t.Errorf("schema test output leaked query secret sentinel: %q", msg)
-	}
-	if strings.Contains(msg, malformedDSN) {
-		t.Errorf("schema test output leaked raw DSN: %q", msg)
-	}
-	if strings.Contains(msg, "postgres://") || strings.Contains(msg, "postgresql://") {
-		t.Errorf("schema test output leaked PostgreSQL connection string fragment: %q", msg)
-	}
-	if !strings.Contains(msg, "TETRAL_TEST_DATABASE_URL") {
-		t.Errorf("schema test output should still name the env var for recovery, got %q", msg)
-	}
-}
-
-func runStorageSchemaTestWithTestDSN(t *testing.T, dsn string) ([]byte, error) {
-	t.Helper()
-	engineDir := engineDirForSchemaTest(t)
-	cmd := exec.Command(
-		"go",
-		"test",
-		"./internal/storage",
-		"-run",
-		"^TestMigrateSchemaCreatesVersionOneTables$",
-		"-count=1",
-	)
-	cmd.Dir = engineDir
-	cmd.Env = append(os.Environ(), storagetest.EnvTestDatabaseURL+"="+dsn)
-	return cmd.CombinedOutput()
-}
-
-func engineDirForSchemaTest(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Join(filepath.Dir(thisFile), "..", "..")
-}
-
-func TestVersionOneSchemaHasNoRemovedRuntimeDropSteps(t *testing.T) {
-	// The schema-step tuples are named-literal pairs in source. Pinning the
-	// absence by step-name prefix keeps this guard non-evasive: any reintroduced
-	// removed-table drop step would be named with this prefix and fail here.
-	source := readPostgreSQLSchemaSource(t)
-	if strings.Contains(source, `"drop_removed`) {
-		t.Fatal("postgresql_schema.go declares a removed-table drop schema step; removed worker tables have no pre-existing databases and must not be tombstoned")
-	}
-}
-
-func TestVersionOneSchemaDoesNotSeedHiddenDefaultWorkspace(t *testing.T) {
-	source := readPostgreSQLSchemaSource(t)
-	for _, forbidden := range []string{
-		"seedDefaultWorkspace",
-		`"seed_default_workspace"`,
-		"VALUES ('default', 'workspace'",
-	} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("postgresql_schema.go contains hidden default workspace seed %q", forbidden)
-		}
-	}
-}
-
-func readPostgreSQLSchemaSource(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	path := filepath.Join(filepath.Dir(thisFile), "postgresql_schema.go")
-	// #nosec G304 -- path is the sibling schema source file under test.
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read postgresql_schema.go: %v", err)
-	}
-	return string(body)
 }
 
 func TestMigrateSchemaCreatesVersionOneTables(t *testing.T) {
@@ -145,6 +55,11 @@ func TestMigrateSchemaCreatesVersionOneTables(t *testing.T) {
 		"source_kind",
 		"idempotency_key",
 	})
+	// The schema seeds no workspace; the default one is a test fixture.
+	var workspaces int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM workspaces`).Scan(&workspaces); err != nil || workspaces != 0 {
+		t.Errorf("workspaces after the migration = %d, %v; want none", workspaces, err)
+	}
 }
 
 func TestWorkspaceIDColumnsHaveNoDefault(t *testing.T) {

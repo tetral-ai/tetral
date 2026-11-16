@@ -1,4 +1,4 @@
-//! The end of tasks between `tetral server run`, whose ready advertises
+//! Layer 2. The end of tasks between `tetral server run`, whose ready advertises
 //! `tool_execution`, and the reference control server as separate
 //! processes, each on its own controlled clock, with real restricted
 //! processes: the termination procedure's grace, a cancelled task's report
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, wait_until};
-use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
+use tetral_tests::machine::{INSTANCE, answer_fault, seconds, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
     AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, OUTPUT_ENDED,
@@ -48,31 +48,17 @@ fn detached(tasks: &TaskMachine, task_id: &str, cmd: &str) -> Value {
     tasks.report(task_id, "running")
 }
 
-/// Ends the current connection with a connection-ending `disconnect` and
-/// waits until the App Server has taken its end.
-fn end_connection(tasks: &TaskMachine) {
-    let machine = tasks.machine();
-    let connection = machine.status()["connection_id"].clone();
-    send(
-        &tasks.engine,
-        json!({
-            "protocol_version": 1,
-            "connection_id": connection,
-            "message_id": format!("msg_end_{}", connection.as_str().unwrap()),
-            "type": "disconnect",
-            "payload": { "scope": "connection", "retryable": true, "code": "stale_connection" },
-        }),
-    );
-    machine.wait_for("disconnected");
-}
-
-/// Waits for the next connection to be online once the ended one's lease
-/// has passed and the CLI's clock has moved by `backoff`, and gives its
-/// `connection_id`.
-fn reconnect(tasks: &TaskMachine, backoff: Duration) -> Value {
-    tasks.engine.advance(seconds(46.0));
-    tasks.machine().seams.advance(backoff);
-    tasks.machine().wait_for("online")["connection_id"].clone()
+/// [`detached`] for a `cmd` that sets a trap and then writes to stderr: it
+/// returns once that output has been read, so a signal sent after it finds
+/// the trap set. One sent before would end the shell instead.
+fn trapped(tasks: &TaskMachine, task_id: &str, cmd: &str) -> Value {
+    let output = tasks.machine().seams.count(OUTPUT_READ);
+    let running = detached(tasks, task_id, cmd);
+    tasks
+        .machine()
+        .seams
+        .wait_for_count(OUTPUT_READ, output + 1);
+    running
 }
 
 /// Issues `session.prepare` of `session`'s `binding` at the project and
@@ -160,13 +146,15 @@ fn prepared_once_gone(tasks: &TaskMachine, session: &str, binding: &str) -> Valu
 fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let mut case = record.case("trap 'echo t >> m' TERM; sleep 100; echo after, then a cancel");
+    let mut case = record.case(
+        "trap 'echo t >> m' TERM; echo trapped >&2; sleep 100; echo after, then a cancel once trapped was read",
+    );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
-    detached(
+    trapped(
         &tasks,
         "task_trap",
-        "trap 'echo t >> m' TERM; sleep 100; echo after",
+        "trap 'echo t >> m' TERM; echo trapped >&2; sleep 100; echo after",
     );
     let cancel = tasks.cancel("task_trap", json!({}));
     assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
@@ -199,13 +187,17 @@ fn a_cancelled_task_whose_exit_is_never_observed_reports_no_exit_four_seconds_af
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "trap '' TERM; sleep 1251, then a cancel, with the observation of the launched process's exit held at task.exit_observed",
+        "trap '' TERM; echo trapped >&2; sleep 1251, then a cancel once trapped was read, with the observation of the launched process's exit held at task.exit_observed",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
     let seams = &tasks.machine().seams;
     seams.hold(EXIT_OBSERVED);
-    detached(&tasks, "task_unobserved", "trap '' TERM; sleep 1251");
+    trapped(
+        &tasks,
+        "task_unobserved",
+        "trap '' TERM; echo trapped >&2; sleep 1251",
+    );
     let cancel = tasks.cancel("task_unobserved", json!({}));
     assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
     // The SIGKILL at the end of the grace ends the process, whose exit then
@@ -290,8 +282,8 @@ fn a_connections_end_while_the_availability_check_is_held_discards_the_task_befo
         policy(&tasks.project, "disabled"),
     );
     seams.wait_until_waiting(AVAILABILITY_CHECK, 1);
-    end_connection(&tasks);
-    reconnect(&tasks, seconds(1.2));
+    tasks.end_connection();
+    tasks.reconnect(seconds(1.2));
     // Discarded at the connection's end, the task keeps no Session
     // `cleanup_pending` while its check is still held.
     assert_eq!(
@@ -368,7 +360,7 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     handled(&tasks, "sess_staged", "bind_staged");
 
     let ended = Instant::now();
-    end_connection(&tasks);
+    tasks.end_connection();
     wait_until("every process of the task gone", || {
         !process_running(&["sleep", "1201"])
             && (left_the_group || !process_running(&["sleep", "1202"]))
@@ -377,7 +369,7 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     assert!(took < seconds(2.0), "{took:?}");
     assert_eq!(process_running(&["sleep", "1202"]), left_the_group);
     answer_fault(&tasks.engine, json!({"action": "release"}));
-    reconnect(&tasks, seconds(1.2));
+    tasks.reconnect(seconds(1.2));
     assert!(!tasks.project.join("m").exists());
     assert!(!tasks.project.join("staged").exists());
     case.observe(if left_the_group {
@@ -415,12 +407,23 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
         .engine
         .control("break_stream", json!({ "instance_id": INSTANCE }));
     machine.wait_for("resuming");
+    // Issued while the machine has no stream, it comes with the next one.
+    tasks.execute(
+        "task_queued",
+        json!({"cmd": "echo queued"}),
+        policy(&tasks.project, "disabled"),
+    );
     seams.advance(seconds(1.2));
     let status = machine.wait_for("online");
     assert_eq!(status["connection_id"], connection);
     // A resumed stream's first heartbeat comes right after `connected`; its
     // grant may land after `online`, and is not the advance's.
     seams.wait_for_count("connection.granted", granted + 1);
+    let queued = tasks.terminal("task_queued");
+    assert_eq!(
+        queued["result"]["result"]["stdout"]["text"], "queued\n",
+        "{queued}"
+    );
 
     // The last grant comes at the start of the advance; 30 seconds after
     // it a break, and a resume whose connected event comes 40 seconds after
@@ -459,7 +462,7 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
         json!([result["exit_code"], result["stdout"]["text"]]),
         json!([0, "done\n"])
     );
-    case.observe("the task ran across both resumes and past the deadline of the grant before the late one, and its result arrived");
+    case.observe("the task ran across both resumes and past the deadline of the grant before the late one, and its result arrived; a command issued while the machine had no stream ran once the first resume was online");
     case.pass();
 }
 
@@ -497,7 +500,7 @@ fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_
     });
     // The withheld resume's timeout and the connection's end each doubled
     // the backoff.
-    let fresh = reconnect(&tasks, seconds(4.8));
+    let fresh = tasks.reconnect(seconds(4.8));
     assert_ne!(fresh, connection);
     assert!(!tasks.project.join("m").exists());
     case.observe("the connection ended at its deadline with the resume withheld, which killed the task without SIGTERM (no m); the next connection was a fresh one");
@@ -543,12 +546,12 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
     );
     seams.wait_for_count(REPLY_WAITING, waiting + 1);
     let old = machine.status()["connection_id"].clone();
-    end_connection(&tasks);
+    tasks.end_connection();
     // The SIGKILL at the connection's end ends the processes; the exit waits
     // at the barrier, so the task's ending lasts the 2-second wait after the
     // SIGKILL and its waiting reply is still open on the next connection.
     seams.wait_until_waiting(EXIT_OBSERVED, 1);
-    let new = reconnect(&tasks, seconds(1.2));
+    let new = tasks.reconnect(seconds(1.2));
     assert_eq!(
         prepared(&tasks, "sess_other", "bind_other"),
         json!(["prepared", null])
@@ -762,6 +765,16 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     wait_until("the task's record", || listing(&records).len() == 1);
     let written: Value = serde_json::from_slice(&fs::read(&listing(&records)[0]).unwrap()).unwrap();
     assert_eq!(written["session_id"], SESSION);
+    // The Linux check of a leftover record rests on the recorded process
+    // being the first one of the task's PID namespace, not the sandbox's
+    // launcher outside it.
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string(format!("/proc/{}/status", written["pid"])).unwrap();
+        let ids = status.lines().find_map(|line| line.strip_prefix("NSpid:"));
+        let innermost = ids.and_then(|ids| ids.split_whitespace().last());
+        assert_eq!(innermost, Some("1"), "{ids:?}");
+    }
     tasks.machine().seams.hold(CONFIRMED);
     // Only the command, among the recorded processes, appends to the
     // marker. On Linux they end with the App Server, before the next start,
@@ -814,7 +827,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     case.observe(if cfg!(target_os = "macos") {
         "the command kept appending to the marker after the App Server's SIGKILL; the next start ended the recorded process group, the marker's only writer; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
     } else {
-        "the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
+        "the recorded process had the ID 1 in its PID namespace; that namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
     });
     drop(tasks);
     case.pass();
@@ -863,6 +876,132 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     assert!(outside.0.try_wait().unwrap().is_none());
     case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
     case.pass();
+
+    // On Linux nothing holds a recorded PID namespace open once its App
+    // Server is gone, so a later namespace can take its inode.
+    #[cfg(target_os = "linux")]
+    {
+        drop(outside);
+        drop(tasks);
+        let mut case = record.case(
+            "a record of this boot whose first process has exited, naming the PID namespace of a sleep the test started under bwrap --unshare-pid, written before the App Server starts",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("reused_namespace"));
+        let mut unrelated = Outside(
+            std::process::Command::new("bwrap")
+                .env("PATH", tetral_tests::machine::SYSTEM_PATH)
+                .args(["--unshare-user", "--unshare-pid", "--die-with-parent"])
+                .args(["--ro-bind", "/", "/", "sleep", "1267"])
+                .spawn()
+                .unwrap(),
+        );
+        let bwrap = unrelated.0.id();
+        wait_until("the sleep's PID namespace", || {
+            execution::process::leader(bwrap).is_some()
+        });
+        let namespace = execution::process::leader(bwrap).unwrap().namespace;
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let gone = exited.id();
+        exited.wait().unwrap();
+        let path = tasks
+            .root
+            .join("execution")
+            .join("44444444444444444444444444444444.json");
+        tasks.kill_and_restart(|_| {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "session_id": SESSION, "platform": std::env::consts::OS,
+                    "boot_id": execution::process::boot_id().unwrap(),
+                    "pid": gone, "start_time": 1, "pid_namespace": namespace,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        wait_until("last_error cleared beside the later namespace", || {
+            let cleared = tasks.machine().status()["last_error"].is_null();
+            if !cleared {
+                tasks.machine().seams.advance(millis(100));
+            }
+            cleared
+        });
+        assert!(!path.exists());
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_reused_namespace"),
+            json!(["prepared", null])
+        );
+        assert!(recorded_processes_remain(namespace), "the sleep runs");
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+        case.observe("the record was confirmed at the start although a running process is in a PID namespace with the recorded inode: last_error null, the record gone, the Session prepared, and the sleep still running");
+        case.pass();
+
+        // A recorded first process that still runs is what keeps its record,
+        // so the start has to end it. A task's own processes end with their
+        // App Server, so the test starts this one itself.
+        drop(unrelated);
+        drop(tasks);
+        let mut case = record.case(
+            "a record of this boot naming the running first process of a PID namespace the test started under bwrap --unshare-pid, with a sleep in it, written before the App Server starts",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("running_leader"));
+        let mut left = Outside(
+            std::process::Command::new("bwrap")
+                .env("PATH", tetral_tests::machine::SYSTEM_PATH)
+                .args(["--unshare-user", "--unshare-pid", "--die-with-parent"])
+                .args(["--ro-bind", "/", "/", "sleep", "1268"])
+                .spawn()
+                .unwrap(),
+        );
+        let bwrap = left.0.id();
+        wait_until("the left sleep's PID namespace", || {
+            execution::process::leader(bwrap).is_some()
+        });
+        let leader = execution::process::leader(bwrap).unwrap();
+        let path = tasks
+            .root
+            .join("execution")
+            .join("55555555555555555555555555555555.json");
+        tasks.kill_and_restart(|_| {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "session_id": SESSION, "platform": std::env::consts::OS,
+                    "boot_id": execution::process::boot_id().unwrap(),
+                    "pid": leader.pid, "start_time": leader.start_time,
+                    "pid_namespace": leader.namespace,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        // The bwrap the test started exits once the namespace's first
+        // process, its child, is gone. The record is checked again only
+        // after the clock moves.
+        wait_until("the recorded first process ended", || {
+            left.0.try_wait().unwrap().is_some()
+        });
+        let status = tasks.machine().status();
+        assert_eq!(
+            status["last_error"]["code"], "cleanup_pending",
+            "{status:#}"
+        );
+        assert!(path.exists());
+        wait_until(
+            "last_error cleared after the recorded process ended",
+            || {
+                let cleared = tasks.machine().status()["last_error"].is_null();
+                if !cleared {
+                    tasks.machine().seams.advance(millis(100));
+                }
+                cleared
+            },
+        );
+        assert!(!path.exists());
+        assert!(!process_running(&["sleep", "1268"]));
+        case.observe("the start ended the recorded first process and with it the sleep; last_error stayed cleanup_pending and the record stayed until the next check, then last_error was null and the record gone");
+        case.pass();
+    }
 
     // On macOS a group's members outlive its leader.
     #[cfg(target_os = "macos")]
@@ -1154,8 +1293,8 @@ mod reads_blocked_on_a_mount {
             reads.load(Ordering::SeqCst) > 0
         });
         let checked = tasks.machine().seams.count(GONE_CHECKED);
-        end_connection(&tasks);
-        reconnect(&tasks, seconds(1.2));
+        tasks.end_connection();
+        tasks.reconnect(seconds(1.2));
         // The kill's wait passes with the blocked child still in the task's
         // namespace.
         tasks.machine().seams.advance(seconds(1.0));
@@ -1322,8 +1461,8 @@ mod reads_blocked_on_an_nfs_mount {
         });
         assert!(process_running(&["cat", "mnt/f"]));
         let checked = tasks.machine().seams.count(GONE_CHECKED);
-        end_connection(&tasks);
-        reconnect(&tasks, seconds(1.2));
+        tasks.end_connection();
+        tasks.reconnect(seconds(1.2));
         // macOS ends the NFS wait of a killed thread, so the group is gone
         // when the kill's wait passes.
         tasks.machine().seams.advance(seconds(1.0));

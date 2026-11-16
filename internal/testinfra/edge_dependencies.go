@@ -39,6 +39,7 @@ type edgeDependencyLock struct {
 		Version string `json:"version"`
 		Images  []struct {
 			Component string `json:"component"`
+			Version   string `json:"version"`
 			Reference string `json:"reference"`
 			Digest    string `json:"top_level_digest"`
 		} `json:"images"`

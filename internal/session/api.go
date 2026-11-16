@@ -242,6 +242,19 @@ type ThreadAgentResponse struct {
 	Skills       agent.RawArray         `json:"skills"`
 }
 
+// MarshalJSON writes the tools with their resolved defaults, as the
+// Session's own agent does.
+func (value ThreadAgentResponse) MarshalJSON() ([]byte, error) {
+	tools, err := agent.ProjectToolsetsForResponse(value.Tools)
+	if err != nil {
+		return nil, err
+	}
+	type response ThreadAgentResponse
+	projected := response(value)
+	projected.Tools = tools
+	return json.Marshal(projected)
+}
+
 type ThreadAgentModelConfig struct {
 	ID    string `json:"id"`
 	Speed string `json:"speed,omitempty"`

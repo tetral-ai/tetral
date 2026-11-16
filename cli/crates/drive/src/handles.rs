@@ -61,7 +61,7 @@ impl Owner {
                 OpenOptions::new()
                     .read(true)
                     .write(true)
-                    .open(self.content_path(drive, row.file_id))
+                    .open(self.content_path(drive, &row))
                     .map_err(|_| Errno::IO)?,
             ))
         } else {
@@ -131,11 +131,12 @@ impl Owner {
                 continue;
             };
             if row.content.as_deref() == Some("session") {
-                let path = self
-                    .session_dir
-                    .join("content")
-                    .join(&key.0)
-                    .join(key.1.to_string());
+                let path = crate::ops::session_file(
+                    &self.session_dir,
+                    crate::ops::session_folder(&row.path),
+                    &key.0,
+                    key.1,
+                );
                 open.file = OpenOptions::new()
                     .read(true)
                     .write(true)

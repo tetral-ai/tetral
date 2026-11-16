@@ -119,7 +119,9 @@ fn file(path: &str, content: &str) -> Value {
     })
 }
 
-fn files_page(files: Vec<Value>, has_more: bool, start_seq: Option<i64>) -> ListFilesResponse {
+/// A page of `files` in path order, as Engine lists them.
+fn files_page(mut files: Vec<Value>, has_more: bool, start_seq: Option<i64>) -> ListFilesResponse {
+    files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     let mut page = json!({ "files": files, "has_more": has_more });
     if let Some(seq) = start_seq {
         page["start_seq"] = json!(seq);
@@ -167,10 +169,10 @@ impl Harness {
     fn run(directory: &Path, state: SyncState) -> Harness {
         let (calls, received) = mpsc::unbounded_channel();
         let downloads = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub {
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(drive::transfer::Checked(Arc::new(Stub {
             calls,
             downloads: downloads.clone(),
-        });
+        })));
         let cache = ContentCache::spawn(CacheConfig {
             root: directory.to_path_buf(),
             transfer: transfer.clone(),
@@ -597,9 +599,9 @@ async fn records_follow_the_rules_of_pending_changes_folders_and_excluded_paths(
             (3, None),
             Ok(changes_page(
                 vec![
-                    record(4, 0, "kept/x", Some("remote x")),
-                    record(4, 1, "remote/only", None),
-                    record(4, 2, "local/only", None),
+                    record(4, 0, "remote/only", None),
+                    record(4, 1, "local/only", None),
+                    record(4, 2, "kept/x", Some("remote x")),
                     record(4, 3, "datasets/more", Some("more")),
                     record(4, 4, "link", Some("drive link")),
                 ],
@@ -610,7 +612,7 @@ async fn records_follow_the_rules_of_pending_changes_folders_and_excluded_paths(
     harness.until_applied(4).await;
     let after = harness.row("kept/x").await.unwrap();
     assert_eq!(after.synced_sha256, Some(hash("remote x")));
-    assert_eq!(after.version_id.as_deref(), Some("v4_0"));
+    assert_eq!(after.version_id.as_deref(), Some("v4_2"));
     assert_eq!(
         (
             after.local_sha256,
@@ -802,7 +804,7 @@ async fn a_permanent_list_answer_unmounts_the_drive_and_a_new_listing_starts_cle
         Call::Files { answer, .. } => answer
             .send(Err(Ended::Permanent {
                 status: 403,
-                code: Some("drive_access_denied"),
+                code: "drive_access_denied",
             }))
             .ok()
             .unwrap(),
@@ -821,9 +823,9 @@ async fn a_permanent_list_answer_unmounts_the_drive_and_a_new_listing_starts_cle
     harness
         .changes(
             (2, None),
-            Err(Ended::Permanent {
+            Err(Ended::Invalid {
                 status: 200,
-                code: None,
+                case: "the 2xx answer did not match its schema or its request",
             }),
         )
         .await;

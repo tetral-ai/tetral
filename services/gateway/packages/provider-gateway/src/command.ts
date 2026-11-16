@@ -31,8 +31,11 @@ import {
 import { createProviderTransport } from "./providers/transport.js";
 import { createNatsPreviewPublisher } from "./providers/preview-nats.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
+import type { ProviderClientRegistry } from "./providers/clients.js";
+import type { FetchFunction } from "@ai-sdk/provider-utils";
 import { MaxIdBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
+import type { SQLOpenAIOAuthCredentialRefreshWriterOptions } from "./providers/openai-oauth-refresh.js";
 import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { ProviderGatewayApp } from "./app.js";
@@ -48,6 +51,7 @@ export interface ProviderGatewayCommandDependencies {
   readonly tokenReviewClient: GatewayTokenReviewClient;
   readonly app: ProviderGatewayApp;
   readonly credentialResolver: ProviderCredentialResolver;
+  readonly providerStreamer: ProviderClientRegistry;
   readonly close?: (deadline?: Date) => Promise<void>;
 }
 
@@ -200,6 +204,9 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
   }
 }
 
+/** The codes the quarantine record declares; any other provider error is `provider_error`. */
+const quarantineCodes: ReadonlySet<string> = new Set(Object.keys(providerGatewayDeclarations.events.platform_provider_key_quarantined?.errors ?? {}));
+
 /**
  * Builds the concrete authentication, SQL, credential, provider, attachment,
  * and application dependencies for one provider-gateway process.
@@ -209,9 +216,6 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
  * Reviewer-material validation and platform-pool warming remain application
  * bootstrap work and therefore run when the returned app starts.
  */
-/** The codes the quarantine record declares; any other provider error is `provider_error`. */
-const quarantineCodes: ReadonlySet<string> = new Set(Object.keys(providerGatewayDeclarations.events.platform_provider_key_quarantined?.errors ?? {}));
-
 export async function buildProviderGatewayCommandDependencies(input: {
   readonly config: ProviderGatewayConfig;
   readonly logger: GatewayLogger;
@@ -309,14 +313,11 @@ export async function buildProviderGatewayCommandDependencies(input: {
     masterKeyHex: input.config.vaultKeyHex,
   });
   const providerTransport = createProviderTransport();
-  const providerStreamer = createProviderClientRegistry({
+  const providerStreamer = createCommandProviderStreamer({
+    sql,
+    masterKeyHex: input.config.vaultKeyHex,
     fetch: providerTransport.fetch,
-    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
-    openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
-      sql,
-      masterKeyHex: input.config.vaultKeyHex,
-      fetch: providerTransport.fetch,
-    }),
+    logger: input.logger,
   });
   const attachmentResolver = new BridgeAPIAttachmentResolver({
     address: input.config.bridgeApiGrpcAddress,
@@ -325,9 +326,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
   let previewPublisher;
   try {
     previewPublisher = input.config.previewNats === undefined ? undefined : await createNatsPreviewPublisher(input.config.previewNats, input.logger);
-  } catch {
+  } catch (error) {
     await Promise.allSettled([attachmentResolver.close(), providerTransport.close(), sql.close({ deadline: new Date(Date.now() + 5000) })]);
-    throw new Error("gateway preview credential startup failed");
+    throw new Error("gateway preview credential startup failed", { cause: error });
   }
   const app = createProviderGatewayApp({
     config: input.config,
@@ -349,6 +350,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
     app,
     tokenReviewClient,
     credentialResolver,
+    providerStreamer,
     close: async (deadline) => {
       let failure: unknown;
       let failed = false;
@@ -362,6 +364,27 @@ export async function buildProviderGatewayCommandDependencies(input: {
       if (failed) throw failure;
     },
   };
+}
+
+/**
+ * Builds the command's provider streamer over the shared transport, with
+ * expired OpenAI OAuth credentials refreshed under their SQL row lock.
+ */
+function createCommandProviderStreamer(input: {
+  readonly sql: SQLOpenAIOAuthCredentialRefreshWriterOptions["sql"];
+  readonly masterKeyHex: string;
+  readonly fetch: FetchFunction;
+  readonly logger: GatewayLogger;
+}): ProviderClientRegistry {
+  return createProviderClientRegistry({
+    fetch: input.fetch,
+    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
+    openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
+      sql: input.sql,
+      masterKeyHex: input.masterKeyHex,
+      fetch: input.fetch,
+    }),
+  });
 }
 
 /**

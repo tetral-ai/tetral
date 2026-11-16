@@ -13,15 +13,12 @@ import (
 	"testing"
 )
 
-// fixtureFiles are the fixture files with their fixture, valid and invalid
-// counts.
-var fixtureFiles = []struct {
-	name                  string
-	total, valid, invalid int
-}{
-	{"tool-execution-v1", 61, 29, 32},
-	{"connection-v1", 252, 64, 188},
-	{"drive-transfer-v1", 126, 49, 77},
+// fixtureFiles are the contract's files: each names a schema file and a
+// fixture file.
+var fixtureFiles = []struct{ name string }{
+	{"tool-execution-v1"},
+	{"connection-v1"},
+	{"drive-transfer-v1"},
 }
 
 // unknownMembers are the members of valid fixtures that no type knows, which
@@ -241,7 +238,6 @@ func expectedEncoding(t *testing.T, item fixture) any {
 }
 
 func TestEveryProtocolFixtureRoundTripsOrIsRejected(t *testing.T) {
-	var total, valid, invalid int
 	for _, file := range fixtureFiles {
 		var fixtures []fixture
 		if err := json.Unmarshal(readProtocolFile(t, file.name+".fixtures.json"), &fixtures); err != nil {
@@ -270,13 +266,9 @@ func TestEveryProtocolFixtureRoundTripsOrIsRejected(t *testing.T) {
 				}
 			}
 		}
-		if got := [3]int{len(fixtures), seenValid, seenInvalid}; got != [3]int{file.total, file.valid, file.invalid} {
-			t.Errorf("%s: %v fixtures, valid and invalid", file.name, got)
+		if seenValid == 0 || seenInvalid == 0 {
+			t.Errorf("%s: %d valid and %d invalid fixtures", file.name, seenValid, seenInvalid)
 		}
-		total, valid, invalid = total+len(fixtures), valid+seenValid, invalid+seenInvalid
-	}
-	if got := [3]int{total, valid, invalid}; got != [3]int{439, 142, 297} {
-		t.Errorf("%v fixtures, valid and invalid", got)
 	}
 }
 

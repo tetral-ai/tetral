@@ -51,19 +51,21 @@ mod tests {
 
     #[test]
     fn the_tested_version_is_the_release_upstream_md_pins() {
+        // Every release tag UPSTREAM.md names with a version, wherever it
+        // stands in the document.
         let upstream = include_str!("../../../UPSTREAM.md");
-        let row = upstream
-            .lines()
-            .find(|line| line.starts_with("| cua-driver"))
-            .expect("UPSTREAM.md has a cua-driver row");
-        // The columns are source, origin, pinned version, ...
-        let pinned = row
-            .split(" | ")
-            .nth(2)
-            .and_then(|column| column.strip_prefix("`cua-driver-rs-v"))
-            .and_then(|rest| rest.split('`').next())
-            .expect("the cua-driver row pins a cua-driver-rs-v<version> tag");
-        assert_eq!(CUA_DRIVER_TESTED_VERSION, pinned);
+        let pinned: std::collections::BTreeSet<&str> = upstream
+            .split("cua-driver-rs-v")
+            .skip(1)
+            .map(|rest| {
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit() && c != '.')
+                    .unwrap_or(rest.len());
+                rest[..end].trim_end_matches('.')
+            })
+            .filter(|version| !version.is_empty())
+            .collect();
+        assert_eq!(pinned, [CUA_DRIVER_TESTED_VERSION].into());
     }
 
     #[test]

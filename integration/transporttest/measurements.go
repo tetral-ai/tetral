@@ -52,17 +52,3 @@ func MeasureCompletions(t *testing.T, cohort, receiver, method string, operation
 		t.Fatalf("correctness cohort%s had %d failed operations; durations retained", cohort, failures+warmupFailures)
 	}
 }
-
-// RecordBoundaryCompletion preserves failed-operation durations separately from
-// the successful latency cohorts. These controls prove finite completion, not
-// a percentile or capacity estimate.
-func RecordBoundaryCompletion(t *testing.T, receiver, method, boundary string, start time.Time, err error) {
-	t.Helper()
-	end := time.Now()
-	outcome := "success"
-	if err != nil {
-		outcome = status.Code(err).String()
-	}
-	data, _ := json.Marshal(map[string]any{"receiver": receiver, "method": method, "boundary": boundary, "startOffsetNs": int64(0), "endOffsetNs": end.Sub(start).Nanoseconds(), "durationNs": end.Sub(start).Nanoseconds(), "outcome": outcome, "attempted": 1, "failed": err != nil})
-	t.Logf("boundary_completion %s", data)
-}

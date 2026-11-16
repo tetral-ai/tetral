@@ -10,12 +10,8 @@ use protocol::errors::{self, DriveTransferEndpoint};
 use protocol::{Answer, DecodeError, Message, connection, decode, decode_answer, encode, tool};
 use serde_json::{Value, json};
 
-/// The fixture files with their fixture, valid and invalid counts.
-pub const FILES: [(&str, usize, usize, usize); 3] = [
-    ("tool-execution-v1", 61, 29, 32),
-    ("connection-v1", 252, 64, 188),
-    ("drive-transfer-v1", 126, 49, 77),
-];
+/// The contract's files: each names a schema file and a fixture file.
+pub const FILES: [&str; 3] = ["tool-execution-v1", "connection-v1", "drive-transfer-v1"];
 
 fn protocol_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol")
@@ -48,7 +44,7 @@ impl Retrieve for SchemaFiles {
 pub fn validator(file: &str, pointer: &str) -> Validator {
     let files = FILES
         .iter()
-        .map(|(name, ..)| {
+        .map(|name| {
             let name = format!("{name}.schema.json");
             let schema = read_json(&name);
             (name, schema)

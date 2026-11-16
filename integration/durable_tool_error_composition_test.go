@@ -3,9 +3,6 @@ package integration
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"os"
-	"os/exec"
 	"testing"
 	"time"
 
@@ -17,51 +14,6 @@ import (
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
-
-func runRuntimeProviderComposition(t *testing.T, contextJSON string) []json.RawMessage {
-	t.Helper()
-	input, err := json.Marshal(map[string]any{"contextJson": contextJSON, "providerComposition": true})
-	if err != nil {
-		t.Fatalf("encode Runtime provider composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/runtime-provider-composition.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write Runtime provider composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
-	command.Dir = "../services/agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Runtime provider composition: %v: %s", err, output)
-	}
-	var result struct {
-		ProviderComposition struct {
-			Strategies []struct {
-				ProviderFamily string `json:"providerFamily"`
-				Validation     struct {
-					Ok bool `json:"ok"`
-				} `json:"validation"`
-				ProviderRequest json.RawMessage `json:"providerRequest"`
-			} `json:"strategies"`
-		} `json:"providerComposition"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode Runtime provider composition: %v: %s", err, output)
-	}
-	requests := make([]json.RawMessage, 0, len(result.ProviderComposition.Strategies))
-	for _, strategy := range result.ProviderComposition.Strategies {
-		if !strategy.Validation.Ok || len(strategy.ProviderRequest) == 0 {
-			t.Fatalf("Runtime Provider composition for %s was invalid or absent: %s", strategy.ProviderFamily, output)
-		}
-		requests = append(requests, strategy.ProviderRequest)
-	}
-	if len(requests) == 0 {
-		t.Fatal("Runtime Provider composition returned no strategies")
-	}
-	return requests
-}
 
 func settleSandboxExecutionForHotReceiptProof(
 	t *testing.T,

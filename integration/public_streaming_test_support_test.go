@@ -1,14 +1,10 @@
 package integration
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,7 +113,7 @@ func (r *publicReadObserver) ListRequestFinalMessages(ctx context.Context, scope
 
 type publicStreamingHarness struct {
 	*contentE2E
-	client  *contentSDKChild
+	client  *publicDeveloper
 	broker  testinfra.NATSFixture
 	tap     *publicFrameTap
 	metrics *eventstream.PreviewMetrics
@@ -177,7 +173,7 @@ func newPublicStreamingHarness(t *testing.T, scenario string, options publicStre
 		runtime["approvalMode"] = options.approval
 	}
 	h.contentE2E = startContentE2EWithOptions(t, scenario, false, false, contentE2EOptions{Budget: 300 * time.Second, Gateway: gateway, Runtime: runtime, Provider: options.provider, ApprovalMode: options.approval, PublicEdge: func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
-		return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
+		return startContentPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
 			if options.eventsFactory != nil {
 				return options.eventsFactory(t, pools, reader, verifier, publicKey)
 			}
@@ -191,9 +187,9 @@ func newPublicStreamingHarness(t *testing.T, scenario string, options publicStre
 			return handler
 		})
 	}})
-	h.client = startPublicStreamingSDK(t, h.baseURL, h.apiKey)
-	// LIFO closes all active readers before httptest waits for active handlers.
-	t.Cleanup(func() { h.client.control(t, "close", nil) })
+	// Created last, the developer closes its streams before httptest waits
+	// for the handlers that serve them.
+	h.client = newPublicDeveloper(t, h.baseURL, h.apiKey)
 	return h
 }
 func publicPublisherConfig(b testinfra.NATSFixture) map[string]any {
@@ -203,128 +199,21 @@ func publicPublisherConfig(b testinfra.NATSFixture) map[string]any {
 	}
 	return result
 }
-func startPublicStreamingSDK(t *testing.T, baseURL, key string, caPaths ...string) *contentSDKChild {
-	t.Helper()
-	sdk := os.Getenv("TETRAL_ENGINE_SDK_ROOT")
-	if sdk == "" {
-		t.Fatal("public streaming requires the declared immutable SDK checkout")
-	}
-	sdk, err := filepath.Abs(sdk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := t.TempDir()
-	source, err := os.ReadFile("testdata/public-streaming-client.ts")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// #nosec G703 -- fixed fixture basename under the test-owned private temporary directory.
-	if err = os.WriteFile(filepath.Join(directory, "public-streaming-client.ts"), source, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Symlink(sdk, filepath.Join(directory, "sdk")); err != nil {
-		t.Fatal(err)
-	}
-	values := map[string]string{"baseURL": baseURL, "apiKey": key}
-	if len(caPaths) != 0 && caPaths[0] != "" {
-		values["caPath"] = caPaths[0]
-	}
-	bootstrap, err := json.Marshal(values)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config := filepath.Join(directory, "bootstrap.json")
-	if err = os.WriteFile(config, bootstrap, 0600); err != nil {
-		t.Fatal(err)
-	}
-	child := &contentSDKChild{lines: make(chan []byte, 8), joined: make(chan error, 1)}
-	child.command = exec.Command("bun", filepath.Join(directory, "public-streaming-client.ts"), config) //nolint:gosec // Run-owned fixture and private credential path.
-	child.command.Dir = directory
-	child.command.Stderr = &child.output
-	child.input, err = child.command.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := child.command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = child.command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 4096), 72*1024*1024)
-		for scanner.Scan() {
-			child.lines <- append([]byte(nil), scanner.Bytes()...)
-		}
-		close(child.lines)
-	}()
-	go func() { child.joined <- child.command.Wait() }()
-	t.Cleanup(func() { child.stop(t) })
-	return child
-}
-
-type publicSDKSnapshot struct {
-	Events     []map[string]any `json:"events"`
-	Fields     []string         `json:"fieldNames"`
-	Heartbeats int              `json:"heartbeats"`
-	Ended      bool             `json:"ended"`
-	Error      *string          `json:"error"`
-}
-
 func (h *publicStreamingHarness) open(t *testing.T, name string, deltas []string, thread string) {
 	t.Helper()
-	args := map[string]any{"viewer": name, "sessionId": h.session}
-	if deltas != nil {
-		args["eventDeltas"] = deltas
-	}
-	if thread != "" {
-		args["threadId"] = thread
-	}
-	raw := h.client.control(t, "open", args)
-	var opened struct {
-		Requests []struct {
-			Path  string      `json:"path"`
-			Query [][2]string `json:"query"`
-		} `json:"requests"`
-	}
-	if json.Unmarshal(raw, &opened) != nil || len(opened.Requests) != 1 {
-		t.Fatal("SDK did not expose one exact public request")
-	}
-	var observed []string
-	beta := false
-	for _, pair := range opened.Requests[0].Query {
-		if pair[0] == "event_deltas[]" {
-			observed = append(observed, pair[1])
-		}
-		if pair[0] == "beta" && pair[1] == "true" {
-			beta = true
-		}
-	}
-	if !beta || strings.Join(observed, ",") != strings.Join(deltas, ",") {
-		t.Fatalf("SDK query contract mismatch: %v", opened.Requests[0].Query)
-	}
+	h.client.open(t, name, h.session, deltas, thread)
 }
-func (h *publicStreamingHarness) snapshot(t *testing.T, name string) publicSDKSnapshot {
+func (h *publicStreamingHarness) snapshot(t *testing.T, name string) publicSnapshot {
 	t.Helper()
-	return decodePublicSnapshot(t, h.client.control(t, "snapshot", map[string]any{"viewer": name}))
+	return h.client.snapshot(t, name)
 }
-func (h *publicStreamingHarness) waitEvent(t *testing.T, name, eventType string, count int) publicSDKSnapshot {
+func (h *publicStreamingHarness) waitEvent(t *testing.T, name, eventType string, count int) publicSnapshot {
 	t.Helper()
-	return decodePublicSnapshot(t, h.client.control(t, "wait_event", map[string]any{"viewer": name, "eventType": eventType, "count": count}))
-}
-func decodePublicSnapshot(t *testing.T, raw []byte) publicSDKSnapshot {
-	t.Helper()
-	var result publicSDKSnapshot
-	if json.Unmarshal(raw, &result) != nil || result.Error != nil {
-		t.Fatal("SDK stream capture failed")
-	}
-	return result
+	return h.client.waitEvent(t, name, eventType, count)
 }
 func (h *publicStreamingHarness) send(t *testing.T) {
 	t.Helper()
-	h.client.control(t, "send", map[string]any{"sessionId": h.session, "text": "fixed public streaming input"})
+	h.client.send(t, h.session, "fixed public streaming input")
 }
 func (h *publicStreamingHarness) releaseFragments(t *testing.T, count int) {
 	t.Helper()
@@ -400,9 +289,9 @@ func publicText(event map[string]any) string {
 }
 func publicLogAssertion(t *testing.T, name string) {
 	t.Helper()
-	t.Logf("public_streaming_sdk_assertion=%s passed=true", name)
+	t.Logf("public_streaming_assertion=%s passed=true", name)
 }
-func (h *publicStreamingHarness) assertFormal(t *testing.T, snapshot publicSDKSnapshot, expected []string) {
+func (h *publicStreamingHarness) assertFormal(t *testing.T, snapshot publicSnapshot, expected []string) {
 	t.Helper()
 	var texts []string
 	var messageIDs []string
@@ -424,12 +313,7 @@ func (h *publicStreamingHarness) assertFormal(t *testing.T, snapshot publicSDKSn
 	for _, id := range messageIDs {
 		var count int
 		if err := h.db.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND event_id=$2 AND type='agent.message'`, h.session, id).Scan(&count); err != nil || count != 1 {
-			t.Fatal("SDK formal identity lacks one original SQL event")
-		}
-	}
-	for _, name := range snapshot.Fields {
-		if name != "event" && name != "data" {
-			t.Fatalf("unexpected SSE field %q", name)
+			t.Fatal("formal identity lacks one original SQL event")
 		}
 	}
 	publicLogAssertion(t, "formal-original-identities-content-end-order")

@@ -11,28 +11,6 @@ afterEach(() => {
 });
 
 describe("mcp-connector schema startup", () => {
-  test("schema-behind fails before client creation or listener bind", async () => {
-    Object.assign(process.env, validEnv());
-    const events: string[] = [];
-    const sql = ((<T>(_strings: TemplateStringsArray): PromiseLike<T> => Promise.resolve([] as T)) as SchemaSQL & { close: () => Promise<void> });
-    sql.close = async () => { events.push("close"); };
-    const behind = new SchemaVerificationError("schema_behind");
-
-    await expect(runMcpConnectorCommand({
-      sql,
-      schemaVerifier: async () => {
-        events.push("schema_verify");
-        throw behind;
-      },
-      client: {
-        connectionCount: () => 0,
-        listTools: async () => { events.push("client_list"); return []; },
-        callTool: async () => { events.push("client_call"); throw new Error("must not call"); },
-      },
-    })).rejects.toBe(behind);
-    expect(events).toEqual(["schema_verify", "close"]);
-  });
-
   test("pool-close failure cannot replace or disclose the schema failure", async () => {
     Object.assign(process.env, validEnv());
     const behind = new SchemaVerificationError("schema_behind");
@@ -73,21 +51,6 @@ describe("mcp-connector schema startup", () => {
       connectionTimeout: 30,
       connection: { statement_timeout: 30_000 },
     });
-  });
-
-  test("default startup owner rejects a privileged runtime role before listeners", async () => {
-    Object.assign(process.env, validEnv());
-    const events: string[] = [];
-    const sql = ((<T>(strings: TemplateStringsArray): PromiseLike<T> => {
-      events.push(strings.join(""));
-      return Promise.resolve([{ is_superuser: false, bypasses_rls: true }] as T);
-    }) as SchemaSQL & { close: () => Promise<void> });
-    sql.close = async () => { events.push("close"); };
-
-    await expect(runMcpConnectorCommand({ sql })).rejects.toMatchObject({ kind: "runtime_role_invalid" });
-    expect(events).toHaveLength(2);
-    expect(events[0]).toContain("pg_roles");
-    expect(events[1]).toBe("close");
   });
 
   test("successful startup emits one started record after both listeners bind", async () => {

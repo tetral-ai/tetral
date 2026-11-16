@@ -11,7 +11,8 @@
 //! entries of tasks, kept until a resume or freed by each ACK, also of an
 //! instruction that joined a task, and, with
 //! only the ledger's reserve free, new tasks refused while a running task's
-//! controls, its binding's close and its report are recorded. The seam
+//! controls, its binding's close and its report are recorded; and a resume
+//! on which the server sends a full ledger again at once. The seam
 //! counters these tests read are those `tetral_tests::machine` and
 //! `tetral_tests::tasks` name, and `connection.final_acked`, counted after
 //! the Connection owner applies an instruction's final ACK to its ledger.
@@ -229,10 +230,12 @@ fn an_event_of_up_to_4_259_840_bytes_is_read_and_a_larger_one_closes_the_stream_
     assert_eq!(machine.state(), "online");
     case.observe("an event of 4,259,840 bytes was read and routed; the stream stayed open");
 
-    engine.control(
-        "send",
-        json!({"instance_id": INSTANCE, "data": execute_event_of("msg_over_limit", 4_259_841)}),
-    );
+    engine.outside_contract(|| {
+        engine.control(
+            "send",
+            json!({"instance_id": INSTANCE, "data": execute_event_of("msg_over_limit", 4_259_841)}),
+        )
+    });
     machine.wait_for("resuming");
     machine.settle();
     assert_eq!(machine.routed(), routed + 1);
@@ -250,12 +253,14 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
     let directory = tempfile::tempdir().unwrap();
     let (engine, _machine) = online_with_tools(&mut case, directory.path());
 
-    let execute = report_of(
-        &engine,
-        "execute",
-        json!({"payload": edit_with_input_of("input_over", 4_194_305)}),
-        1,
-    );
+    let execute = engine.outside_contract(|| {
+        report_of(
+            &engine,
+            "execute",
+            json!({"payload": edit_with_input_of("input_over", 4_194_305)}),
+            1,
+        )
+    });
     assert_eq!(
         (&execute["phase"], &execute["error"]["code"]),
         (&json!("rejected"), &json!("invalid_input"))
@@ -270,16 +275,19 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
             "chars of 32,768 U+0000, escaped to six bytes each",
             json!({"payload": stdin("worst_case", "\u{0}".repeat(32_768))}),
             "task_not_found",
+            false,
         ),
         (
             "chars of 32,769 bytes",
             json!({"payload": stdin("one_over", "x".repeat(32_769))}),
             "invalid_input",
+            true,
         ),
         (
             "chars of 11,264 three-byte characters, 33,792 bytes",
             json!({"payload": stdin("characters", "中".repeat(11_264))}),
             "invalid_input",
+            true,
         ),
         (
             "a read whose envelope carries 65,536 bytes of an unknown member",
@@ -288,10 +296,17 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
                 "extra": {"extension": "x".repeat(65_536)},
             }),
             "invalid_input",
+            true,
         ),
     ];
-    for (index, (name, input, code)) in rows.into_iter().enumerate() {
-        let report = report_of(&engine, "stdin", input, index + 2);
+    // The last member says which rows the protocol's decoder refuses.
+    for (index, (name, input, code, outside_contract)) in rows.into_iter().enumerate() {
+        let issue = || report_of(&engine, "stdin", input, index + 2);
+        let report = if outside_contract {
+            engine.outside_contract(issue)
+        } else {
+            issue()
+        };
         assert_eq!(
             (&report["kind"], &report["error"]["code"]),
             (&json!("control"), &json!(code)),
@@ -300,14 +315,16 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
         case.observe(format!("tool.stdin with {name}: the control error {code}"));
     }
 
-    issue_of_size(
-        &engine,
-        "cancel",
-        "tool.cancel",
-        "msg_cancel_over",
-        identities("cancel_over"),
-        65_537,
-    );
+    engine.outside_contract(|| {
+        issue_of_size(
+            &engine,
+            "cancel",
+            "tool.cancel",
+            "msg_cancel_over",
+            identities("cancel_over"),
+            65_537,
+        )
+    });
     let received = wait_for_received(&engine, "tool-status", 6);
     let cancel = received
         .iter()
@@ -319,14 +336,16 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
     );
     case.observe("a tool.cancel of 65,537 bytes: the control error invalid_input");
 
-    issue_of_size(
-        &engine,
-        "close",
-        "session.close",
-        "msg_close_over",
-        json!({"session_id": "sess_unprepared", "binding_id": "bind_unprepared"}),
-        65_537,
-    );
+    engine.outside_contract(|| {
+        issue_of_size(
+            &engine,
+            "close",
+            "session.close",
+            "msg_close_over",
+            json!({"session_id": "sess_unprepared", "binding_id": "bind_unprepared"}),
+            65_537,
+        )
+    });
     let errors = wait_for_received(&engine, "protocol-error", 1);
     assert_eq!(
         (
@@ -628,8 +647,27 @@ fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_ta
     // Registered no more, the same instruction is judged again, not joined.
     let second = execute();
     assert_eq!(rejection(&tasks.answer_to(&second)), unavailable);
+    // Each call is judged on its own, whichever Session it belongs to.
+    for (session, binding, task) in [
+        ("sess_held", "bind_held", "task_third"),
+        (SESSION, BINDING, "task_other_session"),
+    ] {
+        let message_id = tasks.execute_with(
+            session,
+            binding,
+            task,
+            json!({"cmd": "touch ran"}),
+            policy.clone(),
+            None,
+        );
+        assert_eq!(
+            rejection(&tasks.answer_to(&message_id)),
+            unavailable,
+            "{task}"
+        );
+    }
     assert!(!tasks.project.join("ran").exists());
-    case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again was rejected again; nothing ran");
+    case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again, a third call of the Session and a call of another Session were each rejected sandbox_unavailable; nothing ran");
     case.pass();
 }
 
@@ -898,6 +936,255 @@ fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack
     );
     assert_eq!(tasks.engine.requests("events").len(), 1);
     case.observe("5,000 terminal reports with status success on the connection's one stream");
+    case.pass();
+}
+
+// On macOS its 4,030 Seatbelt launches of the debug build take minutes, so
+// scripts/verify-cli.py runs it there in a profile of its own.
+#[test]
+fn a_resume_that_resends_a_full_ledger_at_once_runs_no_instruction_again_and_keeps_its_stream() {
+    const FILL: usize = 4_030;
+    const FILL_SESSION: &str = "sess_fill";
+    const FILL_BINDING: &str = "bind_fill";
+
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a command held until released, 4,030 commands of another Session whose terminal reports the server answers 503, and a command to cancel: 4,032 ledger places taken",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let machine = tasks.machine();
+    let seams = &machine.seams;
+    let policy = project_policy(&tasks.project, "disabled");
+    let lines = |file: &str| {
+        fs::read_to_string(tasks.project.join(file))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let refused = || {
+        tasks
+            .engine
+            .requests("tool-status")
+            .iter()
+            .filter(|request| request["status"] == 503)
+            .count()
+    };
+    let rejection = |message_id: &str| {
+        let report = tasks.answer_to(message_id);
+        json!([report["phase"], report["error"]["code"]])
+    };
+    let exhausted = json!(["rejected", "resource_exhausted"]);
+    for (session, binding) in [(FILL_SESSION, FILL_BINDING), ("sess_closed", "bind_closed")] {
+        let prepared = tasks.prepare(session, binding, &tasks.project, None);
+        tasks.wait_prepared(&prepared);
+    }
+    let connection = machine.status()["connection_id"].clone();
+
+    let checked = seams.count(WAIT_CHECKED);
+    tasks.execute(
+        "task_held",
+        json!({
+            "cmd": "echo started >> held.starts; while [ ! -e held.release ]; do sleep 0.05; done; echo finished",
+            "wait_ms": 250, "on_wait_expiry": "detach",
+        }),
+        policy.clone(),
+    );
+    tasks.wait_for_start(checked);
+    seams.advance(millis(250));
+    tasks.report("task_held", "running");
+    tasks.answers_settled();
+
+    answer_fault(
+        &tasks.engine,
+        json!({
+            "endpoint": "tool-status", "session_id": FILL_SESSION, "action": "error",
+            "code": "unavailable", "status": 503, "count": 1_000_000,
+        }),
+    );
+    let fill = |index: usize| {
+        tasks.execute_with(
+            FILL_SESSION,
+            FILL_BINDING,
+            &format!("task_fill_{index}"),
+            json!({"cmd": format!("echo {index} >> fill.log")}),
+            policy.clone(),
+            None,
+        );
+    };
+    let started = std::time::Instant::now();
+    // Each chunk has run before the next is issued, so that the machine
+    // never runs more than a chunk's commands at once.
+    for chunk in (0..FILL).collect::<Vec<_>>().chunks(64) {
+        chunk.iter().copied().for_each(fill);
+        let through = chunk[chunk.len() - 1] + 1;
+        wait_until(&format!("{through} lines in fill.log"), || {
+            lines("fill.log") == through
+        });
+    }
+    wait_until("a refused terminal report of every filling command", || {
+        refused() >= FILL
+    });
+    let filled = started.elapsed();
+    tasks.execute(
+        "task_cancelled",
+        json!({"cmd": "echo $$ > cancelled.pid; exec sleep 600", "wait_ms": 50_000}),
+        policy.clone(),
+    );
+    wait_until("the command to cancel running", || {
+        lines("cancelled.pid") == 1
+    });
+    assert!(
+        tasks
+            .engine
+            .received("tool-status")
+            .iter()
+            .all(|report| report["body"]["session_id"] != FILL_SESSION),
+        "a report of a filling command was accepted"
+    );
+    case.observe(format!(
+        "the {FILL} commands each appended their line to fill.log and the server answered {} reports 503 and accepted none of them, {:.0?} after the first was issued",
+        refused(),
+        filled
+    ));
+    case.pass();
+
+    let mut case = record.case("with the 4,032 places taken: another command and a cancel");
+    let probe = tasks.execute(
+        "task_probe",
+        json!({"cmd": "touch probe.ran"}),
+        policy.clone(),
+    );
+    assert_eq!(rejection(&probe), exhausted);
+    let cancel = tasks.cancel("task_cancelled", json!({}));
+    assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
+    assert_eq!(
+        tasks.terminal("task_cancelled")["result"]["result"]["cancelled"],
+        true
+    );
+    assert!(!tasks.project.join("probe.ran").exists());
+    assert_eq!(machine.status()["connection_id"], connection);
+    case.observe("the command was rejected resource_exhausted and did not run; the cancel was answered cancelled and the cancelled command's terminal report accepted, on the same connection");
+    case.pass();
+
+    let mut case = record.case("a resume of the connection, on which the server sends the held command and the 4,030 again at once");
+    tasks.answers_settled();
+    let started = std::time::Instant::now();
+    tasks.resume();
+    let resent = || {
+        tasks.engine.state()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["stream"] == 2 && event["type"] == "tool.execute")
+            .count()
+    };
+    wait_until("the instructions sent again", || resent() == FILL + 1);
+    // Routed after the burst, its reply shows the burst read.
+    tasks.handled(SESSION, BINDING);
+    let burst = started.elapsed();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!((lines("held.starts"), lines("fill.log")), (1, FILL));
+    let status = machine.status();
+    assert_eq!(
+        (&status["connection_state"], &status["connection_id"]),
+        (&json!("online"), &connection)
+    );
+    assert_eq!(tasks.engine.requests("events").len(), 2);
+    case.observe(format!(
+        "the resumed stream carried {} tool.execute events; {burst:.0?} after the resume the App Server had read them all, held.starts has 1 line and fill.log {FILL}, and it is online on the same connection with no third events request",
+        resent()
+    ));
+    case.pass();
+
+    let mut case = record.case("the held command released; then two more commands and a third");
+    // The cancelled command's entry is free; the held command's is once its
+    // terminal report's ACK is applied.
+    tasks.answers_settled();
+    let acked = seams.count("connection.final_acked");
+    fs::write(tasks.project.join("held.release"), "").unwrap();
+    let terminal = tasks.terminal("task_held");
+    assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
+    seams.wait_for_count("connection.final_acked", acked + 1);
+    for index in [FILL, FILL + 1] {
+        fill(index);
+        wait_until(&format!("{} lines in fill.log", index + 1), || {
+            lines("fill.log") == index + 1
+        });
+    }
+    let third = tasks.execute(
+        "task_third",
+        json!({"cmd": "touch third.ran"}),
+        policy.clone(),
+    );
+    assert_eq!(rejection(&third), exhausted);
+    assert!(!tasks.project.join("third.ran").exists());
+    let closing = tasks.engine.control(
+        "close",
+        json!({"instance_id": INSTANCE, "payload": {"session_id": "sess_closed", "binding_id": "bind_closed"}}),
+    )["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_until("the closed report of the third Session", || {
+        tasks
+            .engine
+            .received("session-status")
+            .iter()
+            .any(|report| {
+                report["body"]["request_message_id"] == closing.as_str()
+                    && report["body"]["status"] == "closed"
+            })
+    });
+    case.observe("the held command ended with exit 0; the ledger took exactly two more commands and the next was rejected resource_exhausted; the close of the third Session was reported closed");
+    case.pass();
+
+    let mut case = record.case("the server accepting the reports it refused, and a command of the Session closed and prepared again");
+    answer_fault(&tasks.engine, json!({"action": "clear"}));
+    let accepted = || {
+        tasks
+            .engine
+            .received("tool-status")
+            .iter()
+            .filter(|report| report["body"]["session_id"] == FILL_SESSION)
+            .count()
+    };
+    // The reports wait by their retry backoff, which doubles from 1 second
+    // to 30.
+    let started = std::time::Instant::now();
+    tasks.advance_until(
+        "every refused report accepted",
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(120),
+        || accepted() == FILL + 2,
+    );
+    let prepared = tasks.prepare("sess_closed", "bind_again", &tasks.project, None);
+    tasks.wait_prepared(&prepared);
+    let after = tasks.execute_with(
+        "sess_closed",
+        "bind_again",
+        "task_after",
+        json!({"cmd": "echo after"}),
+        policy,
+        None,
+    );
+    let report = tasks.answer_to(&after);
+    assert_eq!(
+        json!([
+            report["phase"],
+            report["result"]["result"]["stdout"]["text"]
+        ]),
+        json!(["terminal", "after\n"]),
+        "{report}"
+    );
+    assert_eq!((lines("held.starts"), lines("fill.log")), (1, FILL + 2));
+    assert_eq!(machine.status()["connection_id"], connection);
+    case.observe(format!(
+        "the {} terminal reports were accepted {:.0?} after the faults were cleared; the new binding was prepared and its command printed after; fill.log still has one line for each command",
+        FILL + 2,
+        started.elapsed()
+    ));
     case.pass();
 }
 

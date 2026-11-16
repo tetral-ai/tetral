@@ -90,7 +90,7 @@ func (cfg RouterConfig) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, r, err)
 		return
 	}
-	writeAuthJSON(w, http.StatusOK, result)
+	writeAuthJSON(w, r, http.StatusOK, result)
 }
 
 func (cfg RouterConfig) listAPIKeys(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +135,7 @@ func (cfg RouterConfig) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		nextPage = &token
 	}
-	writeAuthJSON(w, http.StatusOK, apiKeyListResponse{Data: keys, NextPage: nextPage})
+	writeAuthJSON(w, r, http.StatusOK, apiKeyListResponse{Data: keys, NextPage: nextPage})
 }
 
 func (cfg RouterConfig) deleteAPIKey(w http.ResponseWriter, r *http.Request) {

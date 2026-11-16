@@ -91,20 +91,38 @@ func TestTheReportValueLimitFollowsTheSharedCases(t *testing.T) {
 	}
 }
 
-func TestUnknownFieldsShareTheEnvelopesNestingBudget(t *testing.T) {
-	for _, arrays := range []int{126, 127} {
-		nested := strings.Repeat("[", arrays) + "0" + strings.Repeat("]", arrays)
-		message := []byte(`{"protocol_version":1,"connection_id":"c","message_id":"m","request_message_id":"r","heartbeat_seq":1,"extension":` + nested + `}`)
-		decoded, err := Decode[Heartbeat](message)
-		if arrays == 126 {
-			if err != nil || decoded.HeartbeatSeq != 1 {
-				t.Fatalf("127 total levels: %+v, %v", decoded, err)
-			}
-		} else {
-			var refused *DecodeError
-			if !errors.As(err, &refused) || refused.Kind != Strict || refused.Strict.Kind != TooDeep {
-				t.Fatalf("128 total levels: %v", err)
-			}
+// Each case of protocol/nesting.cases.json, which the CLI's and Engine's
+// readers share, reaches its outcome through its message's decoder: 127
+// levels are accepted and any deeper text is refused, in a forwarded member as
+// in an unknown one.
+func TestTheNestingLimitFollowsTheSharedCases(t *testing.T) {
+	var cases []struct {
+		Name, Message, Prefix, Open, Innermost, Close, Suffix, Outcome string
+		Times                                                          int
+	}
+	if err := json.Unmarshal(readProtocolFile(t, "nesting.cases.json"), &cases); err != nil || len(cases) == 0 {
+		t.Fatalf("%d cases, %v", len(cases), err)
+	}
+	for _, c := range cases {
+		input := []byte(c.Prefix + strings.Repeat(c.Open, c.Times) + c.Innermost + strings.Repeat(c.Close, c.Times) + c.Suffix)
+		var err error
+		switch c.Message {
+		case "McpTools":
+			_, err = Decode[MCPTools](input)
+		default:
+			t.Fatalf("%s: no decoder for %s", c.Name, c.Message)
+		}
+		var refused *DecodeError
+		outcome := "accepted"
+		switch {
+		case errors.As(err, &refused) && refused.Kind == Strict && refused.Strict.Kind == TooDeep:
+			outcome = "too_deep"
+		case err != nil:
+			t.Errorf("%s: refused otherwise: %v", c.Name, err)
+			continue
+		}
+		if outcome != c.Outcome {
+			t.Errorf("%s: %s, want %s", c.Name, outcome, c.Outcome)
 		}
 	}
 }

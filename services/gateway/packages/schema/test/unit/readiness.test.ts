@@ -90,6 +90,35 @@ describe("PostgreSQL startup readiness", () => {
 		}
 	});
 
+	test("names a refusal the server answered by its check, and a failure to reach the database as such", async () => {
+		const answered = () => Object.assign(new Error("server refused the query"), { code: "ERR_POSTGRES_SERVER_ERROR", errno: "42501" });
+		const unreachable = Object.assign(new Error("Connection closed"), { code: "ERR_POSTGRES_CONNECTION_CLOSED" });
+		const checks = ["runtime_role_invalid", "schema_history_malformed", "schema_history_malformed", "schema_rls_drift", "schema_rls_drift"];
+		for (const [failing, kind] of checks.entries()) {
+			const failingAt = (error: Error): SchemaSQL => {
+				const healthy = readinessSQL();
+				let query = 0;
+				return ((...args: Parameters<SchemaSQL>) => (query++ === failing ? Promise.reject(error) : healthy(...args))) as SchemaSQL;
+			};
+			await expect(verifyPostgreSQLReadiness(failingAt(answered()))).rejects.toMatchObject({ kind });
+			const failure = await verifyPostgreSQLReadiness(failingAt(unreachable)).catch((error: unknown) => error);
+			expect(failure).not.toBeInstanceOf(SchemaVerificationError);
+			expect(failure).toMatchObject({ message: "postgresql database could not be reached (ERR_POSTGRES_CONNECTION_CLOSED)" });
+		}
+	});
+
+	test("names a connection the server refused as a database that could not be reached, by its SQLSTATE", async () => {
+		// A wrong password or role (28P01, 28000), a missing database (3D000), a
+		// server still starting (57P03), a connection fault (08006) and a server
+		// out of connections (53300).
+		for (const errno of ["28P01", "28000", "3D000", "57P03", "08006", "53300"]) {
+			const refused = Object.assign(new Error("server refused the connection"), { code: "ERR_POSTGRES_SERVER_ERROR", errno });
+			const failure = await verifyPostgreSQLReadiness((() => Promise.reject(refused)) as SchemaSQL).catch((error: unknown) => error);
+			expect(failure, errno).not.toBeInstanceOf(SchemaVerificationError);
+			expect(failure, errno).toMatchObject({ message: `postgresql database could not be reached (SQLSTATE ${errno})` });
+		}
+	});
+
 	test("rejects disabled RLS, policy drift, and unexpected tenant tables", async () => {
 		const disabled = validTables();
 		disabled[0] = { ...disabled[0]!, rls_forced: false };

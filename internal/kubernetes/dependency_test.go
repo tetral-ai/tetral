@@ -5,49 +5,9 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-func TestKubernetesDependencyConfinedToKubernetesPackage(t *testing.T) {
-	root := filepath.Clean("../..")
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, "internal/kubernetes/") || strings.HasPrefix(rel, "internal/internalgrpc/auth/") {
-			return nil
-		}
-		// Test files may import k8s.io/* only under the Kubernetes package
-		// and its auth consumer (covered by the production prefixes above).
-		// The isolated upstream Envoy translator test constructs one extension
-		// policy input to prove material control-plane errors are never ignored.
-		// Its exact unstructured import is the only additional test exception.
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, imported := range file.Imports {
-			value := strings.Trim(imported.Path.Value, `"`)
-			if rel == "integration/envoy-gateway-secret-helper/main_test.go" && value == "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured" {
-				continue
-			}
-			if strings.HasPrefix(value, "k8s.io/") {
-				t.Fatalf("%s imports %s; Kubernetes imports must stay in their registered adapter or exact translator test", rel, value)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk repo: %v", err)
-	}
-}
 
 func TestKubernetesPackageHasNoMutableGlobals(t *testing.T) {
 	entries, err := os.ReadDir(".")

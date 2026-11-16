@@ -1,0 +1,80 @@
+{
+  "messages": [],
+  "currentRequestMessage": null,
+  "turnFacts": {
+    "events": [],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": {
+    "childThreadId": "thr_0000000000000001",
+    "parentThreadId": "thr_actor_production_parent",
+    "parentBoundaryEventId": "evt_actor_production_spawn",
+    "entries": [
+      {
+        "messageSequence": 1,
+        "contextKind": "user",
+        "parts": [
+          {
+            "text": "safe parent prefix text",
+            "type": "text"
+          }
+        ]
+      }
+    ]
+  },
+  "thread": {
+    "parentThreadId": "thr_actor_production_parent",
+    "parentTaskName": null,
+    "role": "subagent",
+    "visibility": "public",
+    "taskName": "durable-child",
+    "agentType": "worker",
+    "status": "idle"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_actor_production",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_actor_production",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

@@ -1,0 +1,3 @@
+{
+  "notificationJson": "{\"source_tool_use_event_id\":\"sevt_tool_shape\",\"status\":\"failed\",\"stderr\":{\"text\":\"unknown\",\"truncated\":false},\"stdout\":{\"text\":\"\",\"truncated\":false},\"task_id\":\"task_shape\"}"
+}

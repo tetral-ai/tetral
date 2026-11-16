@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/eventstream"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -837,6 +838,46 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	fact := payload.TurnFacts.InternalRepairs[0]
 	if fact.RepairKey != repairKey || fact.ModelToolCallID != "call_repair" || fact.ToolName != "unknown_tool" {
 		t.Fatalf("repair direct fact = %#v", fact)
+	}
+	// A Runtime that starts again rebuilds the Thread's context from what
+	// LoadContext returns; the model gets the repair from it.
+	repairSequence := response.GetCommitted().GetAssignedMessageSequence()
+	var loadedParts []json.RawMessage
+	for _, entry := range payload.Messages {
+		if entry.MessageSequence == repairSequence {
+			loadedParts = entry.Parts
+		}
+	}
+	if len(loadedParts) != len(parts) {
+		t.Fatalf("loaded context at the repair's sequence %d = %d parts; want the stored %d", repairSequence, len(loadedParts), len(parts))
+	}
+	// The call was never a public Tool Use, so a developer sees no result
+	// of it in the Session's or the Thread's list or stream.
+	reader := eventstream.NewPostgreSQLReader(dbconnect.NewClientForTesting(runtime))
+	sessionPage, err := reader.ListSessionEvents(context.Background(), workspace.DefaultID, "sesn_bridge_repair", eventstream.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("list the Session's events: %v", err)
+	}
+	threadPage, err := reader.ListThreadEvents(context.Background(), workspace.DefaultID, "sesn_bridge_repair", "thr_bridge_repair", eventstream.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("list the Thread's events: %v", err)
+	}
+	sessionChanges, err := reader.ListSessionEventChanges(context.Background(), workspace.DefaultID, "sesn_bridge_repair", 0, 100)
+	if err != nil {
+		t.Fatalf("read the Session's stream: %v", err)
+	}
+	threadChanges, err := reader.ListThreadEventChanges(context.Background(), workspace.DefaultID, "sesn_bridge_repair", "thr_bridge_repair", 0, 100)
+	if err != nil {
+		t.Fatalf("read the Thread's stream: %v", err)
+	}
+	public := append(sessionPage.Data, threadPage.Data...)
+	for _, change := range append(sessionChanges, threadChanges...) {
+		public = append(public, change.Event)
+	}
+	for _, event := range public {
+		if event.ID == response.GetCommitted().GetRepairEventId() {
+			t.Fatalf("public reads hold the internal repair event %s %s", event.Type, event.Payload)
+		}
 	}
 	conflict := proto.Clone(request).(*bridgev1.CommitInternalToolRepairRequest)
 	conflict.Error = &bridgev1.RuntimeToolError{ErrorJson: `{"type":"provider_tool_protocol_error","message":"different","retryable":false}`}

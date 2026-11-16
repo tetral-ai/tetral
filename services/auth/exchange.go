@@ -163,7 +163,7 @@ func (cfg RouterConfig) exchange(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, r, auth.ExchangeError(err))
 		return
 	}
-	writeAuthJSON(w, http.StatusOK, token)
+	writeAuthJSON(w, r, http.StatusOK, token)
 }
 func exchangeSelector(value string) bool {
 	return value != "" && len(value) <= 128 && !strings.ContainsAny(value, "\x00\r\n")

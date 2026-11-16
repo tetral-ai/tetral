@@ -63,7 +63,7 @@ func (h *EnvironmentHandler) createEnvironment(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *EnvironmentHandler) getEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +87,7 @@ func (h *EnvironmentHandler) getEnvironment(w http.ResponseWriter, r *http.Reque
 	if !authorizeReadResource(w, r, ws, "environment", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *EnvironmentHandler) listEnvironments(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +108,7 @@ func (h *EnvironmentHandler) listEnvironments(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	writeJSON(w, http.StatusOK, environmentListResponse{
+	WriteJSON(w, r, http.StatusOK, environmentListResponse{
 		Data:     result.Data,
 		NextPage: result.NextPage,
 	})
@@ -143,7 +143,7 @@ func (h *EnvironmentHandler) updateEnvironment(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *EnvironmentHandler) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +164,7 @@ func (h *EnvironmentHandler) deleteEnvironment(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *EnvironmentHandler) archiveEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +185,7 @@ func (h *EnvironmentHandler) archiveEnvironment(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func readEnvironmentBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {

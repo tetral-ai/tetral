@@ -66,18 +66,14 @@ func TestPostgreSQLContentColdContext(t *testing.T) {
 			})
 		}
 	})
-	runContentColdContextVariants(t, false)
+	runContentColdContextVariants(t)
 }
 
-func TestPostgreSQLRuntimeContextRecovery(t *testing.T) {
-	runContentColdContextVariants(t, true)
-}
-
-func runContentColdContextVariants(t *testing.T, compose bool) {
-	variants := []string{"open", "success-end-pending-tool", "abnormal-end-retained-pending-tool", "closed", "exhausted", "latest-no-content", "requires-action", "requires-action-reopened", "terminated-open", "terminated-after-end"}
-	if compose {
-		variants = []string{"open", "success-end-pending-tool", "abnormal-end-retained-pending-tool", "closed", "exhausted", "latest-no-content", "no-content-end", "decided-allow", "decided-deny"}
-	}
+func runContentColdContextVariants(t *testing.T) {
+	// The Runtime's tests hold what each pinned envelope restores; the
+	// terminated variants are fenced from LoadContext.
+	pinned := map[string]bool{"open": true, "success-end-pending-tool": true, "abnormal-end-retained-pending-tool": true, "closed": true, "exhausted": true, "latest-no-content": true, "no-content-end": true, "decided-allow": true, "decided-deny": true}
+	variants := []string{"open", "success-end-pending-tool", "abnormal-end-retained-pending-tool", "closed", "exhausted", "latest-no-content", "requires-action", "requires-action-reopened", "terminated-open", "terminated-after-end", "no-content-end", "decided-allow", "decided-deny"}
 	for _, variant := range variants {
 		t.Run(variant, func(t *testing.T) {
 			f := newContentDeclarationFixture(t)
@@ -265,31 +261,8 @@ func runContentColdContextVariants(t *testing.T, compose bool) {
 					t.Fatalf("exhausted closeout lost its exact failure: %v", failureIDs)
 				}
 			}
-			if compose {
-				restored := runRuntimeColdContextComposition(t, loaded.GetContextJson(), false)
-				wantAction := map[string]string{"open": "await_request_end", "latest-no-content": "await_request_end", "closed": "await_input", "exhausted": "await_input", "success-end-pending-tool": "finish_idle", "abnormal-end-retained-pending-tool": "finish_idle", "no-content-end": "finish_idle", "decided-allow": "resume_tool_routes", "decided-deny": "resume_tool_routes"}[variant]
-				if restored.NextStep.Action != wantAction {
-					t.Fatalf("restored nextStep=%s want%s", restored.NextStep.Action, wantAction)
-				}
-				if pendingToolID != "" {
-					disposition := "requires_user_action"
-					if variant == "decided-allow" || variant == "decided-deny" {
-						disposition = "resume_approval_settlement"
-					}
-					literal, err := json.Marshal([]map[string]any{{"toolUseEventId": pendingToolID, "modelRequestId": "request", "modelToolCallId": "call-a", "assistantMessageSequence": sequence, "disposition": disposition}})
-					if err != nil {
-						t.Fatal(err)
-					}
-					assertContentLiteralJSON(t, restored.ColdProductionActiveToolReferences, string(literal))
-				}
-				if variant == "no-content-end" {
-					assertContentLiteralJSON(t, restored.ColdProductionEntries, `[]`)
-					assertContentLiteralJSON(t, restored.ColdProductionCurrentRequestMessage, `null`)
-					if len(restored.ToolRouteView.Routes) != 0 {
-						t.Fatal("empty End restored a Tool route")
-					}
-				}
-				t.Logf("actual Runtime cold preload variant=%s nextStep=%s", variant, restored.NextStep.Action)
+			if pinned[variant] {
+				pinBridgeContext(t, "content-"+variant, loaded.GetContextJson())
 			}
 			if f.snapshot(t) != before {
 				t.Fatal("cold loading changed content/Events/receipts")

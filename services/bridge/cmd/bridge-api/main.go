@@ -82,20 +82,13 @@ func run(ctx context.Context, env envReader) error {
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(database.Client)
-	store.Logger = logger
 	tokenKey, err := agentruntimebridge.RuntimeBindingTokenHMACKeyFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
-	store.RuntimeBindingTokenHMACKey = tokenKey
-	store.ProcessPolicy = bridgeConfig.ProcessPolicy
-	store.LifecyclePolicy = bridgeConfig.LifecyclePolicy
 	if err := transportsecurity.WaitForRoutingProxy(ctx, env.Getenv(transportsecurity.EnvRoutingProxyRequired) == "true"); err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
 	}
-	store.ProviderRescheduleBudget = bridgeConfig.ProviderRescheduleBudget
-	store.CompactionRescheduleBudget = bridgeConfig.CompactionRescheduleBudget
 	blobConfig, err := blob.LoadConfig()
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
@@ -113,13 +106,17 @@ func run(ctx context.Context, env envReader) error {
 			workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "blob_store_close_failed", workload.CauseOf(closeErr), "operation", "close_blob_store")
 		}
 	}()
-	store.AttachmentBlobStore = blobStore
-	store.AttachmentLifetime = bridgeConfig.AttachmentLifetime
-	store.FileBlobStore = blobStore
 	manifestLister := mcpmanifest.NewConnectorLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
 	})
-	store.MCPManifestLister = manifestLister
+	store := agentruntimebridge.NewServingStore(agentruntimebridge.ServingStoreDependencies{
+		Database:        database.Client,
+		Logger:          logger,
+		Config:          bridgeConfig,
+		BindingTokenKey: tokenKey,
+		Blobs:           blobStore,
+		MCPManifests:    manifestLister,
+	})
 	defer func() {
 		workload.BeginProcessShutdown(ctx)
 		if closeErr := manifestLister.Close(); closeErr != nil {

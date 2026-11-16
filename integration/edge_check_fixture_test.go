@@ -61,9 +61,9 @@ func directEdgeCheckStatus(response *authv3.CheckResponse) (int, string) {
 	return http.StatusOK, principal
 }
 
-// startSDKAuthorization uses the same production Auth domain and Check adapter;
+// startEdgeAuthorization uses the same production Auth domain and Check adapter;
 // the Go edge remains a routing fixture, separately from the real Envoy proof.
-func startSDKAuthorization(t *testing.T, database *sql.DB, signer *auth.InternalPrincipalSigner, ttl time.Duration) string {
+func startEdgeAuthorization(t *testing.T, database *sql.DB, signer *auth.InternalPrincipalSigner, ttl time.Duration) string {
 	t.Helper()
 	adapter, err := tetralauth.NewExternalAuthorization(tetralauth.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(database, workspace.DefaultID, nil)}, Signer: signer, PrincipalTTL: ttl})
 	if err != nil {

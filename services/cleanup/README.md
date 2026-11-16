@@ -335,8 +335,7 @@ Conformance: `TestSchedulingPhaseClaimsDueSessionsAcrossWorkspaces`,
 `TestSchedulingGenerationOverflowIsAnError`,
 `TestSchedulingMissingCursorIsAnInvariantError`,
 `TestCleanupDiscoveryFunctionBoundary`,
-`TestCleanupDiscoveryUsesGlobalDueIndex`,
-`TestCleanupWorkloadStaysWithinSchedulerBoundary`.
+`TestCleanupDiscoveryUsesGlobalDueIndex`.
 
 ### Retention phases (`retention.go`, `cmd/tetral-cleanup/main.go`)
 

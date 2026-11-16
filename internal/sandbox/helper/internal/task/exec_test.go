@@ -552,6 +552,31 @@ func TestRunExecRejectsInvalidCWD(t *testing.T) {
 	}
 }
 
+// A command the helper cannot start is exec_spawn_failed, in the foreground
+// and under a supervisor; the reserved helper_failure is never a tool's kind.
+func TestRunExecThatCannotStartIsASpawnFailure(t *testing.T) {
+	fs := newExecFixture(t)
+	withTestRuntime(t)
+	original := startSupervisor
+	startSupervisor = func(string, string, string, []string, int) error { return os.ErrPermission }
+	t.Cleanup(func() { startSupervisor = original })
+	for _, row := range []struct {
+		name    string
+		input   map[string]any
+		message string
+	}{
+		// The kernel refuses an argument holding a NUL byte.
+		{"foreground", map[string]any{"cmd": "true\x00"}, "process could not start"},
+		{"detached", map[string]any{"cmd": "true", "on_wait_expiry": "detach", "task_id": "task_cannot_start"}, "supervisor could not start"},
+	} {
+		response := RunExec(fs.payload(row.input))
+		if response.Status != protocol.ToolStatusError || response.Error == nil || response.Error.Kind != protocol.ErrorKindExecSpawnFailed ||
+			response.Error.Message != row.message || response.HelperFailure {
+			t.Errorf("%s: response = %+v %+v; want exec_spawn_failed %q", row.name, response, response.Error, row.message)
+		}
+	}
+}
+
 type execFixture struct {
 	t         *testing.T
 	workspace string

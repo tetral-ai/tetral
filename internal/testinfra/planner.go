@@ -2,6 +2,7 @@ package testinfra
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,18 @@ import (
 	"time"
 )
 
-func BuildPlan(root string, profile Profile, base string) (Plan, error) {
+// BuildPlan builds the plan of profile. Its git and go list commands end with
+// ctx, and a plan that ctx stopped fails with what stopped it: a signal or the
+// run's limit.
+func BuildPlan(ctx context.Context, root string, profile Profile, base string) (Plan, error) {
+	plan, err := buildPlan(ctx, root, profile, base)
+	if ctx.Err() != nil {
+		return Plan{}, fmt.Errorf("plan: %w", context.Cause(ctx))
+	}
+	return plan, err
+}
+
+func buildPlan(ctx context.Context, root string, profile Profile, base string) (Plan, error) {
 	inventory, err := LoadInventory()
 	if err != nil {
 		return Plan{}, err
@@ -23,7 +35,7 @@ func BuildPlan(root string, profile Profile, base string) (Plan, error) {
 	if profile != ProfileFast && profile != ProfileAffected && profile != ProfileFull {
 		return Plan{}, fmt.Errorf("unknown profile %q", profile)
 	}
-	revision := inspectRevision(root, base)
+	revision := inspectRevision(ctx, root, base)
 	plan := Plan{Profile: profile, Revision: revision, CreatedAt: time.Now().UTC()}
 
 	switch profile {
@@ -32,7 +44,7 @@ func BuildPlan(root string, profile Profile, base string) (Plan, error) {
 	case ProfileFull:
 		plan.Selections = selectionsForGroups(inventory.GroupsForProfile("full"), "full closed inventory")
 	case ProfileAffected:
-		plan.Selections, err = affectedSelections(root, inventory, &plan.Revision)
+		plan.Selections, err = affectedSelections(ctx, root, inventory, &plan.Revision)
 		if err != nil {
 			return Plan{}, err
 		}
@@ -45,7 +57,7 @@ func BuildPlan(root string, profile Profile, base string) (Plan, error) {
 				expanded = append(expanded, selection)
 				continue
 			}
-			goSelections, exclusions, selectionErr := fastGoSelections(root)
+			goSelections, exclusions, selectionErr := fastGoSelections(ctx, root)
 			if selectionErr != nil {
 				return Plan{}, fmt.Errorf("enumerate fast Go evidence: %w", selectionErr)
 			}
@@ -55,20 +67,20 @@ func BuildPlan(root string, profile Profile, base string) (Plan, error) {
 		plan.Selections = expanded
 	} else if profile == ProfileFull {
 		var exclusions []Exclusion
-		plan.Selections, exclusions, err = expandFullGoSelection(root, plan.Selections, "full closed inventory")
+		plan.Selections, exclusions, err = expandFullGoSelection(ctx, root, plan.Selections, "full closed inventory")
 		plan.Excluded = append(plan.Excluded, exclusions...)
 		if err != nil {
 			return Plan{}, err
 		}
 	} else if profile == ProfileAffected && plan.Revision.FullFallbackCause != "" {
 		var exclusions []Exclusion
-		plan.Selections, exclusions, err = expandFullGoSelection(root, plan.Selections, "full fallback: "+plan.Revision.FullFallbackCause)
+		plan.Selections, exclusions, err = expandFullGoSelection(ctx, root, plan.Selections, "full fallback: "+plan.Revision.FullFallbackCause)
 		plan.Excluded = append(plan.Excluded, exclusions...)
 		if err != nil {
 			return Plan{}, err
 		}
 	} else if profile == ProfileAffected {
-		plan.Selections, err = expandAffectedGoSelection(root, plan.Selections)
+		plan.Selections, err = expandAffectedGoSelection(ctx, root, plan.Selections)
 		if err != nil {
 			return Plan{}, err
 		}
@@ -82,7 +94,7 @@ func BuildPlan(root string, profile Profile, base string) (Plan, error) {
 		return Plan{}, err
 	}
 	plan.Dependencies = selectedDependencies(plan.Selections)
-	if err := reconcilePlan(root, inventory, plan); err != nil {
+	if err := reconcilePlan(ctx, root, inventory, plan); err != nil {
 		return Plan{}, err
 	}
 	return plan, nil
@@ -148,7 +160,7 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
-func reconcilePlan(root string, inventory Inventory, plan Plan) error {
+func reconcilePlan(ctx context.Context, root string, inventory Inventory, plan Plan) error {
 	knownGroups := map[string]bool{}
 	for _, group := range inventory.Groups {
 		knownGroups[group.ID] = true
@@ -189,7 +201,7 @@ func reconcilePlan(root string, inventory Inventory, plan Plan) error {
 	if plan.Profile != ProfileFast && plan.Profile != ProfileFull && plan.Revision.FullFallbackCause == "" {
 		return nil
 	}
-	packages, err := listGoPackages(root)
+	packages, err := listGoPackages(ctx, root)
 	if err != nil {
 		return err
 	}
@@ -280,8 +292,8 @@ func reconcileBunTestPlan(group string, all []string, plan Plan) error {
 	return nil
 }
 
-func expandAffectedGoSelection(root string, selections []Selection) ([]Selection, error) {
-	packages, err := listGoPackages(root)
+func expandAffectedGoSelection(ctx context.Context, root string, selections []Selection) ([]Selection, error) {
+	packages, err := listGoPackages(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +326,7 @@ func expandAffectedGoSelection(root string, selections []Selection) ([]Selection
 	return result, nil
 }
 
-func expandFullGoSelection(root string, selections []Selection, reason string) ([]Selection, []Exclusion, error) {
+func expandFullGoSelection(ctx context.Context, root string, selections []Selection, reason string) ([]Selection, []Exclusion, error) {
 	var result []Selection
 	var resultExclusions []Exclusion
 	for _, selection := range selections {
@@ -322,7 +334,7 @@ func expandFullGoSelection(root string, selections []Selection, reason string) (
 			result = append(result, selection)
 			continue
 		}
-		goSelections, exclusions, err := fullGoSelections(root, reason)
+		goSelections, exclusions, err := fullGoSelections(ctx, root, reason)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -332,7 +344,7 @@ func expandFullGoSelection(root string, selections []Selection, reason string) (
 	return result, resultExclusions, nil
 }
 
-func affectedSelections(root string, inventory Inventory, revision *Revision) ([]Selection, error) {
+func affectedSelections(ctx context.Context, root string, inventory Inventory, revision *Revision) ([]Selection, error) {
 	if revision.FullFallbackCause != "" {
 		return selectionsForGroups(inventory.GroupsForProfile("full"), "full fallback: "+revision.FullFallbackCause), nil
 	}
@@ -349,6 +361,9 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 
 	selected := map[string]Group{}
 	for _, path := range revision.ChangedPaths {
+		if inventory.OtherProduct(path) {
+			continue
+		}
 		matches := inventory.MatchPath(path)
 		if len(matches) == 0 {
 			revision.FullFallbackCause = "unknown ownership: " + path
@@ -404,7 +419,7 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 				// process/HTTP boundaries that Go imports do not fully describe.
 				paths = append(paths, "internal/auth", "services/auth", "internal/httpapi", "internal/memory", "internal/eventstream", "services/event-stream", "integration")
 			}
-			packages, err := affectedGoPackages(root, paths)
+			packages, err := affectedGoPackages(ctx, root, paths)
 			if err != nil || len(packages) == 0 {
 				revision.FullFallbackCause = "Go dependency closure unavailable"
 				return selectionsForGroups(inventory.GroupsForProfile("full"), "full fallback: "+revision.FullFallbackCause), nil
@@ -459,10 +474,8 @@ func separatedServiceContractChange(paths []string) bool {
 		}
 		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") ||
 			strings.HasPrefix(path, "integration/public_streaming") || strings.HasPrefix(path, "integration/testdata/public-streaming") ||
-			path == "integration/sdk_integration_compatibility_test.go" ||
 			path == "integration/preview_tls_test.go" || strings.HasPrefix(path, "integration/preview_tls_") ||
-			path == "integration/static/public_preview_sdk_projection_test.go" || path == "integration/static/public_event_sdk_projection_test.go" ||
-			strings.HasPrefix(path, "integration/replica_") || strings.HasPrefix(path, "integration/testdata/replica-") ||
+			strings.HasPrefix(path, "integration/replica_") ||
 			strings.HasPrefix(path, "integration/content_") ||
 			strings.HasPrefix(path, "integration/transport") || path == "integration/runtime_direct_tls_test.go" ||
 			path == "integration/protected_store_test.go" ||
@@ -478,12 +491,11 @@ func separatedServiceContractChange(paths []string) bool {
 // integrationInputChange reports non-Go inputs that integration compositions
 // render or execute, which Go import traversal cannot see: the direct Runtime
 // TLS and Envoy Gateway fixtures render deploy/helm/tetral, the Envoy Gateway
-// translation reads the deploy/envoy-gateway prerequisite resources, the OIDC
-// SDK composition runs the integration/testdata/oidc-* Bun driver, and every
+// translation reads the deploy/envoy-gateway prerequisite resources, and every
 // local NATS broker projects its client policy from the NATS release values.
 func integrationInputChange(paths []string) bool {
 	for _, path := range paths {
-		for _, prefix := range []string{"deploy/helm/tetral/", "deploy/envoy-gateway/", "integration/testdata/oidc-"} {
+		for _, prefix := range []string{"deploy/helm/tetral/", "deploy/envoy-gateway/"} {
 			if strings.HasPrefix(path, prefix) {
 				return true
 			}
@@ -539,8 +551,8 @@ type goListPackage struct {
 	XTestImports []string
 }
 
-func affectedGoPackages(root string, changedPaths []string) ([]string, error) {
-	command := exec.Command("go", "list", "-json", "./...")
+func affectedGoPackages(ctx context.Context, root string, changedPaths []string) ([]string, error) {
+	command := exec.CommandContext(ctx, "go", "list", "-json", "./...")
 	command.Dir = root
 	output, err := command.StdoutPipe()
 	if err != nil {

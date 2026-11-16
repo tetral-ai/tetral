@@ -86,7 +86,7 @@ func newSessionIntegrationEnvOn(t *testing.T, runtimeDB, adminDB *sql.DB) *sessi
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_integration"), nil //nolint:gosec // G101: synthetic test API key id
 	})
 	testEnv.service = service
-	testEnv.router = httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator))
+	testEnv.router = newRouter(t, httpapi.NewSessionHandler(service), httpapi.WithAuthenticator(authenticator))
 	return testEnv
 }
 
@@ -225,7 +225,7 @@ func TestSessionIntegrationReadUpdateArchiveDeleteAndResourcePolicies(t *testing
 	}
 
 	for _, resource := range []sessionIntegrationResourceResponse{fileResource, memoryResource} {
-		recorder := env.request(http.MethodPost, "/v1/sessions/"+created.ID+"/resources/"+resource.ID, `{"field":"removed_route_value"}`)
+		recorder := env.outside().request(http.MethodPost, "/v1/sessions/"+created.ID+"/resources/"+resource.ID, `{"field":"removed_route_value"}`)
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("update %s resource status = %d; want 400 body=%s", resource.Type, recorder.Code, recorder.Body.String())
 		}
@@ -410,7 +410,7 @@ func TestSessionIntegrationRejectsNullUpdateWithoutChangingUpdatedAt(t *testing.
 		{name: "null body", body: `null`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			recorder := env.request(http.MethodPost, "/v1/sessions/"+created.ID+"?beta=true", test.body)
+			recorder := env.outside().request(http.MethodPost, "/v1/sessions/"+created.ID+"?beta=true", test.body)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d; want 400 body=%s", recorder.Code, recorder.Body.String())
@@ -553,7 +553,7 @@ func TestSessionIntegrationListDefaultsToNewestFirst(t *testing.T) {
 func TestSessionIntegrationRejectsExplicitAgentVersionZero(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
 
-	recorder := env.request(http.MethodPost, "/v1/sessions?beta=true", `{"agent":{"type":"agent","id":"agent_http_session","version":0},"environment_id":"env_http_session","vault_ids":[]}`)
+	recorder := env.outside().request(http.MethodPost, "/v1/sessions?beta=true", `{"agent":{"type":"agent","id":"agent_http_session","version":0},"environment_id":"env_http_session","vault_ids":[]}`)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d; want 400 for explicit version zero body=%s", recorder.Code, recorder.Body.String())
@@ -598,6 +598,14 @@ func (e *sessionIntegrationEnv) createSession(t *testing.T, body string) session
 	var response sessionIntegrationSessionResponse
 	decodeSessionIntegrationJSON(t, recorder, &response)
 	return response
+}
+
+// outside returns the environment for one request that is outside the
+// OpenAPI file on purpose.
+func (e *sessionIntegrationEnv) outside() *sessionIntegrationEnv {
+	marked := *e
+	marked.router = outside(e.router)
+	return &marked
 }
 
 func (e *sessionIntegrationEnv) request(method string, path string, body string) *httptest.ResponseRecorder {
@@ -968,7 +976,7 @@ func TestPublicAuthorizationSessionDeletionPreservesLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := httpapi.NewRouter(httpapi.NewSessionHandler(env.service), "", httpapi.WithInternalPrincipalVerifier(verifier))
+	router := newRouter(t, httpapi.NewSessionHandler(env.service), httpapi.WithInternalPrincipalVerifier(verifier))
 	full := identityAdmissionFixture(auth.IdentityHuman)
 	restricted := identityAdmissionFixture(auth.IdentityHuman)
 	restricted.Authority.Operations = []auth.Operation{auth.OperationModelsList}
@@ -1093,7 +1101,7 @@ func TestPublicAuthorizationSessionLookupsPreserveMutationLifecycle(t *testing.T
 	assertHTTPStatus(t, archivedUpdate, http.StatusConflict)
 	assertErrorType(t, archivedUpdate, "invalid_request_error")
 
-	foreign := httpapi.NewRouter(httpapi.NewSessionHandler(env.service), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
+	foreign := newRouter(t, httpapi.NewSessionHandler(env.service), httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: "workspace_lookup_foreign"}, "ak_session_lookup_foreign"), nil //nolint:gosec // G101: synthetic test API key id
 	})))
 	for _, request := range []struct{ method, path, body string }{

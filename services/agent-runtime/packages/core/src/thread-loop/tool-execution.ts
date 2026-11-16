@@ -744,12 +744,17 @@ export function invalidToolCallFailure(
 	return RuntimeFailureSchema.parse({ ...failure, message });
 }
 
+// normalizeRuntimeFailure drops the message; a deny message is the Tool
+// result the model and the developer read, so it is put back.
 export function deniedToolCallFailure(
 	sessionId: string,
 	source: RuntimeProcessorSource,
 	message: string,
 ): RuntimeFailure {
-	return toolContractFailure(sessionId, source, message);
+	return RuntimeFailureSchema.parse({
+		...toolContractFailure(sessionId, source, message),
+		message,
+	});
 }
 
 export function pendingApprovalResumeFailure(

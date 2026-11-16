@@ -20,14 +20,16 @@
 //
 //  1. The input is UTF-8 JSON, or the query parameters, path parameters or
 //     headers that the schema models as strings. Invalid UTF-8, an escaped lone
-//     surrogate, a duplicate object key at any depth (equal after unescaping) and
-//     a parameter or header that the definition models given more than once are
+//     surrogate, a duplicate object key at any depth (equal after unescaping),
+//     nesting past 127 objects and arrays, the outer container being level one,
+//     and a parameter or header that the definition models given more than once are
 //     rejected; a parameter or header that the definition does not model is not
 //     read. A tool-status or local MCP tool-list report of more than
 //     MaxReportJSONValues values is rejected at the first value past them,
 //     before that value is built, with no pointer into the report.
 //  2. Integers are parsed from their exact decimal text into int64; a value
-//     outside that range, a fraction and an exponent are rejected, and no integer
+//     outside that range, in any member, forwarded ones included, and a fraction
+//     and an exponent where an integer is expected are rejected, and no integer
 //     passes through float64. A fraction or exponent beyond the float64 range
 //     is rejected, since the protocol has no nonfinite number.
 //  3. Every constraint of the schema definition is checked by hand-written code:
@@ -49,9 +51,7 @@
 //     relations to it. A request body's complete limit is its first relation.
 //
 // The token parser keeps one incremental path of unescaped segments, rendering a
-// complete JSON pointer only for an error. Path bookkeeping therefore does not
-// retain a full ancestor pointer at every nesting level. The existing maximum
-// of 10,000 nested arrays/objects remains unchanged.
+// complete JSON pointer only for an error.
 //
 // Sizes are measured on the compact JSON with every string and number token
 // counted as written, escapes included. A failure is a *DecodeError holding

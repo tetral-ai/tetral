@@ -3,9 +3,11 @@ import type { NormalizedProviderEvent, NormalizedTextEventType } from "@tetral/g
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { credentials, Metadata, status as grpcStatus } from "@grpc/grpc-js";
+import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import {
   ProviderFinishReason,
   ProviderGatewayServiceClient,
+  ProviderStreamEvent as ProviderStreamEventMessage,
   ProviderStreamEventType,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { parseDeclarations, traceparentClientInterceptor } from "@tetral/ts-observability";
@@ -163,6 +165,17 @@ describe("Gateway gRPC streaming transport", () => {
     }
   }, 15_000);
 
+  // The Runtime's client accepts stream events up to this same protocol bound.
+  test("sends a stream event at the protocol bound and refuses one a byte over it", async () => {
+    const atBound = await serveFrame(sizedTextFrame(MaxProviderResponseFrameBytes));
+    expect(atBound.code).toBe(grpcStatus.OK);
+    expect(atBound.events).toHaveLength(1);
+
+    const overBound = await serveFrame(sizedTextFrame(MaxProviderResponseFrameBytes + 1));
+    expect(overBound.code).toBe(grpcStatus.RESOURCE_EXHAUSTED);
+    expect(overBound.events).toEqual([]);
+  }, 60_000);
+
   test("honors writable backpressure before consuming the next provider event", async () => {
     const first = completeText("one",1);
     const second = completeText("two",2);
@@ -275,6 +288,53 @@ function textEvent(
       metadataJson: "{}",
     },
   };
+}
+
+// Provider output this large ends in a provider error before it becomes a
+// frame, so the service hands the server the frame itself.
+class SizedFrameService extends ProviderGatewayServiceShell {
+  constructor(private readonly frame: ProviderStreamEvent) {
+    super({
+      authenticator: new AllowingAuthenticator(),
+      runtimeBindingTokenVerifier: { verify: () => true },
+      ready: () => true,
+      logger: { info: () => undefined, error: () => undefined },
+      providerStreamer: { stream: async function* () {} },
+    });
+  }
+
+  override async *streamProviderRequest(): AsyncIterable<ProviderStreamEvent> {
+    yield this.frame;
+  }
+}
+
+function sizedTextFrame(encodedBytes: number): ProviderStreamEvent {
+  const frame = (length: number) => completeText("x".repeat(length), 1);
+  const encoded = (length: number) => ProviderStreamEventMessage.encode(frame(length)).finish().byteLength;
+  let length = encodedBytes - encoded(0);
+  while (encoded(length) !== encodedBytes) length += encodedBytes - encoded(length);
+  return frame(length);
+}
+
+// serveFrame sends one frame through the real Gateway server to a client whose
+// receive limit is above the protocol bound.
+async function serveFrame(frame: ProviderStreamEvent): Promise<{ events: ProviderStreamEvent[]; code: grpcStatus }> {
+  const server = createGatewayGrpcServer(new SizedFrameService(frame));
+  const port = await server.bind("127.0.0.1:0");
+  const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure(), {
+    "grpc.max_receive_message_length": MaxProviderResponseFrameBytes * 2,
+  });
+  try {
+    const call = client.streamProviderRequest(validAnthropicProviderRequest(), metadata());
+    const events: ProviderStreamEvent[] = [];
+    call.on("data", (event: ProviderStreamEvent) => events.push(event));
+    call.on("error", () => { /* The final status is the oracle. */ });
+    const { code } = await onceStatus(call);
+    return { events, code };
+  } finally {
+    client.close();
+    await server.shutdown();
+  }
 }
 
 async function readStream(events: AsyncIterable<ProviderStreamEvent>): Promise<readonly ProviderStreamEvent[]> {

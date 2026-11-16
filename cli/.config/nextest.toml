@@ -1,0 +1,30 @@
+# The CLI's tests run under cargo-nextest, each test in a process of its own
+# (scripts/verify-cli.py; the version is pinned in
+# scripts/install-cargo-nextest.sh).
+
+[profile.default]
+# A test still running at five minutes is terminated and reported by name.
+slow-timeout = { period = "60s", terminate-after = 5 }
+fail-fast = false
+failure-output = "immediate-final"
+status-level = "pass"
+final-status-level = "slow"
+
+# Each test's time, for the workflow's records: target/nextest/default/junit.xml.
+[profile.default.junit]
+path = "junit.xml"
+
+# The tests whose work is minutes long: thousands of instructions, files or
+# records, or a wait a Mac's NFS client times by the wall clock.
+[[profile.default.overrides]]
+filter = '''
+binary(=tool_admission)
+  | test(=the_log_file_rotates_into_three_files_and_stderr_accounts_for_every_record)
+  | test(=files_a_command_deleted_and_another_writer_restored_are_back_without_an_upload)
+  | test(=more_changes_than_a_commit_holds_go_in_two_commits_with_the_deletions_first)
+  | test(=a_thousand_enrolled_files_share_bounded_uploads_with_another_session)
+  | test(=a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in_a_local_copy)
+  | test(=a_read_waits_minutes_for_its_download_and_through_a_pause_of_the_app_server_without_an_error)
+  | test(=a_release_build_holds_no_test_seam)
+'''
+slow-timeout = { period = "60s", terminate-after = 15 }

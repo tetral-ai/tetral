@@ -1,3 +1,5 @@
+// Layer 2: the release records and the repository's release scripts, with
+// real git and stand-ins for the registry and the go command.
 package release
 
 import (
@@ -486,4 +488,137 @@ func cloneStrings(input map[string]string) map[string]string {
 		result[key] = value
 	}
 	return result
+}
+
+func TestCandidateManifestScriptRecordsTheMigrationOwnersDatabaseIdentity(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	for name, body := range map[string]string{
+		"images.json": `{"api":{"top_level_digest":"` + testDigest("index") + `","top_level_media_type":"application/vnd.oci.image.index.v1+json",` +
+			`"child_digest":"` + testDigest("child") + `","child_media_type":"application/vnd.oci.image.manifest.v1+json"}}`,
+		"chart.digest": testDigest("chart"), "values.digest": testDigest("values"), "render.digest": testDigest("render"),
+	} {
+		if err := os.WriteFile(filepath.Join(work, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command(filepath.Join(root, "scripts", "release-candidate-manifest.sh")) //nolint:gosec // The repository's own script.
+	command.Dir = work
+	command.Env = append(os.Environ(), "VERSION=v0.1.0-alpha.7", "ARTIFACT_VERSION=0.1.0-alpha.7", "SOURCE_COMMIT="+strings.Repeat("c", 40))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("candidate manifest script: %v\n%s", err, output)
+	}
+	body, err := os.ReadFile(filepath.Join(work, "candidate.json")) //nolint:gosec // Written by the script into the test's directory.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate CandidateManifest
+	if err := json.Unmarshal(body, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	want := CurrentDatabaseIdentity()
+	if int64(candidate.SchemaVersion) != want.Version || candidate.SchemaChecksum != want.Checksum {
+		t.Fatalf("database identity = %d/%s, want %+v", candidate.SchemaVersion, candidate.SchemaChecksum, want)
+	}
+	image := candidate.Images["api"]
+	if candidate.Version.Git != "v0.1.0-alpha.7" || candidate.Version.Sequence != 7 || candidate.SourceCommit != strings.Repeat("c", 40) ||
+		image.Repository != "ghcr.io/tetral-ai/api" || image.TopLevelDigest != testDigest("index") || image.ChildDigest != testDigest("child") ||
+		candidate.Chart.PackageDigest != testDigest("chart") || len(candidate.Bases) == 0 {
+		t.Fatalf("candidate = %+v", candidate)
+	}
+}
+
+// writeExecutables writes each named script into directory as an executable.
+func writeExecutables(t *testing.T, directory string, scripts map[string]string) {
+	t.Helper()
+	for name, script := range scripts {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil { //nolint:gosec // Test fakes must be executable.
+			t.Fatal(err)
+		}
+	}
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// In candidate mode the release builds only the workflow's own commit; the
+// other modes name an earlier commit.
+func TestCandidateSourceIsTheWorkflowsCommit(t *testing.T) {
+	root := repositoryRoot(t)
+	repository := t.TempDir()
+	git := func(arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-c", "user.name=release", "-c", "user.email=release@example.invalid"}, arguments...)...)
+		command.Dir = repository
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "--quiet")
+	git("commit", "--quiet", "--allow-empty", "--message", "earlier")
+	earlier := git("rev-parse", "HEAD")
+	git("commit", "--quiet", "--allow-empty", "--message", "workflow")
+	workflow := git("rev-parse", "HEAD")
+	git("update-ref", "refs/remotes/origin/main", workflow)
+	bin := t.TempDir()
+	writeExecutables(t, bin, map[string]string{"go": "#!/usr/bin/env bash\necho '{\"artifact\":\"0.1.0-alpha.1\"}'\n"})
+	for _, row := range []struct {
+		name, mode, source string
+		pass               bool
+	}{
+		{"a candidate of an earlier commit", "candidate", earlier, false},
+		{"a candidate of the workflow's commit", "candidate", workflow, true},
+		{"a state query naming an earlier commit", "state", earlier, true},
+	} {
+		command := exec.Command(filepath.Join(root, "scripts", "release-validate-source.sh")) //nolint:gosec // Repository-owned script under a fake toolchain.
+		command.Dir = repository
+		command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "MODE="+row.mode, "VERSION=v0.1.0-alpha.1",
+			"SOURCE_COMMIT="+row.source, "WORKFLOW_SHA="+workflow, "WORKFLOW_REF=refs/heads/main", "GITHUB_OUTPUT="+filepath.Join(t.TempDir(), "output"))
+		output, err := command.CombinedOutput()
+		if (err == nil) != row.pass {
+			t.Errorf("%s: %v, want pass %t\n%s", row.name, err, row.pass, output)
+		}
+	}
+}
+
+// Cleanup deletes a candidate digest only while its expected tag alone holds
+// it.
+func TestCandidateDigestIsHeldByItsExpectedTagAlone(t *testing.T) {
+	root := repositoryRoot(t)
+	bin := t.TempDir()
+	// HOLDERS is the repository's tags, each tag=digest.
+	writeExecutables(t, bin, map[string]string{"oras": `#!/usr/bin/env bash
+case "$1 $2" in
+  "repo tags") for pair in $HOLDERS; do printf '%s\n' "${pair%%=*}"; done | jq -R . | jq -cs '{tags:.}' ;;
+  "manifest fetch") reference="${*: -1}"; for pair in $HOLDERS; do [[ "${pair%%=*}" != "${reference##*:}" ]] || printf '%s' "${pair#*=}"; done ;;
+  *) exit 1 ;;
+esac
+`})
+	candidate, other := testDigest("candidate"), testDigest("other")
+	const expected = "candidate-0.1.0-alpha.1-tetral"
+	for _, row := range []struct {
+		name, holders, refusal string
+	}{
+		{"the expected tag alone", expected + "=" + candidate + " 0.1.0-alpha.0=" + other, ""},
+		{"another tag as well", expected + "=" + candidate + " kept=" + candidate, "also retained by tag kept"},
+		{"no tag", expected + "=" + other, "does not own the candidate digest"},
+	} {
+		command := exec.Command(filepath.Join(root, "scripts", "release-require-exclusive-tag.sh"), "ghcr.io/tetral-ai/tetral", candidate, expected) //nolint:gosec // Repository-owned script under a fake registry.
+		command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "HOLDERS="+row.holders)
+		output, err := command.CombinedOutput()
+		if row.refusal == "" && err != nil || row.refusal != "" && (err == nil || !strings.Contains(string(output), row.refusal)) {
+			t.Errorf("%s holds the digest: %v\n%s; want refusal %q", row.name, err, output, row.refusal)
+		}
+	}
 }

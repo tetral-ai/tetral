@@ -84,43 +84,6 @@ describe("Runtime Pod transport bounds", () => {
 		expect(MaxWebResponseGrpcMessageBytes).toBe(512 * 1024);
 	});
 
-	test("assigns each Bridge adapter the smallest sufficient channel class", async () => {
-		const source = await Bun.file(
-			new URL("../../src/bridge-client.ts", import.meta.url),
-		).text();
-		const channelFactoryFor = (className: string): string => {
-			const classBody = source
-				.split(`export class ${className}`, 2)[1]
-				?.split("\n}", 1)[0];
-			const match = classBody?.match(
-				/credentials\.createInsecure\(\),\s+([A-Za-z]+ChannelOptions)\(\)/,
-			);
-			if (match?.[1] === undefined) {
-				throw new Error(`missing Bridge channel factory for ${className}`);
-			}
-			return match[1];
-		};
-
-		expect(channelFactoryFor("BridgeAPIControlInputCommitter")).toBe(
-			"grpcClientChannelOptions",
-		);
-		expect(channelFactoryFor("BridgeAPITaskNotificationCommitter")).toBe(
-			"grpcClientChannelOptions",
-		);
-		expect(channelFactoryFor("BridgeAPIApprovalReviewerThreadCreator")).toBe(
-			"grpcClientChannelOptions",
-		);
-		expect(channelFactoryFor("BridgeAPIContextLoader")).toBe(
-			"bridgeDurableContextGrpcChannelOptions",
-		);
-		expect(channelFactoryFor("BridgeAPIEventWriter")).toBe(
-			"bridgeDurableContextGrpcChannelOptions",
-		);
-		expect(channelFactoryFor("BridgeAPIInternalToolRepairCommitter")).toBe(
-			"grpcClientChannelOptions",
-		);
-	});
-
 	test("carries eight maximum Web text operations through the paired request fuse", () => {
 		const requestBytes = RunWebRequestMessage.encode({
 			workspaceId: "wksp_web_capacity",

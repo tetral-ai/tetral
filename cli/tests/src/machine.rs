@@ -337,13 +337,44 @@ pub fn tool_environment() -> [(&'static str, String); 2] {
     ]
 }
 
+/// The variable naming the file of a run of the tests to which they add `T`
+/// of each state root they give `tetral`. `T` lies outside the test's
+/// directory, and the run removes the `T`s listed there when it is cleared,
+/// also when it was stopped or killed before a test could remove its own.
+pub const TASK_PARENTS_VARIABLE: &str = "TETRAL_TESTS_TASK_PARENTS";
+
+/// Adds `T` of the state root at `root` to the file of the run, if one is
+/// named.
+pub fn list_task_parent(root: &Path) {
+    let Some(list) = std::env::var_os(TASK_PARENTS_VARIABLE) else {
+        return;
+    };
+    let line = format!("{}\n", task_parent(root).display());
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&list)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()))
+        .unwrap_or_else(|error| panic!("cannot add to {}: {error}", Path::new(&list).display()));
+}
+
 /// `T` of the state root at `root`, the parent of its tasks' temporary
 /// directories: `tetral-<h>` in the canonical path of `/tmp`, `<h>` the
 /// first 8 lowercase hexadecimal characters of the SHA-256 of the root's
-/// canonical path.
+/// canonical path, which a root still to be created gets from its nearest
+/// existing ancestor.
 pub fn task_parent(root: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
-    let canonical = root.canonicalize().expect("the state root exists");
+    let canonical = root.canonicalize().unwrap_or_else(|_| {
+        let existing = root
+            .ancestors()
+            .find(|each| each.canonicalize().is_ok())
+            .expect("an absolute state root");
+        existing
+            .canonicalize()
+            .unwrap()
+            .join(root.strip_prefix(existing).unwrap())
+    });
     let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
     let hex: String = digest[..4]
         .iter()
@@ -380,6 +411,17 @@ pub fn wait_for_received(engine: &ReferenceServer, endpoint: &str, count: usize)
 /// Writes `event` on the instance's stream as given.
 pub fn send(engine: &ReferenceServer, event: Value) {
     engine.control("send", json!({ "instance_id": INSTANCE, "event": event }));
+}
+
+/// Writes `data` on the instance's stream as one event's data.
+pub fn send_data(engine: &ReferenceServer, data: &str) {
+    engine.control("send", json!({ "instance_id": INSTANCE, "data": data }));
+}
+
+/// Writes `data`, which is no message of the protocol, on the instance's
+/// stream as one event's data.
+pub fn send_invalid(engine: &ReferenceServer, data: &str) {
+    engine.outside_contract(|| send_data(engine, data));
 }
 
 pub fn answer_fault(engine: &ReferenceServer, fault: Value) {

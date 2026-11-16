@@ -88,14 +88,29 @@ pub fn request_with_body(socket: &Path, method: &str, path: &str, body: &[u8]) -
     })
 }
 
+/// How long a test pauses before it asserts that the App Server has not done
+/// something: the time in which it would have.
+pub const PAUSE: Duration = Duration::from_millis(300);
+
 /// Waits until `ready` holds, failing the test past [`WAIT_LIMIT`].
-pub fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+pub fn wait_until(what: &str, ready: impl FnMut() -> bool) {
+    wait_until_within(WAIT_LIMIT, what, ready);
+}
+
+/// [`wait_until`] with `limit` in place of [`WAIT_LIMIT`], for a step whose
+/// own work takes longer; the caller states the estimate it comes from.
+pub fn wait_until_within(limit: Duration, what: &str, mut ready: impl FnMut() -> bool) {
     let start = Instant::now();
     while !ready() {
-        assert!(start.elapsed() < WAIT_LIMIT, "{what} did not happen");
+        assert!(start.elapsed() < limit, "{what} did not happen");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// The soft limit of open descriptors every App Server of the harness
+/// starts under, which is what a Mac gives a process; the App Server raises
+/// its limit when it starts.
+pub const START_DESCRIPTOR_LIMIT: u64 = 256;
 
 /// A running `server run`, reaped when dropped. Its owned test parent handles
 /// stale paths after every related process is gone; this guard never unlinks
@@ -111,9 +126,20 @@ pub struct AppServer {
 
 impl Drop for AppServer {
     fn drop(&mut self) {
-        let Some(child) = self.child.take() else {
+        #[cfg_attr(not(target_os = "macos"), expect(unused_mut))]
+        let Some(mut child) = self.child.take() else {
             return;
         };
+        // A Mac's forced unmount waits seconds for a server that is gone, so
+        // the drives of an App Server that still runs are unmounted before
+        // it is killed. One a test killed leaves its mounts to the next
+        // start, as a crash does.
+        #[cfg(target_os = "macos")]
+        if matches!(child.try_wait(), Ok(None))
+            && let Ok(root) = self.root.canonicalize()
+        {
+            crate::drives::unmount_under(&root);
+        }
         drop(child);
         #[cfg(target_os = "macos")]
         for entry in std::fs::read_dir(self.root.join("execution"))
@@ -135,12 +161,13 @@ impl Drop for AppServer {
 }
 
 impl AppServer {
-    /// Starts `tetral`, a `server run` command line, and waits until its
-    /// socket answers `GET /v1/status`.
+    /// Starts `tetral`, a `server run` command line, under
+    /// [`START_DESCRIPTOR_LIMIT`] and waits until its socket answers
+    /// `GET /v1/status`.
     pub fn start(tetral: Tetral, root: &Path) -> AppServer {
         let socket = socket_path_in(root, tetral.socket_context());
         let mut server = AppServer {
-            child: Some(tetral.spawn()),
+            child: Some(tetral.soft_descriptor_limit(START_DESCRIPTOR_LIMIT).spawn()),
             socket,
             root: root.to_path_buf(),
         };

@@ -25,7 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// Unlike the mandatory actual Keycloak SDK root, this controlled real HTTPS
+// Unlike the mandatory actual Keycloak root, this controlled real HTTPS
 // issuer is an exact request-count oracle. Counters advance before response
 // serialization, so successful or rejected Auth responses cannot hide fetches.
 type oidcReplicaIssuer struct {
@@ -106,7 +106,7 @@ func oidcReplicaExchange(ctx context.Context, t *testing.T, process *oidcAuthPro
 	}
 	request.Header.Set("Content-Type", "application/json")
 	requestedAt := time.Now()
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	response, err := publicClient(t, &http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
 		t.Fatal("actual replica exchange transport failed")
 	}

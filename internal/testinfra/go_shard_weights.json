@@ -68,7 +68,7 @@
         "TestEnvoyGatewayTranslatedProtocol": 39975,
         "TestForkSDKIntegrationCompatibilityProofs": 50562,
         "TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology": 4794,
-        "TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces": 5790,
+        "TestJobRunnerProductionLoopServesDeveloperWorkAcrossWorkspaces": 5790,
         "TestLaterSubagentMailNPlusOneFailsOnlyExactChild": 3385,
         "TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule": 1399,
         "TestMCPInputDiscoveryFailureReplayAndNextInputRecovery": 381,
@@ -77,7 +77,7 @@
         "TestMaximumAdmissionBodyTraversesRuntimeDeliveryAndRequestSettlement": 2177,
         "TestOIDCEdgePreservesExchangeAndBearerBoundary": 11,
         "TestOIDCKeycloakAuthRotation": 17510,
-        "TestOIDCKeycloakSDK": 23092,
+        "TestOIDCKeycloakDeveloper": 23092,
         "TestOIDCReplicaAuthority": 12623,
         "TestObjectStoreProtectedConnections": 22995,
         "TestPlatformKeyPhaseObservationValidation": 1,
@@ -147,7 +147,7 @@
         "TestPostgreSQLReplicaPlacementBinding": 6902,
         "TestPostgreSQLReplicaPlacementPromotionRaces": 1894,
         "TestPostgreSQLReplicaPublicControlPlane": 5400,
-        "TestPostgreSQLReplicaQueueMaintenanceShutdown": 1248,
+        "TestPostgreSQLReplicaQueueMaintenanceCancellation": 1248,
         "TestPostgreSQLReplicaQueueReceipts": 1473,
         "TestPostgreSQLReplicaRuntimeHandoff": 71594,
         "TestPostgreSQLReplicaSandboxProcessTakeover": 9620,
@@ -210,7 +210,7 @@
         "TestRuntimePodLossPreservesToolUseAwaitingApproval": 3911,
         "TestRuntimeRecoveryChildFinalExhaustionSkipsMailAfterParentCloseAdmission": 432,
         "TestSDKIntegrationCompatibilityOutputRequiresExecutedBoundProofs": 25,
-        "TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests": 29,
+        "TestPublicEdgeAuthenticatesSanitizesAndRoutesPublicRequests": 29,
         "TestSDKIntegrationReportReconcilesExecutedAssertions": 1,
         "TestSeparatedServiceWorkloadAuthentication": 5934,
         "TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC": 310,
@@ -233,12 +233,6 @@
         "TestSubagentNoWorkCloseResumeCyclePreservesCompletedRequest": 4956,
         "TestSubagentOutputCaptureObserverStopsAtQueryBoundary": 2,
         "TestSubagentRetainedAssistantAndTerminalToolResultColdResume": 4865,
-        "TestTransportSecurityIssuerFailure": 8499,
-        "TestTransportSecurityLeafReplacement": 2915,
-        "TestTransportSecurityPeerValidation": 4684,
-        "TestTransportSecurityRPCBounds": 7419,
-        "TestTransportSecurityStreamFailures": 7332,
-        "TestTransportSecurityTrustTransition": 5112,
         "TestWorstCaseEscapingAdmissionBodyTraversesRuntimeDeliveryAndRequestSettlement": 4884
       }
     },
@@ -253,10 +247,6 @@
     "github.com/tetral-ai/tetral/integration/transporttest": {
       "elapsed_ms": 1312,
       "overhead_ms": 1196
-    },
-    "github.com/tetral-ai/tetral/integration/transporttest/cmd/backend": {
-      "elapsed_ms": 0,
-      "overhead_ms": 190
     },
     "github.com/tetral-ai/tetral/internal/agent": {
       "elapsed_ms": 11860,

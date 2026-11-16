@@ -686,6 +686,29 @@ pub fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl R
         "rules [], `/bin/sh -c 'cat <p>/a'`: exit 1, {stderr:?}"
     ));
 
+    // On macOS, as in Codex's sandbox, `/tmp` that no rule covers is the
+    // host's and readable and writable; on Linux the command does not reach it.
+    fs::write(&outside, "host").unwrap();
+    let shared = runner.run(
+        &nothing,
+        p,
+        &[
+            "/bin/sh",
+            "-c",
+            &format!("cat {o}; printf x >> {o}", o = quoted(&outside)),
+        ],
+    );
+    let (read, left) = if cfg!(target_os = "macos") {
+        ("host", "hostx")
+    } else {
+        ("", "host")
+    };
+    assert_eq!(shared["stdout"], read, "{shared}");
+    assert_eq!(fs::read_to_string(&outside).unwrap(), left, "{shared}");
+    case.observe(format!(
+        "rules [], a file of the host's /tmp: the command read {read:?}, the file holds {left:?}"
+    ));
+
     let denied_inside = policy(
         json!([
             {"path": "/", "access": "read"},

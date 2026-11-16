@@ -1,0 +1,91 @@
+{
+  "messages": [],
+  "currentRequestMessage": null,
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "rwrite_attachment_hot_cold_run",
+        "eventSequence": 2,
+        "type": "session.status_running"
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "running"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_first_queued_delivery",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_first_queued_delivery",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [
+    {
+      "origin": {
+        "fileBacked": {
+          "sourceEventId": "sevt_0000000000000001",
+          "fileId": "file_first_queued_image"
+        }
+      },
+      "mime": "image/png",
+      "filename": "image.png"
+    },
+    {
+      "origin": {
+        "fileBacked": {
+          "sourceEventId": "sevt_0000000000000001",
+          "fileId": "file_first_queued_document"
+        }
+      },
+      "mime": "text/plain",
+      "filename": "notes.txt"
+    }
+  ],
+  "pendingAgentMail": []
+}

@@ -1577,14 +1577,19 @@ mod tests {
             }
             // Coarse steps up to 9.5 seconds, then fine ones, so that a retry
             // before 10 seconds shows at the clock's time; the clock then
-            // stays at 10 seconds until the retry, however long that takes.
+            // stays at 10 seconds until the retry, and only that wait has a
+            // limit: the 500 fine steps take as long as the machine gives
+            // each of them.
+            let mut at_ten_seconds = None;
             while seen.lock().unwrap().accepted.len() < 2 {
-                assert!(start.elapsed() < WAIT_LIMIT, "{stall:?}: no second attempt");
                 let elapsed = clock.now() - seen.lock().unwrap().accepted[0];
                 if elapsed < Duration::from_millis(9_500) {
                     clock.advance(Duration::from_millis(500));
                 } else if elapsed < Duration::from_secs(10) {
                     clock.advance(Duration::from_millis(1));
+                } else {
+                    let since = *at_ten_seconds.get_or_insert_with(std::time::Instant::now);
+                    assert!(since.elapsed() < WAIT_LIMIT, "{stall:?}: no second attempt");
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }

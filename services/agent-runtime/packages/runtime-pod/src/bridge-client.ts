@@ -882,7 +882,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 					});
 				}
 				if (
-					!refreshRuntimeBindingTokenErrorRetryable(error) ||
+					!bridgeGaveNoAnswer(error) ||
 					attempt === RuntimeBindingTokenRefreshPolicy.attempts
 				) {
 					throw normalizeContextLoaderError({
@@ -1138,7 +1138,19 @@ export class BridgeAPIContextLoader implements ContextLoader {
 				handoffId: options?.handoffId ?? "",
 			},
 			metadata,
-		);
+		).catch((error: unknown) => {
+			// Bridge gave no answer, so a later delivery can load the same
+			// context; every other failure stays as Bridge reported it.
+			if (!bridgeGaveNoAnswer(error)) throw error;
+			throw normalizeContextLoaderError({
+				code:
+					grpcStatusCode(error) === status.DEADLINE_EXCEEDED
+						? "timeout"
+						: "unavailable",
+				sessionId: input.sessionId,
+				reason: "Bridge did not answer the context load",
+			});
+		});
 		const parsed = parseContextPayload(
 			response.contextJson,
 			input,
@@ -2151,7 +2163,7 @@ function bindingTokenNeedsRefresh(
 	}
 }
 
-function refreshRuntimeBindingTokenErrorRetryable(error: unknown): boolean {
+function bridgeGaveNoAnswer(error: unknown): boolean {
 	const code = grpcStatusCode(error);
 	return code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED;
 }

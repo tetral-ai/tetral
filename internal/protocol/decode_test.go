@@ -469,6 +469,86 @@ func TestTheReportValueBudgetFollowsTheSharedCases(t *testing.T) {
 	}
 }
 
+// nestingCase is one case of protocol/nesting.cases.json, which the CLI's
+// readers share: the text is prefix, times copies of open, innermost, times
+// copies of close, and suffix; levels is its deepest nesting.
+type nestingCase struct {
+	Name      string `json:"name"`
+	Message   string `json:"message"`
+	Prefix    string `json:"prefix"`
+	Open      string `json:"open"`
+	Innermost string `json:"innermost"`
+	Close     string `json:"close"`
+	Times     int    `json:"times"`
+	Suffix    string `json:"suffix"`
+	Levels    int    `json:"levels"`
+	Outcome   string `json:"outcome"`
+}
+
+func (c nestingCase) text() []byte {
+	return []byte(c.Prefix + strings.Repeat(c.Open, c.Times) + c.Innermost + strings.Repeat(c.Close, c.Times) + c.Suffix)
+}
+
+// deepest counts the deepest nesting of objects and arrays outside strings.
+func deepest(text []byte) int {
+	depth, most, inString, escaped := 0, 0, false, false
+	for _, c := range text {
+		switch {
+		case inString && escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case inString:
+			inString = c != '"'
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			depth++
+			most = max(most, depth)
+		case c == '}' || c == ']':
+			depth--
+		}
+	}
+	return most
+}
+
+// Each shared case reaches its stated depth and, through its message's
+// decoder, its outcome: 127 levels are accepted and a text past them is
+// refused, in a member Engine forwards as in any other.
+func TestTheNestingLimitFollowsTheSharedCases(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "protocol", "nesting.cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []nestingCase
+	if err := json.Unmarshal(data, &cases); err != nil || len(cases) == 0 {
+		t.Fatalf("nesting cases: %d, %v", len(cases), err)
+	}
+	decoders := map[string]func([]byte) error{
+		"McpTools": func(b []byte) error { _, err := DecodeMcpTools(b); return err },
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			text := c.text()
+			if got := deepest(text); got != c.Levels {
+				t.Fatalf("%d levels; want %d", got, c.Levels)
+			}
+			err := decoders[c.Message](text)
+			var decode *DecodeError
+			outcome := "refused"
+			switch {
+			case err == nil:
+				outcome = "accepted"
+			case errors.As(err, &decode) && decode.Reason == "JSON nested too deeply":
+				outcome = "too_deep"
+			}
+			if outcome != c.Outcome {
+				t.Fatalf("%s (%v); want %s", outcome, err, c.Outcome)
+			}
+		})
+	}
+}
+
 // A dense tool-status report of the largest size allocates no more than a
 // report at the value budget: the token pass stops at the value past the
 // budget instead of counting a finished tree.

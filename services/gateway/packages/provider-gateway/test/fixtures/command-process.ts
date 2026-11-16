@@ -35,7 +35,7 @@ export function commandFixture(mode: string, event: (name: string) => void = () 
   };
   const dependencies: ProviderGatewayCommandDependencies = {
     tokenReviewClient: { createTokenReview: async () => ({ authenticated: true, audiences: [], username: "", podUid: "" }) },
-    credentialResolver: undefined as never, close: async () => close("database"),
+    credentialResolver: undefined as never, providerStreamer: undefined as never, close: async () => close("database"),
     app: {
       service: undefined as never, health: () => ({ ok: true }), ready: () => ({ ready: true }),
       start: async () => { event("listener.start"); if (mode === "listener") throw failure; return { grpcPort: 1, httpUrl: new URL("http://127.0.0.1:1") }; },

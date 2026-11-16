@@ -31,11 +31,10 @@ func TestFingerprintNestedObjectAllocationGrowth(t *testing.T) {
 	ready := protocol.Encode(protocol.Ready{ConnectionID: "conn", MessageID: "msg", OS: "linux", Arch: "x86_64", CLIVersion: "1.0.0", Capabilities: protocol.Capabilities{Drives: protocol.DriveCapability{Mount: true}}})
 	input := func(depth int) []byte {
 		body := []byte(string(ready[:len(ready)-1]) + `,"unknown":` + strings.Repeat(`{"a":`, depth) + `0` + strings.Repeat(`}`, depth) + `}`)
+		// Public routes fingerprint bodies no protocol reader has bounded,
+		// so the depth here is encoding/json's, not the protocol's 127.
 		if len(body) > 65536 {
 			t.Fatal("fixture exceeds client body limit")
-		}
-		if _, err := protocol.DecodeReady(body); err != nil {
-			t.Fatal(err)
 		}
 		return body
 	}

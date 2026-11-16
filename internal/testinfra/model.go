@@ -130,3 +130,14 @@ type StepResult struct {
 	FirstFailure string        `json:"first_failure,omitempty"`
 	Artifact     string        `json:"artifact,omitempty"`
 }
+
+// LocalRunLimit is the wall-clock limit of a whole run of profile: above the
+// limit of every step inside it (Go's default 10-minute test timeout in Fast,
+// the 25-minute integration package watchdog otherwise) and below the 30
+// minutes a documented local command may take.
+func LocalRunLimit(profile Profile) time.Duration {
+	if profile == ProfileFast {
+		return 12 * time.Minute
+	}
+	return 28 * time.Minute
+}

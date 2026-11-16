@@ -16,11 +16,18 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 )
 
+// An upload whose storage write fails answers a server error that a client
+// may send again, without the storage's diagnostic, and the same upload sent
+// again is stored once the storage accepts it.
 func TestDriveUploadServerFailuresRemainServerErrors(t *testing.T) {
 	var attempts atomic.Int32
 	storage := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
+		// Every other write fails: each upload's first, not its repeat.
+		if attempts.Add(1)%2 == 0 {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code><Message>private-provider-diagnostic</Message></Error>`)
@@ -54,10 +61,14 @@ func TestDriveUploadServerFailuresRemainServerErrors(t *testing.T) {
 				t.Fatal("no request reached S3")
 			}
 			if response.header.Get("x-should-retry") == "false" {
-				t.Fatal("server failure suppressed SDK retry")
+				t.Fatal("the server failure tells the client not to send the upload again")
 			}
 			if strings.Contains(string(response.body), "private-provider") {
 				t.Fatal("provider diagnostic leaked")
+			}
+			decodeDrive(t, tc.send(), http.StatusCreated, nil)
+			if attempts.Load() != before+2 {
+				t.Fatalf("%d storage writes for the upload and its repeat; want one each", attempts.Load()-before)
 			}
 		})
 	}
@@ -69,7 +80,7 @@ func TestDriveUploadSourceAndStageFailuresAreDistinct(t *testing.T) {
 	id := api.newDrive(`{}`)
 	for _, part := range []struct{ endpoint, name string }{{"files", "file"}, {"skills", "archive"}} {
 		body := "--broken\r\nContent-Disposition: form-data; name=\"" + part.name + "\"; filename=\"upload\"\r\n\r\ntruncated"
-		expectError(t, api.request(http.MethodPost, "/v1/drives/"+id+"/"+part.endpoint, strings.NewReader(body), "multipart/form-data; boundary=broken"), http.StatusBadRequest, "invalid_request_error", "the multipart body could not be read")
+		expectError(t, api.outside().request(http.MethodPost, "/v1/drives/"+id+"/"+part.endpoint, strings.NewReader(body), "multipart/form-data; boundary=broken"), http.StatusBadRequest, "invalid_request_error", "the multipart body could not be read")
 	}
 	if err := os.RemoveAll(filepath.Join(dir, "drive-upload-stage")); err != nil {
 		t.Fatal(err)

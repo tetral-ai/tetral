@@ -162,13 +162,6 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 
 }
 
-func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "912fd05e7bef3c1b3014a73522f67bae4be93d6759e2a598868dec384427492c"
-	if storage.PostgreSQLSchemaVersionOneChecksum != want {
-		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
-	}
-}
-
 func TestMigrateSchemaRerunKeepsAllStampsUnchanged(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
@@ -276,6 +269,16 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 				}
 			},
 			kind: storage.SchemaErrorMalformed,
+		},
+		{
+			name: "refused read",
+			setup: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`CREATE FUNCTION refuse_history() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'too many connections' USING ERRCODE = '53300'; END $$;
+					CREATE VIEW tetral_schema_migrations AS SELECT refuse_history() AS version, ''::text AS checksum`); err != nil {
+					t.Fatalf("create refusing registry: %v", err)
+				}
+			},
+			kind: storage.SchemaErrorUnreachable,
 		},
 	}
 

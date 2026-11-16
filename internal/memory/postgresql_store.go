@@ -199,7 +199,7 @@ func (s *PostgreSQLMemoryStore) ListStores(ctx context.Context, ws workspace.ID,
 			return StoreListResult{}, err
 		}
 	}
-	var rowsRead []*Store
+	rowsRead := []*Store{}
 	err := s.client.WithWorkspaceTx(ctx, string(ws), "memory.transaction", func(tx *dbconnect.Tx) error {
 		query := `SELECT memory_store_id, name, description, metadata_json, created_at, updated_at, archived_at
 		            FROM memory_stores
@@ -720,7 +720,7 @@ func (s *PostgreSQLMemoryStore) ListMemories(ctx context.Context, ws workspace.I
 		}
 		nextPage = &encoded
 	}
-	result := MemoryListResult{NextPage: nextPage}
+	result := MemoryListResult{Data: []MemoryListEntry{}, NextPage: nextPage}
 	for _, entry := range entries {
 		result.Data = append(result.Data, entry.Entry)
 	}
@@ -773,7 +773,7 @@ func (s *PostgreSQLMemoryStore) ListMemoryVersions(ctx context.Context, ws works
 			return MemoryVersionListResult{}, err
 		}
 	}
-	var rowsRead []*MemoryVersion
+	rowsRead := []*MemoryVersion{}
 	err = s.client.WithWorkspaceTx(ctx, string(ws), "memory.transaction", func(tx *dbconnect.Tx) error {
 		if err := requireStoreExists(ctx, tx, string(ws), storeID); err != nil {
 			return err

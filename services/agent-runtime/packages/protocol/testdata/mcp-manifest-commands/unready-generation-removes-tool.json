@@ -1,0 +1,21 @@
+{
+  "coldContextJson": "{\"messages\":[],\"currentRequestMessage\":null,\"turnFacts\":{\"events\":[],\"internalRepairs\":[]},\"threadContextPrefix\":null,\"thread\":{\"parentThreadId\":null,\"parentTaskName\":null,\"role\":\"main\",\"visibility\":\"public\",\"taskName\":null,\"agentType\":\"default\",\"status\":\"idle\"},\"runtimeConfig\":{\"configGeneration\":1,\"approvalMode\":\"ask_for_approval\",\"system\":null,\"memoryStores\":[],\"agent\":{\"id\":\"agent_sesn_manifest_composition\",\"version\":1,\"configHash\":\"\",\"config\":{\"name\":\"agent\",\"model\":\"anthropic/claude-opus-4-8\",\"tools\":[{\"type\":\"mcp_toolset\",\"mcp_server_name\":\"github\"}],\"mcp_servers\":[{\"type\":\"url\",\"name\":\"github\",\"url\":\"https://api.githubcopilot.com/mcp/\"}],\"skills\":[],\"metadata\":{}}},\"environment\":{\"id\":\"env_sesn_manifest_composition\",\"currentGeneration\":1,\"config\":{}},\"toolPolicy\":{\"approvalMode\":\"ask_for_approval\",\"mcpServers\":[{\"type\":\"url\",\"name\":\"github\",\"url\":\"https://api.githubcopilot.com/mcp/\"}],\"mcpToolsets\":[{\"mcpServerName\":\"github\"}]},\"skills\":[],\"skillsIndex\":[],\"installedTools\":[{\"type\":\"tetral_agent_toolset\",\"family\":\"claude\"},{\"type\":\"mcp_toolset\",\"mcp_server_name\":\"github\"}],\"providerRescheduleBudget\":3,\"compactionRescheduleBudget\":2},\"mcpManifests\":[{\"mcpServerName\":\"github\",\"manifestGeneration\":2,\"readiness\":\"unready\",\"diagnostic\":\"manifest_too_large\",\"tools\":[]}],\"pendingToolUses\":[],\"pendingSandboxExecutions\":[],\"pendingAttachments\":[],\"pendingAgentMail\":[]}",
+  "command": {
+    "workspaceId": "default",
+    "sessionId": "sesn_manifest_composition",
+    "bindingId": "bind_manifest_composition",
+    "bindingGeneration": "1",
+    "targetPodUid": "pod_manifest_composition",
+    "mcpManifest": {
+      "mcpServerName": "github",
+      "generation": "2",
+      "contentJson": "{\"mcp_manifest\":{\"diagnostic\":\"manifest_too_large\",\"manifest_generation\":2,\"mcp_server_name\":\"github\",\"readiness\":\"unready\"},\"session_id\":\"sesn_manifest_composition\",\"workspace_id\":\"default\"}"
+    },
+    "runtimeProcessId": "process_pod_manifest_composition"
+  },
+  "installedManifest": {
+    "contentJson": "{\"mcp_manifest\":{\"diagnostic\":null,\"manifest_etag\":\"etag_ready\",\"manifest_generation\":1,\"mcp_server_name\":\"github\",\"readiness\":\"ready\",\"tools\":[{\"name\":\"github_search\",\"description\":\"github_search\",\"input_schema\":{\"type\":\"object\"}}]},\"session_id\":\"sesn_manifest_composition\",\"workspace_id\":\"default\"}",
+    "generation": 1
+  },
+  "runtimeConfigContentJson": "{\"approval_mode\":\"ask_for_approval\",\"config_generation\":1,\"memory_stores\":[],\"session_id\":\"sesn_manifest_composition\",\"system\":null,\"tool_policy\":{\"approvalMode\":\"ask_for_approval\",\"mcpServers\":[{\"type\":\"url\",\"name\":\"github\",\"url\":\"https://api.githubcopilot.com/mcp/\"}],\"mcpToolsets\":[{\"mcpServerName\":\"github\"}]},\"workspace_id\":\"default\"}"
+}

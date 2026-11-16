@@ -17,10 +17,14 @@ for (const decision of ["allow", "deny"] as const) {
 		const metrics = new RuntimePodMetricsRegistry();
 		let requestParts: readonly RuntimeContextPart[] | undefined;
 		const executions: string[] = [];
+		const settlements: Parameters<SessionEventWriter["settleToolResult"]>[0][] = [];
 		const session = new ThreadRuntime(`sesn_member_${decision}`, new AutoApprovalReviewerManager());
 		const baseWriter = writerFrom(envelope => {
 			appends.push(envelope);
 			return { ok: true, type: "committed", eventId: `bridge-${envelope.writeId}`, eventSequence: 1 };
+		}, undefined, [], undefined, async envelope => {
+			settlements.push(envelope);
+			return { ok: true as const, result: { type: "committed" as const } };
 		});
 		const writer: SessionEventWriter = {
 			...baseWriter,
@@ -55,7 +59,7 @@ for (const decision of ["allow", "deny"] as const) {
 			reviewApproval: () => Effect.promise(async () => {
 				reviewerEntered.resolve();
 				await releaseReviewer.promise;
-				return { type: "decision" as const, riskLevel: "low" as const, userAuthorization: "high" as const, outcome: decision };
+				return { type: "decision" as const, riskLevel: "low" as const, userAuthorization: "high" as const, outcome: decision, ...(decision === "deny" ? { message: "too risky" } : {}) };
 			}),
 			runTool: request => {
 				executions.push(request.modelToolCallId);
@@ -81,6 +85,11 @@ for (const decision of ["allow", "deny"] as const) {
 				{ type: "tool_call", modelToolCallId: "read", toolName: "Read", canonicalInput: { file_path: "/workspace/b.txt" } },
 			]);
 			expect(executions.sort()).toEqual(decision === "allow" ? ["read", "write"] : ["read"]);
+			if (decision === "deny") {
+				expect(settlements).toContainEqual(expect.objectContaining({
+					settlement: expect.objectContaining({ outcome: { type: "error", error: expect.objectContaining({ message: "too risky" }) } }),
+				}));
+			}
 			expect(session.state.activeTools()).toEqual([]);
 			expect(metrics.snapshot().activeToolFibers).toBe(0);
 		} finally {

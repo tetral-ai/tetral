@@ -95,6 +95,7 @@ func TestPostgreSQLBridgeToolRelationWritersDeriveOneFact(t *testing.T) {
 			}
 			sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, response, "committed")
 		}
+		sessionfixture.RequireEventsProcessedForTest(t, f.admin, f.scope.SessionId, true, "agent.tool_result", "agent.mcp_tool_result")
 		facts := sessionfixture.RequireToolRelationFactsForTest(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId)
 		if facts[toolUse].ModelToolCallID != "call_relation_tool" || facts[mcpUse].ModelToolCallID != "call_relation_mcp" {
 			t.Fatalf("declared call IDs = %+v / %+v", facts[toolUse], facts[mcpUse])
@@ -154,6 +155,7 @@ func TestPostgreSQLBridgeToolRelationWritersDeriveOneFact(t *testing.T) {
 		if err != nil || ended.GetCommitted() == nil || len(ended.GetCommitted().GetInterruptToolResults()) != 1 {
 			t.Fatalf("interrupt request end = %#v/%v; want one interrupt Tool result", ended, err)
 		}
+		sessionfixture.RequireEventsProcessedForTest(t, f.admin, f.scope.SessionId, true, "agent.tool_result", "span.model_request_end")
 		facts := sessionfixture.RequireToolRelationFactsForTest(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId)
 		result := relationResultFor(t, facts, toolUse)
 		if relationRuntimeWriteID(t, f, result.EventID) != runtimecontrol.StableRuntimeID("interrupt_tool_result", "evt_relation_interrupt", toolUse) {
@@ -187,6 +189,8 @@ func TestPostgreSQLBridgeToolRelationWritersDeriveOneFact(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("CommitRuntimeTermination: %v", err)
 		}
+		sessionfixture.RequireEventsProcessedForTest(t, f.admin, f.scope.SessionId, true,
+			"agent.tool_result", "span.model_request_end", "session.error", "session.status_terminated", "session.thread_status_terminated")
 		facts := sessionfixture.RequireToolRelationFactsForTest(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId)
 		mainResult := relationResultFor(t, facts, mainUse)
 		if relationRuntimeWriteID(t, f, mainResult.EventID) != runtimecontrol.StableRuntimeID("runtime_termination_tool_result", "relation-termination", mainUse) {

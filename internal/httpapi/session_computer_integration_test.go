@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -33,9 +34,10 @@ type computerObject struct {
 	CWD               *string         `json:"cwd"`
 	Networking        json.RawMessage `json:"networking"`
 	Repositories      []struct {
-		ID        string  `json:"id"`
-		MountPath *string `json:"mount_path"`
-		Path      string  `json:"path"`
+		ID          string          `json:"id"`
+		MountPath   *string         `json:"mount_path"`
+		Path        string          `json:"path"`
+		GitIdentity json.RawMessage `json:"git_identity"`
 	} `json:"repositories"`
 	AssociationState string          `json:"association_state"`
 	ExecutionState   string          `json:"execution_state"`
@@ -123,6 +125,9 @@ func TestSessionComputerAddRules(t *testing.T) {
 		t.Fatalf("first user computer = %d; want 201", status)
 	}
 	before := env.computerRows(t)
+	// These rows are requests the file accepts, which Engine refuses for what
+	// they name; the others are outside the file on purpose.
+	withinTheFile := map[string]bool{"r3": true, "r4": true, "r5": true, "r6": true, "r7": true, "r8": true}
 	for _, row := range []struct {
 		name, key, body string
 		status          int
@@ -152,7 +157,11 @@ func TestSessionComputerAddRules(t *testing.T) {
 		{"missing Idempotency-Key", "", `{"environment_id":"env_http_session"}`, 400, "invalid_request_error", "Idempotency-Key"},
 		{"body over 1 MiB", "r18", `{"environment_id":"env_http_session","working_directory":"/` + strings.Repeat("a", 1<<20) + `"}`, 413, "request_too_large", ""},
 	} {
-		recorder := env.requestWithKey(http.MethodPost, route, row.key, row.body)
+		send := env.outside()
+		if withinTheFile[row.key] {
+			send = env
+		}
+		recorder := send.requestWithKey(http.MethodPost, route, row.key, row.body)
 		errorType, message, hasCode := errorBody(t, recorder)
 		if recorder.Code != row.status || errorType != row.errorType || hasCode || !strings.Contains(message, row.message) {
 			t.Errorf("%s = %d %s; want %d %s naming %q and no code", row.name, recorder.Code, recorder.Body.String(), row.status, row.errorType, row.message)
@@ -162,19 +171,23 @@ func TestSessionComputerAddRules(t *testing.T) {
 		t.Fatalf("computer rows = %d after refused entries; want %d", after, before)
 	}
 
-	// An entry that excludes a drive the Session does not bind is accepted.
-	const body = `{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/acme/app","authorization_token":"github_token_cm19"}],"drive_exclude":[{"drive_id":"drive_unbound","paths":["datasets/"]}]}`
+	// An entry that excludes a drive the Session does not bind is accepted,
+	// and its repositories keep the order and the spelling submitted, here
+	// the inner one first under a path that is not in its shortest form.
+	const body = `{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/acme/lib","authorization_token":"github_token_inner","mount_path":"/workspace/app//vendor/./lib"},
+		{"url":"https://github.com/acme/app","authorization_token":"github_token_cm19"}],"drive_exclude":[{"drive_id":"drive_unbound","paths":["datasets/"]}]}`
 	first := env.requestWithKey(http.MethodPost, route, "add-cloud", body)
 	assertHTTPStatus(t, first, http.StatusCreated)
-	if strings.Contains(first.Body.String(), "github_token_cm19") {
+	if strings.Contains(first.Body.String(), "github_token_cm19") || strings.Contains(first.Body.String(), "github_token_inner") {
 		t.Fatalf("computer object carries the repository token: %s", first.Body.String())
 	}
 	var added computerObject
 	decodeSessionIntegrationJSON(t, first, &added)
 	if added.AssociationState != "attached" || added.ExecutionState != "waiting" || added.CWD != nil || added.ConnectionID != nil || added.BindingID != nil ||
-		string(added.Error) != "null" || added.WorkingDirectory != "/workspace" || len(added.Repositories) != 1 || added.Repositories[0].Path != "/workspace/app" ||
-		added.Repositories[0].MountPath != nil {
-		t.Fatalf("new computer = %s; want attached, waiting, /workspace, the repository at /workspace/app and null cwd, connection, binding and error", first.Body.String())
+		string(added.Error) != "null" || added.WorkingDirectory != "/workspace" || len(added.Repositories) != 2 ||
+		added.Repositories[0].Path != "/workspace/app//vendor/./lib" || added.Repositories[0].MountPath == nil ||
+		added.Repositories[1].Path != "/workspace/app" || added.Repositories[1].MountPath != nil {
+		t.Fatalf("new computer = %s; want attached, waiting, /workspace, the repositories at /workspace/app//vendor/./lib and /workspace/app in that order and null cwd, connection, binding and error", first.Body.String())
 	}
 	replay := env.requestWithKey(http.MethodPost, route, "add-cloud", body)
 	var replayed computerObject
@@ -230,22 +243,75 @@ func instanceComputerCount(t *testing.T, env *sessionIntegrationEnv, instanceID 
 	return count
 }
 
-// An addition while the Session runs is refused, and one to an idle
-// Session leaves it idle.
+// An addition while the Session runs is refused and writes no machine
+// message; one to an idle Session leaves it idle and writes one added message
+// about its computer, queued with one job. Neither a message still queued nor
+// one accepted with no Runtime makes the next addition or the archive of the
+// main thread look busy.
 func TestSessionComputerAddNeedsAnIdleSession(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
 	created := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
 	route := "/v1/sessions/" + created.ID + "/computers"
+	type message struct {
+		computerID, change, status string
+		activeJobs                 int
+	}
+	messages := func() []message {
+		rows, err := env.admin.QueryContext(t.Context(), `SELECT m.computer_id, m.change, i.status,
+			(SELECT count(*) FROM queue_jobs j WHERE j.workspace_id=m.workspace_id AND j.kind='runtime_input' AND j.status IN ('pending','leased')
+			   AND j.dedupe_key='runtime_input:'||m.workspace_id||':'||m.session_id||':'||m.runtime_input_id)
+			FROM session_machine_messages m
+			JOIN session_runtime_inbox i ON i.workspace_id=m.workspace_id AND i.runtime_input_id=m.runtime_input_id
+			WHERE m.session_id=$1 ORDER BY m.created_at, m.runtime_input_id`, created.ID)
+		if err != nil {
+			t.Fatalf("read machine messages: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var all []message
+		for rows.Next() {
+			var one message
+			if err := rows.Scan(&one.computerID, &one.change, &one.status, &one.activeJobs); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, one)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return all
+	}
+
 	setHTTPSessionRuntimeStatus(t, env.admin, workspace.DefaultID, created.ID, session.StatusRunning)
 	running := env.requestWithKey(http.MethodPost, route, "while-running", `{"environment_id":"env_http_session"}`)
 	if errorType, _, _ := errorBody(t, running); running.Code != http.StatusConflict || errorType != "invalid_request_error" {
 		t.Fatalf("addition while running = %d %s; want 409 invalid_request_error", running.Code, running.Body.String())
 	}
+	if got := messages(); len(got) != 0 {
+		t.Fatalf("refused addition wrote %+v; want no message", got)
+	}
+
 	setHTTPSessionRuntimeStatus(t, env.admin, workspace.DefaultID, created.ID, session.StatusIdle)
-	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "while-idle", `{"environment_id":"env_http_session"}`), http.StatusCreated)
+	first := env.requestWithKey(http.MethodPost, route, "while-idle", `{"environment_id":"env_http_session"}`)
+	assertHTTPStatus(t, first, http.StatusCreated)
+	var added computerObject
+	decodeSessionIntegrationJSON(t, first, &added)
 	if status := loadHTTPSessionRuntimeStatus(t, env.admin, workspace.DefaultID, created.ID); status != "idle" {
 		t.Fatalf("Session status after an addition = %s; want idle", status)
 	}
+	if got := messages(); !reflect.DeepEqual(got, []message{{added.ID, computer.ChangeAdded, "queued", 1}}) {
+		t.Fatalf("messages after the addition = %+v; want one queued added message about %s with one job", got, added.ID)
+	}
+	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "with-a-queued-message", `{"environment_id":"env_http_session"}`), http.StatusCreated)
+
+	// What Job Runner leaves of an added message of a Session no Runtime holds.
+	env.exec(t, `UPDATE queue_jobs SET status='acknowledged' WHERE kind='runtime_input' AND status='pending'`)
+	env.exec(t, `UPDATE session_runtime_inbox SET status='accepted' WHERE session_id=$1 AND input_kind='machine_message'`, created.ID)
+	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "with-accepted-messages", `{"environment_id":"env_http_session"}`), http.StatusCreated)
+	var mainThreadID string
+	if err := env.admin.QueryRowContext(t.Context(), `SELECT main_thread_id FROM sessions WHERE id = $1`, created.ID).Scan(&mainThreadID); err != nil {
+		t.Fatal(err)
+	}
+	assertHTTPStatus(t, env.request(http.MethodPost, "/v1/sessions/"+created.ID+"/threads/"+mainThreadID+"/archive?beta=true", ""), http.StatusOK)
 }
 
 // Session creation's computer forms, and the Session object's computers and
@@ -260,7 +326,7 @@ func TestSessionCreationComputers(t *testing.T) {
 		{"resources with computers", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"}],"resources":[{"type":"github_repository","url":"https://github.com/acme/app","authorization_token":"t"}]}`, "resources"},
 		{"computers with environment_id", `{"agent":"agent_http_session","vault_ids":[],"environment_id":"env_http_session","computers":[{"environment_id":"env_http_session"}]}`, "environment_id"},
 	} {
-		recorder := env.request(http.MethodPost, "/v1/sessions", row.body)
+		recorder := env.outside().request(http.MethodPost, "/v1/sessions", row.body)
 		if errorType, message, _ := errorBody(t, recorder); recorder.Code != http.StatusBadRequest || errorType != "invalid_request_error" || !strings.Contains(message, row.message) {
 			t.Errorf("%s = %d %s; want 400 invalid_request_error naming %q", row.name, recorder.Code, recorder.Body.String(), row.message)
 		}
@@ -291,6 +357,12 @@ func TestSessionCreationComputers(t *testing.T) {
 	decodeSessionIntegrationJSON(t, env.request(http.MethodGet, "/v1/sessions/"+one.ID+"/computers/"+oneSession.Computers[0].ID, ""), &later)
 	if string(later.Networking) != `{"type":"blocked"}` {
 		t.Fatalf("computer networking after the Environment changed = %s; want the blocked copy", later.Networking)
+	}
+	env.exec(t, `UPDATE computers SET execution_state='failed',error_code='cwd_not_found',error_message='the working directory does not exist' WHERE id=$1`, later.ID)
+	var failed computerObject
+	decodeSessionIntegrationJSON(t, env.request(http.MethodGet, "/v1/sessions/"+one.ID+"/computers/"+later.ID, ""), &failed)
+	if failed.ExecutionState != "failed" || string(failed.Error) != `{"code":"cwd_not_found","message":"the working directory does not exist"}` {
+		t.Fatalf("failed computer = %s %s; want failed with its error", failed.ExecutionState, failed.Error)
 	}
 
 	const body = `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop"}]}`
@@ -350,13 +422,13 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 		"repositories":[{"url":"https://github.com/acme/app","authorization_token":"github_token_fixed","mount_path":"/src/app"}]}]}`)
 	var before computerSession
 	decodeSessionIntegrationJSON(t, env.request(http.MethodGet, "/v1/sessions/"+created.ID, ""), &before)
-	if len(before.Computers) != 1 || len(before.Computers[0].Repositories) != 1 {
-		t.Fatalf("created Session = %+v; want one computer with one repository", before)
+	if len(before.Computers) != 1 || len(before.Computers[0].Repositories) != 1 || string(before.Computers[0].Repositories[0].GitIdentity) != "null" {
+		t.Fatalf("created Session = %+v; want one computer with one repository whose git_identity, not given, is null", before)
 	}
 	repositoryID := before.Computers[0].Repositories[0].ID
 	resources := "/v1/sessions/" + created.ID + "/resources"
 	for name, recorder := range map[string]*httptest.ResponseRecorder{
-		"add":    env.request(http.MethodPost, resources, `{"type":"github_repository","url":"https://github.com/acme/lib","authorization_token":"t"}`),
+		"add":    env.outside().request(http.MethodPost, resources, `{"type":"github_repository","url":"https://github.com/acme/lib","authorization_token":"t"}`),
 		"delete": env.request(http.MethodDelete, resources+"/"+repositoryID, ""),
 	} {
 		if errorType, _, _ := errorBody(t, recorder); recorder.Code != http.StatusBadRequest || errorType != "invalid_request_error" {
@@ -374,7 +446,8 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 
 // A Session created with a user computer whose instance's connection is
 // already online stores exactly one session.prepare in the creation
-// transaction, for the computer's new preparing binding.
+// transaction, for the computer's new preparing binding, carrying the drive
+// exclusions the computer was created with.
 func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
@@ -428,7 +501,7 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 		return result
 	}
 
-	response := env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop"}]}`)
+	response := env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop","drive_exclude":[{"drive_id":"drive_team","paths":["datasets/","tmp/cache/"]}]}]}`)
 	assertHTTPStatus(t, response, http.StatusOK)
 	var created computerSession
 	decodeSessionIntegrationJSON(t, response, &created)
@@ -458,14 +531,18 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	var envelope struct {
 		MessageID string `json:"message_id"`
 		Payload   struct {
-			SessionID string `json:"session_id"`
-			BindingID string `json:"binding_id"`
-			Cwd       string `json:"cwd"`
+			SessionID    string                  `json:"session_id"`
+			BindingID    string                  `json:"binding_id"`
+			Cwd          string                  `json:"cwd"`
+			DriveExclude []computer.DriveExclude `json:"drive_exclude"`
 		} `json:"payload"`
 	}
 	if len(envelopes) != 1 || json.Unmarshal([]byte(envelopes[0]), &envelope) != nil || envelope.Payload.SessionID != created.ID ||
 		envelope.Payload.Cwd != "/Users/me/shop" || user.ExecutionState != "preparing" || user.BindingID == nil || *user.BindingID != envelope.Payload.BindingID {
 		t.Fatalf("creation stored %v for computer %+v; want one session.prepare of its preparing binding", envelopes, user)
+	}
+	if want := []computer.DriveExclude{{DriveID: "drive_team", Paths: []string{"datasets/", "tmp/cache/"}}}; !reflect.DeepEqual(envelope.Payload.DriveExclude, want) {
+		t.Fatalf("session.prepare drive_exclude = %v; want the computer's %v", envelope.Payload.DriveExclude, want)
 	}
 	if records := phaseStarts(); len(records) != 1 || records[0]["event"] != "cold_start.phase_started" || records[0]["cold_start.phase"] != "prepare" || records[0]["binding.id"] != envelope.Payload.BindingID {
 		t.Fatalf("committed creation phase = %v", records)

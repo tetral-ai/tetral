@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
@@ -58,7 +59,7 @@ func newSessionStatusFixture(t *testing.T, sessionID, mainID string) *sessionSta
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_status"), nil //nolint:gosec // G101: synthetic test API key id
 	})
-	f.router = httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator))
+	f.router = enginetest.NewDeveloper(t).Handler(httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator)))
 	return f
 }
 
@@ -245,6 +246,8 @@ func TestSessionStatusFollowsEveryThread(t *testing.T) {
 	if got := f.threadOnlyStatusEvents(mainID); got != 2 {
 		t.Fatalf("main thread status events off the primary stream = %d; want 2", got)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, f.admin, sessionID, true,
+		"session.status_running", "session.thread_status_running", "session.thread_status_idle", "session.status_idle")
 	t.Run("waiting calls retain thread order", func(t *testing.T) {
 		f := newSessionStatusFixture(t, "sesn_waiting_union", "sthr_waiting_main")
 		for _, child := range []string{"sthr_first_child", "sthr_second_child"} {

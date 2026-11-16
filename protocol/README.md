@@ -22,6 +22,8 @@ connection to Engine.
 | [`drive-transfer-v1.schema.json`](drive-transfer-v1.schema.json) | The drive transfer endpoints: their path and query parameters, headers, bodies, responses, limits and endpoint table. It refers to the connection schema for the error body and `drive.changed`, and to the tool execution schema for drive writers and rejection reasons |
 | [`drive-transfer-v1.fixtures.json`](drive-transfer-v1.fixtures.json) | Valid and invalid example messages of the drive transfer schema |
 | [`report-values.cases.json`](report-values.cases.json) | Cases at the report value limit that every reader is tested against: each case's text is `prefix`, then `times` copies of `item` joined by commas, then `suffix`; `message` names the definition whose decoder reads it, `values` the JSON values a reader reaches in it before any failure, and `outcome` the result: `accepted`, `too_many_values`, `duplicate_member`, or `refused` for any other refusal |
+| [`nesting.cases.json`](nesting.cases.json) | Cases at the nesting limit that every reader is tested against: each case's text is `prefix`, then `times` copies of `open`, then `innermost`, then `times` copies of `close`, then `suffix`; `message` names the definition whose decoder reads it, `levels` the deepest nesting of objects and arrays in the text, and `outcome` the result: `accepted`, or `too_deep` for a text past 127 levels, in a member Engine forwards as in any other |
+| [`behaviour-v1.cases.json`](behaviour-v1.cases.json) | Behaviour cases: sequences of requests, answers, events and reports that both products are run against ([behaviour cases](#behaviour-cases)) |
 
 The schemas define structure and types. This README adds what JSON Schema cannot
 express: byte limits, ordering, the relationships between fields and between a
@@ -300,6 +302,7 @@ shutdown -> stopping -> stopped
 | Registration deadline | The ready ACK within 45 seconds of `connected`; otherwise the CLI abandons the connection ([registration failure](#registration-failure)) |
 | Ordinary HTTP request | 10 seconds in total; retries stay within the connection's deadlines. Tool reports and local MCP tool-list reports use longer totals ([large-report deadlines](#large-report-deadlines)); drive transfer requests use their own ([drive transfer](#common-rules)) |
 | SSE request | No whole-request timeout; a failure shows as stream closure or expired validity |
+| Stream stall | Engine writes each event in pieces of at most 16 KiB and ends the stream, with no `disconnect`, when its socket has not taken a piece within 10 seconds. A write has no total deadline: a reader that takes no bytes, or far fewer than 1 MB per 10 seconds behind a backlog larger than the socket's buffer, loses its stream |
 | Reconnect delay | Exponential backoff: the base delay starts at 1 second and doubles after each failed attempt up to 30 seconds; each wait is the base delay plus random jitter of up to 20% of it. The base delay returns to 1 second after one confirmed heartbeat on the new online connection. A stream-only `disconnect` resumes at once. Resume attempts use the backoff and stop at the connection deadline |
 | Stream maximum age | An Engine setting, default 30 minutes, plus random jitter of up to 10%, counted from the stream's `connected`. At that age Engine ends the stream with a stream-only `disconnect` |
 | Silent connection end | When a connection ends silently, with no `disconnect`, its authority ends when its lease expires, at most 45 seconds after the last grant: from then on Engine refuses every request made under it and routes no new work through it. Engine ends the connection when its Cleanup, scheduled once per minute, next looks for expired connections, or earlier when the instance connects again; an attempt that fails or does not finish leaves the connection for a later one. The schedule is not a completion deadline: a run still in progress, an unavailable database, contention or a backlog can delay the end, and the protocol sets no maximum time from the lease's expiry to it. Until the end, the calls it settles keep waiting and the notices of its background commands are not written |
@@ -976,8 +979,9 @@ output before execution.
 
 An error response has the body `connection-v1.schema.json#/$defs/ErrorBody`,
 `{code, message}`, with `code` from
-`connection-v1.schema.json#/$defs/ErrorCode`. `message` is displayable and never
-holds a credential. `409 previous_connection_active` adds `retry_after_ms` (0 to
+`connection-v1.schema.json#/$defs/ErrorCode` and the status that
+`connection-v1.schema.json#/$defs/ErrorStatuses` names for the code. `message`
+is displayable and never holds a credential. `409 previous_connection_active` adds `retry_after_ms` (0 to
 45,000), `409 content_missing` adds `missing_sha256` (1 to 10,000 distinct
 hashes), and `429 rate_limited` comes with the `Retry-After` header.
 
@@ -1274,7 +1278,10 @@ platform script is sent, and the CLI infers no permission from missing fields.
   `deny`, `read` or `read_write`. A directory rule covers its descendants; the
   more specific path wins. Two rules with different access for one path are
   rejected; list order never decides. There are no wildcards. A user path that
-  no rule covers is denied; an empty array grants no ordinary path.
+  no rule covers is denied; an empty array grants no ordinary path. The one
+  exception is on macOS, as in Codex's sandbox: every command can read and
+  write `/tmp` and `/var/tmp` (`/private/tmp`, `/private/var/tmp`) where no
+  rule covers them; where a rule covers them, the rule decides.
 - Inside each `read_write` rule's path, the top-level `.git`, and the git
   directory that a `.git` file there points to, stay read-only. This belongs to
   the rule, not to the protections below: a `read_write` rule for `/` leaves
@@ -1602,10 +1609,13 @@ fresh local state.
   is built fresh on the current connection and may name a task of an earlier
   connection.
 - Engine delivers a report with `task_id` to the thread that made that task's
-  call, or to the main thread when that thread is closed, and a report without
-  `task_id` to the main thread. It delivers each `message_id` once and never
-  starts a run: a running Session's thread gets it before its next model call,
-  an idle Session's at its next turn.
+  call, or to the main thread when that thread is failed or terminated, or
+  it or an ancestor is closed or has an interrupt or a close admitted and not
+  yet done. A report waiting for a thread moves to the main thread when that
+  thread is closed or terminated. A report without `task_id` goes to the main
+  thread. Engine delivers each `message_id` once and never starts a run: a
+  running Session's thread gets it before its next model call, an idle
+  Session's at its next turn.
 
 ### Acknowledgement, deduplication and delivery
 
@@ -2882,3 +2892,68 @@ rules](#permissions-sandbox_policy)):
   directories are denied under the [mandatory filesystem rules](#permissions-sandbox_policy).
   This Session's healthy mounts retain the binding-based access described
   above. The CLI's sync component runs outside the Session's policy.
+
+## Behaviour cases
+
+`behaviour-v1.cases.json` holds the behaviour of this README that one message
+cannot show: what Engine answers in a given state, and which reports the CLI
+sends for an instruction, in order. Each product is run against the cases, and
+so is the stand-in each product's tests use for the other: an Engine-direction
+case runs against Engine and against the CLI's reference control server; a
+CLI-direction case runs against the CLI, and is the sequence Engine's test
+client plays as the CLI. A case is written for a behaviour one product's
+tests rely on in the other.
+
+The file is `{version, states, stimuli, contents, cases}`.
+
+- `states` and `stimuli` are the closed lists of what a case may ask for:
+  each name with the members its `with` takes and, in `means`, what it is in
+  this README's words. Each side brings a state about and runs a stimulus by
+  its own means. A behaviour that these names cannot produce on both sides is
+  not a case; its product tests it alone.
+- `contents` names file contents: `{text}`, or `{byte, count}` for `count`
+  copies of one byte.
+- A case is `{name, direction, section, given, steps}`: `direction` is
+  `engine` or `cli`, `section` the heading of this README that states the
+  behaviour, `given` the states it starts from, in order, each `{state,
+  with}`.
+- A case names its instance, credentials, Sessions, bindings and drives by
+  symbols of its own, such as `"drive": "D"`, and each side gives a symbol an
+  identity. A symbol is bound where it first appears: by the state or stimulus
+  that creates the thing, or by the first answer or event that carries it.
+  Inside a string, `${instance:I}`, `${credential:K}`, `${session:S}`,
+  `${binding:B}` and `${drive:D}` stand for a symbol's identity,
+  `${connection}` for the `connection_id` of the latest `connected`,
+  `${sha256:C}` for the SHA-256 of content `C`, and `${name}` for a captured
+  string or number. `{"$size": "C"}` stands for the size of content `C` as a
+  number and `{"$value": "name"}` for a captured value of any type.
+  `{"$repeat": {"count": n, "each": value}}` stands for an array of `n` copies
+  of `value`, in which `${index}` is the copy's number from 0 as five digits.
+- A step is exactly one of:
+  - `request` with `answer`: the request (`method`, `path`, `query`,
+    `headers`, and `body` or `content`) and what the contract requires of its
+    answer (`status`, `headers`, and `body` or, for raw bytes, `content` as
+    `{of, from, to}`). `declares_bytes` in place of a body is a
+    `Content-Length` of which the request sends no byte: the answer comes
+    before the body. `credential` is the symbol of the credential the
+    request is sent under, the instance's first without it. `invalid: true`
+    marks a request the case puts outside the contract on purpose. An events request answered `200` makes its
+    stream the case's stream.
+  - `expect`: with `event`, the next event on the case's stream, where a
+    `heartbeat` is passed over unless a `heartbeat` is expected; with
+    `request`, the CLI's next request to that `path`; with `end: true`, the
+    end of the stream.
+  - `stimulus` with `with`, in which a captured value may stand.
+- An expected value matches a received one like this: an object matches an
+  object that has at least its members, each matching; an array matches an
+  array of the same length, element by element; any other value matches an
+  equal one. `{"$capture": "name"}` matches any value and names it;
+  `{"$absent": true}` as a member's value requires that the member is absent;
+  `{"$between": [low, high]}` matches a number, or a header's decimal value,
+  from `low` to `high`. A case states only what the contract fixes.
+- A CLI-direction case is a trigger and its reaction: an `expect` with
+  `event`, the instruction Engine sent, followed by each `expect` with
+  `request` that the CLI sends for it, in order.
+- A runner fails on a case, state, stimulus, step or matcher it does not
+  implement, and lists the cases it ran; the list equals the file's cases of
+  its direction.

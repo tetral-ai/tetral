@@ -38,7 +38,7 @@ func (server *Server) toolStatus(w http.ResponseWriter, request *http.Request) {
 			if final {
 				instruction.reported = true
 			}
-			return acknowledge(conn, string(report.MessageID)), nil
+			return server.acknowledge(conn, string(report.MessageID)), nil
 		},
 	})
 }

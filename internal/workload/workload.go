@@ -546,7 +546,7 @@ func Run(ctx context.Context, cfg Config) error {
 		)
 		created, err := ListenTCP(cfg.Listen, cfg.ListenAddress)
 		if err != nil {
-			WriteStartupFailure(cfg.Logger, "workload.listener.failed", err,
+			WriteStartupFailure(cfg.Logger, "workload.listener.failed", WithStartupFailureCause(StartupFailureCauseListener, err),
 				slog.String("component", "workload"),
 				slog.String("listener.transport", "tcp"),
 				slog.String("readiness.state", cfg.Readiness.message()),

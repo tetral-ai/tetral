@@ -244,11 +244,11 @@ func TestOneWorkerWinsTheClaimOfARequest(t *testing.T) {
 // reach. A refused route leaves the request as it was.
 func TestRequestRoutesAnswerEveryState(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
-	// into returns a new request brought into state by the writers that
-	// reach it.
-	into := func(name, state string) string {
+	// into returns a request, a wake request when its computer has a
+	// current instance, brought into state by the writers that reach it.
+	into := func(name, state string, wake bool) string {
 		sessionID := "sesn_state_" + name
-		f.cloudComputer(sessionID, false)
+		f.cloudComputer(sessionID, wake)
 		request := f.ensureRequest(sessionID)
 		if state == computer.RequestPending || state == computer.RequestExpired {
 			if state == computer.RequestExpired {
@@ -273,24 +273,26 @@ func TestRequestRoutesAnswerEveryState(t *testing.T) {
 	}
 	for i, row := range []struct {
 		route, state string
+		wake         bool
 		status       int
 		errorType    string
 		becomes      string
 	}{
-		{"claim", computer.RequestFulfilled, http.StatusConflict, "request_not_pending_error", ""},
-		{"claim", computer.RequestFailed, http.StatusConflict, "request_not_pending_error", ""},
-		{"claim", computer.RequestExpired, http.StatusConflict, "request_not_pending_error", ""},
-		{"release", computer.RequestPending, http.StatusOK, "", computer.RequestPending},
-		{"release", computer.RequestFulfilled, http.StatusConflict, "request_not_claimed_error", ""},
-		{"release", computer.RequestFailed, http.StatusConflict, "request_not_claimed_error", ""},
-		{"release", computer.RequestExpired, http.StatusConflict, "request_not_claimed_error", ""},
-		{"fail", computer.RequestPending, http.StatusConflict, "request_not_claimed_error", ""},
-		{"fail", computer.RequestClaimed, http.StatusOK, "", computer.RequestFailed},
-		{"fail", computer.RequestFulfilled, http.StatusConflict, "request_not_claimed_error", ""},
-		{"fail", computer.RequestFailed, http.StatusOK, "", computer.RequestFailed},
-		{"fail", computer.RequestExpired, http.StatusConflict, "request_not_claimed_error", ""},
+		{"claim", computer.RequestFulfilled, false, http.StatusConflict, "request_not_pending_error", ""},
+		{"claim", computer.RequestFailed, false, http.StatusConflict, "request_not_pending_error", ""},
+		{"claim", computer.RequestExpired, false, http.StatusConflict, "request_not_pending_error", ""},
+		{"release", computer.RequestPending, false, http.StatusOK, "", computer.RequestPending},
+		{"release", computer.RequestFulfilled, false, http.StatusConflict, "request_not_claimed_error", ""},
+		{"release", computer.RequestFailed, false, http.StatusConflict, "request_not_claimed_error", ""},
+		{"release", computer.RequestExpired, false, http.StatusConflict, "request_not_claimed_error", ""},
+		{"fail", computer.RequestPending, false, http.StatusConflict, "request_not_claimed_error", ""},
+		{"fail", computer.RequestClaimed, false, http.StatusOK, "", computer.RequestFailed},
+		{"fail", computer.RequestClaimed, true, http.StatusOK, "", computer.RequestFailed},
+		{"fail", computer.RequestFulfilled, false, http.StatusConflict, "request_not_claimed_error", ""},
+		{"fail", computer.RequestFailed, false, http.StatusOK, "", computer.RequestFailed},
+		{"fail", computer.RequestExpired, false, http.StatusConflict, "request_not_claimed_error", ""},
 	} {
-		requestID := into(fmt.Sprint(i), row.state)
+		requestID := into(fmt.Sprint(i), row.state, row.wake)
 		before := f.requestRow(requestID)
 		body := ""
 		if row.route == "claim" {
@@ -471,6 +473,15 @@ func TestAcceptedReadyFulfilsTheRequestOfItsInstance(t *testing.T) {
 	status, data := f.requestRoute(wake.ID, "claim", `{"worker_id":"worker_a"}`)
 	requireAPIError(t, status, data, http.StatusConflict, "request_not_pending_error", "")
 
+	f.cloudComputer("sesn_fulfil_claimed", true)
+	claimedWake := f.ensureRequest("sesn_fulfil_claimed")
+	woken := f.claim(claimedWake.ID, "worker_a")
+	wokenCLI := f.cli(woken.Bootstrap.InstanceID, woken.Bootstrap.CredentialID)
+	f.acceptReady(wokenCLI, f.open(wokenCLI), "ready_claimed_wake")
+	if state := f.requestRow(claimedWake.ID)["state"]; state != computer.RequestFulfilled {
+		t.Fatalf("claimed wake request state %v after the ready under its claim's credential; want fulfilled", state)
+	}
+
 	f.cloudComputer("sesn_fulfil_new", false)
 	created := f.ensureRequest("sesn_fulfil_new")
 	claimed := f.claim(created.ID, "worker_a")
@@ -564,7 +575,7 @@ func TestRequestRoutesRefuseMalformedInput(t *testing.T) {
 		{"claim with an empty worker_id", http.MethodPost, "/v1/instance_requests/" + request.ID + "/claim", `{"worker_id":""}`, http.StatusBadRequest, "invalid_request_error", "worker_id"},
 		{"claim of an unknown request", http.MethodPost, "/v1/instance_requests/ireq_unknown/claim", `{"worker_id":"worker_a"}`, http.StatusNotFound, "not_found_error", ""},
 	} {
-		status, data := f.do(row.method, row.target, nil, row.body)
+		status, data := f.send(row.status == http.StatusBadRequest, row.method, row.target, nil, row.body)
 		requireAPIError(t, status, data, row.status, row.errorType, row.naming)
 	}
 }
@@ -628,7 +639,7 @@ func (f *hubFixture) openRequestStream(serverURL, environmentID string) *bufio.R
 		f.t.Fatal(err)
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
-	response, err := http.DefaultClient.Do(request)
+	response, err := f.http.Do(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -652,7 +663,7 @@ func TestRequestStreamCarriesItsEnvironmentsEvents(t *testing.T) {
 	if _, err := workspace.NewSeeder(f.admin).Seed(f.ctx, otherWorkspace, "other"); err != nil {
 		t.Fatal(err)
 	}
-	foreign := &hubFixture{t: t, ctx: f.ctx, admin: f.admin, ws: otherWorkspace, owner: f.owner, signer: f.signer,
+	foreign := &hubFixture{t: t, ctx: f.ctx, admin: f.admin, ws: otherWorkspace, owner: f.owner, signer: f.signer, http: f.http,
 		principal: auth.IndependentKeyPrincipal(workspace.Workspace{ID: otherWorkspace}, "key_request_other")}
 	foreignStream := foreign.openRequestStream(other.url, "env_sesn_stream")
 	foreign.cloudComputer("sesn_stream_foreign", false)

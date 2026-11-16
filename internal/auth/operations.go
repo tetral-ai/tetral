@@ -313,7 +313,7 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/memory_stores/{memory_store_id}/memory_versions", OperationMemoryVersionsList},
 	{"GET", "/v1/memory_stores/{memory_store_id}/memory_versions/{memory_version_id}", OperationMemoryVersionsRead},
 	{"GET", "/v1/models", OperationModelsList},
-	{"GET", "/v1/models/{model_id}", OperationModelsRead},
+	{"GET", "/v1/models/*", OperationModelsRead},
 	{"GET", "/v1/sessions", OperationSessionsList},
 	{"GET", "/v1/sessions/{session_id}", OperationSessionsRead},
 	{"GET", "/v1/sessions/{session_id}/computers/{computer_id}", OperationSessionComputersRead},
@@ -381,6 +381,9 @@ var operationRoutes = []OperationRoute{
 }
 
 func RegisteredOperations() []Operation { return slices.Clone(registeredOperations) }
+
+// OperationRoutes returns every classified public registration.
+func OperationRoutes() []OperationRoute { return slices.Clone(operationRoutes) }
 func IsRegisteredOperation(operation Operation) bool {
 	return slices.Contains(registeredOperations, operation)
 }

@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -379,13 +378,5 @@ func TestSupervisorHiddenEntrypointsRejectMissingMalformedAndUserForgedCapabilit
 	}
 	if err := exec.Command(helper, "reap").Run(); err == nil {
 		t.Fatal("uncontracted reap subcommand was accepted")
-	}
-}
-
-func TestPrivilegeProofIdentityConstantsAreNonRoot(t *testing.T) {
-	for _, value := range []int{65534, 65533} {
-		if value == 0 {
-			t.Fatalf("identity %s unexpectedly root", strconv.Itoa(value))
-		}
 	}
 }

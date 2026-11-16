@@ -31,6 +31,7 @@ var openDatabase = func(ctx context.Context, _ string, dsn string) (dbconnect.Op
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 var newKubernetesClient = func() (kubernetesClient, error) { return enginekubernetes.NewInClusterVisibilityClient() }
 var openBlobStore = blob.NewProtectedS3BlobStore
+var newRunner = jobrunner.NewRunner
 
 // kubernetesClient is what Job Runner reads from its cluster: the watched
 // Runtime pods and endpoints, and a fresh read of one pod.
@@ -174,12 +175,17 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		}
 	}()
 	coldStart.Advance(ctx)
-	deliveryStore := jobrunner.NewJobRunnerRuntimeDeliveryStore(
-		database.Client,
-		logger,
-		cfg,
-		kubernetesCache.BindingVisibilitySnapshot,
-	)
+	runner, deliveryStore := newRunner(jobrunner.RunnerDependencies{
+		Database:        database.Client,
+		Logger:          logger,
+		Config:          cfg,
+		BindingSnapshot: kubernetesCache.BindingVisibilitySnapshot,
+		GetPod:          kubernetesClient.GetPod,
+		Attachments:     blobStore,
+		Queue:           jobrunner.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
+		Sender:          commandClient,
+		RepairSignal:    repairSignal,
+	})
 	if closer, ok := deliveryStore.MCPManifestLister.(interface{ Close() error }); ok {
 		defer func() {
 			workload.BeginProcessShutdown(ctx)
@@ -188,10 +194,6 @@ func run(ctx context.Context, env jobrunner.Env) error {
 			}
 		}()
 	}
-	resolver := deliveryStore.TargetResolver.(jobrunner.KubernetesRuntimeTargetResolver)
-	resolver.GetPod = kubernetesClient.GetPod
-	deliveryStore.TargetResolver = resolver
-	deliveryStore.AttachmentBlobStore = blobStore
 	acquisitionCtx, closeAcquisition := context.WithCancel(ctx)
 	defer closeAcquisition()
 	var loopWorkers sync.WaitGroup
@@ -210,15 +212,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	loopWorkers.Add(1)
 	go func() {
 		defer loopWorkers.Done()
-		_ = jobrunner.RunJobRunnerLoop(acquisitionCtx, &jobrunner.JobRunner{
-			Queue: jobrunner.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
-			Deliverer: jobrunner.RuntimePodDirectDeliverer{
-				Store:  deliveryStore,
-				Sender: commandClient,
-			},
-			Repair: jobrunner.NewRuntimePodLossRepair(deliveryStore, repairSignal, logger),
-			Config: cfg,
-		}, logger, queueWake)
+		_ = jobrunner.RunJobRunnerLoop(acquisitionCtx, runner, logger, queueWake)
 	}()
 	httpMetrics := workload.NewHTTPMetrics("job-runner")
 	return runWorkload(ctx, workload.Config{

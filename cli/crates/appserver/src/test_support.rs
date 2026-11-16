@@ -195,7 +195,7 @@ impl Fixture {
             Duration::from_millis(1),
         );
         let (calls, received) = mpsc::unbounded_channel();
-        let transfer = Arc::new(TransferStub(calls));
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(Checked(Arc::new(TransferStub(calls))));
         let cache = ContentCache::spawn(CacheConfig {
             root: root.path().to_owned(),
             transfer: transfer.clone(),

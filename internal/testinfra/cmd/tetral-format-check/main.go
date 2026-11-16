@@ -22,6 +22,10 @@ func main() {
 			case ".git", "node_modules", "dist", ".test-results":
 				return filepath.SkipDir
 			}
+			// The CLI's checks format the CLI's Go.
+			if path == "cli" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(entry.Name(), ".go") {

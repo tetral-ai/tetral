@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 )
 
@@ -55,7 +56,12 @@ func (f *hubFixture) gateResponse(method, path string, operations []auth.Operati
 		f.t.Fatal(err)
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
-	response, err := http.DefaultClient.Do(request)
+	if method == http.MethodPost {
+		// A POST here has neither its body nor its key: the gate answers
+		// before either is read.
+		request = enginetest.InvalidRequest(request)
+	}
+	response, err := f.http.Do(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -80,14 +86,35 @@ func TestPathsOutsideTheRouteGroupsVerifyThePrincipalFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response, err := http.DefaultClient.Do(request)
+		response, err := f.http.Do(enginetest.InvalidRequest(request))
 		if err != nil {
 			t.Fatal(err)
 		}
 		body, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
 		requireAPIError(t, response.StatusCode, body, http.StatusUnauthorized, "authentication_error", "")
-		status, body := f.do(http.MethodGet, path, nil, "")
+		status, body := f.doInvalid(http.MethodGet, path, nil, "")
 		requireAPIError(t, status, body, http.StatusNotFound, "not_found_error", "")
+	}
+}
+
+// A Controller path the OpenAPI file declares answers 405 for a method it
+// does not declare, after the principal is verified; an undeclared path under
+// the same prefix answers 404.
+func TestADeclaredControllerPathAnswers405ForAnotherMethod(t *testing.T) {
+	f := newHubFixture(t, time.Hour)
+	for _, test := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodPatch, "/v1/instances", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/v1/instances/inst_any", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/instance_requests/ireq_any/claim", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/instances/inst_any/undeclared", http.StatusNotFound},
+	} {
+		status, body := f.doInvalid(test.method, test.path, nil, "")
+		if status != test.status {
+			t.Errorf("%s %s = %d %s; want %d", test.method, test.path, status, body, test.status)
+		}
 	}
 }

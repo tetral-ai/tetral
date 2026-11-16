@@ -1,0 +1,3 @@
+{
+  "notificationJson": "{\"exit_code\":-1,\"source_tool_use_event_id\":\"sevt_tool_shape\",\"status\":\"failed\",\"stderr\":{\"original_bytes\":24,\"original_lines\":2,\"text\":\"failed\",\"truncated\":true},\"stdout\":{\"text\":\"\\u003cline\\u003e\\u0026\\\\n雪\\u2028paragraph\\u2029\",\"truncated\":false},\"task_id\":\"task_\\u003c\\u003e\\u0026\\u2028paragraph\\u2029\"}"
+}

@@ -1026,7 +1026,7 @@ func benchmarkChangedPackages(root string, a, b *benchmarkEvidence) (map[string]
 			}
 		}
 	}
-	output, err := gitOutput(root, "diff", "--name-only", "--no-renames", a.sha, b.sha, "--")
+	output, err := gitOutput(context.Background(), root, "diff", "--name-only", "--no-renames", a.sha, b.sha, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files changed between the two commits: %w", err)
 	}
@@ -1053,14 +1053,14 @@ func benchmarkChangedPackages(root string, a, b *benchmarkEvidence) (map[string]
 // workflow; 0 when the commit lists none.
 func benchmarkCommittedShardCount(root, sha string) (int, error) {
 	const inventory = "internal/testinfra/pr_producers.json"
-	listed, err := gitOutput(root, "ls-tree", "--full-tree", "--name-only", sha, "--", inventory)
+	listed, err := gitOutput(context.Background(), root, "ls-tree", "--full-tree", "--name-only", sha, "--", inventory)
 	if err != nil {
 		return 0, fmt.Errorf("read the Go shards of %s: %w", sha, err)
 	}
 	if listed == "" {
 		return 0, nil
 	}
-	body, err := gitBytes(root, "show", sha+":"+inventory)
+	body, err := gitBytes(context.Background(), root, "show", sha+":"+inventory)
 	if err != nil {
 		return 0, fmt.Errorf("read the Go shards of %s: %w", sha, err)
 	}

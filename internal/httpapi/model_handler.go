@@ -83,7 +83,7 @@ func listModels(w http.ResponseWriter, r *http.Request) {
 		firstID = &first
 		lastID = &last
 	}
-	writeJSON(w, http.StatusOK, modelListPage{
+	WriteJSON(w, r, http.StatusOK, modelListPage{
 		Data:    data,
 		HasMore: hasMore,
 		FirstID: firstID,
@@ -98,11 +98,7 @@ func retrieveModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	id, err := url.PathUnescape(chi.URLParam(r, "model_id"))
-	if err != nil {
-		writeError(w, r, &ValidationError{Message: "invalid model id"})
-		return
-	}
+	id := chi.URLParam(r, "*")
 	ws, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
@@ -113,7 +109,7 @@ func retrieveModel(w http.ResponseWriter, r *http.Request) {
 			if !authorizeReadResource(w, r, ws, "model", entry.ID) {
 				return
 			}
-			writeJSON(w, http.StatusOK, modelResponse(entry, beta))
+			WriteJSON(w, r, http.StatusOK, modelResponse(entry, beta))
 			return
 		}
 	}

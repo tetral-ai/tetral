@@ -92,6 +92,19 @@ func TestDriveSkillCommitRefusalPreservesPublishedFiles(t *testing.T) {
 	}
 }
 
+// A Skill published into a drive whose Skills path is a file is refused as
+// a conflict that the same request would meet again.
+func TestDriveSkillPublicationIsRefusedWhereTheSkillsPathIsAFile(t *testing.T) {
+	api := newDriveAPI(t, drive.DefaultUploadBudgetBytesPerMinute)
+	id := api.newDrive(`{}`)
+	decodeDrive(t, api.upload(id, "skills", "occupied"), http.StatusCreated, nil)
+	response := api.uploadSkill(id, skillZip(t, file("report/SKILL.md", reportSkillMD("Writes reports."))))
+	expectError(t, response, http.StatusConflict, "invalid_request_error", "")
+	if response.header.Get("x-should-retry") != "false" {
+		t.Fatalf("x-should-retry = %q; want false", response.header.Get("x-should-retry"))
+	}
+}
+
 func TestDriveSkillPublicationDoesNotNormalizePaths(t *testing.T) {
 	api := newDriveAPI(t, drive.DefaultUploadBudgetBytesPerMinute)
 	id := api.newDrive(`{}`)

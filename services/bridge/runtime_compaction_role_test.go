@@ -63,6 +63,7 @@ func TestPostgreSQLBridgeCompactionRoleCommitsCheckpointAndConsumesPrefix(t *tes
 			if err != nil || response.GetCommitted() == nil {
 				t.Fatalf("compaction: %v, %v", response, err)
 			}
+			sessionfixture.RequireEventsProcessedForTest(t, admin, scope.SessionId, true, "agent.thread_context_compacted", "span.model_request_end")
 			if replay, err := store.WriteRequestEnd(ctx, request); err != nil || replay.GetDuplicate() == nil {
 				t.Fatalf("compaction replay: %v, %v", replay, err)
 			}

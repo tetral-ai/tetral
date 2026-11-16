@@ -13,13 +13,12 @@ import (
 	tetralapi "github.com/tetral-ai/tetral/services/api"
 )
 
-// startupConfigSurface drives one Bucket-C config-validation surface through the
-// real BuildRouter composition path with an invalid env value and asserts the
-// returned error classifies as config_error, names the exact offending env key,
-// and never echoes the secret-shaped value-position sentinel (A.3).
+// startupConfigSurface drives one configuration surface through the real
+// BuildRouter composition path with an invalid value and asserts the returned
+// error classifies as config_error, names the exact offending key, and never
+// echoes the secret-shaped value. A new surface gets a row here.
 type startupConfigSurface struct {
-	// inventoryID labels the surface; the subtest name equals it so a reviewer
-	// maps inventory member -> A.3 case mechanically.
+	// inventoryID names the surface and its subtest.
 	inventoryID string
 	// envKey is the exact env key the surfaced message must name.
 	envKey string

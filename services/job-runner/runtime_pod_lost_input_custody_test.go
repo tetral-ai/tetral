@@ -13,7 +13,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
@@ -228,7 +227,7 @@ func TestPostgreSQLRuntimePodLossLeavesExhaustedInterruptForCurrentLeaseTerminal
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "bridge-current-terminal-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {

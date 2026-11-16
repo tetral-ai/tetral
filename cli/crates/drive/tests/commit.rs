@@ -207,7 +207,8 @@ async fn a_change_during_a_commit_carries_the_committed_base_or_is_discarded_on_
 }
 
 #[tokio::test]
-async fn a_lost_answer_is_sent_again_unchanged_after_a_restart_and_the_rewrite_follows() {
+async fn a_lost_answer_is_sent_again_unchanged_by_a_new_owner_of_the_state_and_the_rewrite_follows()
+{
     let mut env = Env::new();
     env.stub.list("z", "remove");
     let session = env.session("sess_a", Write::default(), true).await;
@@ -488,8 +489,8 @@ async fn content_missing_overrides_a_siblings_stale_hash_and_survives_retry() {
     let upload = env.call().await;
     assert_eq!(upload.sha256(), hash);
     upload.upload_ended(Ended::Permanent {
-        status: 503,
-        code: Some("invalid_response"),
+        status: 400,
+        code: "invalid_message",
     });
     outcome(point).await;
     session
@@ -755,9 +756,9 @@ async fn a_delete_after_an_undecided_new_write_retries_with_the_attempted_hash()
         } else {
             // The write might already have applied when its valid response
             // was lost; the following deletion must address that write.
-            first.commit_ended(Ended::Permanent {
+            first.commit_ended(Ended::Invalid {
                 status: 200,
-                code: None,
+                case: "the 2xx answer did not match its schema or its request",
             });
         }
         outcome(point).await;

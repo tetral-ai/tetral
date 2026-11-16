@@ -25,7 +25,7 @@ func TestAuthContractSelectionIncludesPublicActorConsumersWithoutImportEdges(t *
 	for _, changed := range []string{"internal/auth/principal.go", "internal/auth/authority_resolver.go", "services/auth/routes.go"} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}

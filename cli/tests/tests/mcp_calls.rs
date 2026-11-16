@@ -570,7 +570,9 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
             None,
         ),
     ] {
-        let issued = tasks.mcp_call_with(SESSION, BINDING, task, members);
+        let issued = tasks
+            .engine
+            .outside_contract(|| tasks.mcp_call_with(SESSION, BINDING, task, members));
         let report = tasks.answer_to(&issued);
         assert_eq!(
             json!([report["phase"], report["error"]["code"]]),

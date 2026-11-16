@@ -14,7 +14,7 @@ import (
 
 func TestSDKCompatibilitySkillVersionContentRouteStreamsAndClosesReader(t *testing.T) {
 	store := newRouterTestSkillStore()
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithSkillHandler(httpapi.NewSkillHandler(store, t.TempDir())))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithSkillHandler(httpapi.NewSkillHandler(store, t.TempDir())))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/v1/skills/skill_x/versions/1/content?beta=true", nil)
 	setAuthHeader(request)
@@ -38,7 +38,7 @@ func TestSDKCompatibilitySkillVersionContentRouteStreamsAndClosesReader(t *testi
 }
 
 func TestSDKCompatibilitySkillVersionContentRouteIsRegisteredForStubConfiguration(t *testing.T) {
-	router := newAuthenticatedRouter(t, newTestHandler(t))
+	router := newHandlerRouter(newTestHandler(t))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/v1/skills/skill_x/versions/1/content?beta=true", nil)
 	setAuthHeader(request)

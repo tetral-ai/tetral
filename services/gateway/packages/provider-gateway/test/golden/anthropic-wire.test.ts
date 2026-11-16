@@ -1796,18 +1796,17 @@ describe("Session provider golden wire path", () => {
 			expect(captured.body.model).toBe("deepseek-v4-pro");
 			expect(captured.body.response_format).toEqual({ type: "json_object" });
 			expect(JSON.stringify(captured.body)).not.toContain("json_schema");
+			// The Runtime's policy and its schema are this request's real inputs:
+			// both arrive whole, whatever they say.
 			const messages = JSON.stringify(captured.body.messages);
-			expect(messages).toContain(
-				"Return only JSON that matches the output_schema",
-			);
-			for (const field of [
-				"outcome",
-				"risk_level",
-				"user_authorization",
-				"rationale",
-			]) {
+			expect(messages).toContain(JSON.stringify(policyPrompt.trim()).slice(1, -1));
+			const fields = Object.keys(outputSchema.properties as Record<string, unknown>);
+			expect(fields.length).toBeGreaterThan(0);
+			for (const field of fields) {
 				expect(messages).toContain(field);
 			}
+			// DeepSeek refuses JSON-object mode for a prompt that does not name JSON.
+			expect(policyPrompt.toLowerCase()).toContain("json");
 		} finally {
 			await mock.close();
 		}

@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 )
 
@@ -155,13 +156,13 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					edge.assertTLSNegatives(t, f)
 				}
 				f.open(t, "tls-held", nil, "")
-				publicWait(t, "real SDK held TLS stream heartbeat", func() bool { return f.snapshot(t, "tls-held").Heartbeats > 0 })
+				publicWait(t, "held TLS stream heartbeat", func() bool { return f.snapshot(t, "tls-held").Heartbeats > 0 })
 				publicLeaf := transporttest.Must(fixture.Authority.ValidLeaf("api.localhost", fixture.Leaves["public-api"].Parsed.URIs[0].String()))
 				publicMaterial := edgeTLSMaterial{Leaves: map[string]transporttest.Leaf{"public-api": publicLeaf}}
 				fixture.Control.publishSecrets(t, translateEdgeTLSGeneration(t, fixture, "frontend-renewal", publicMaterial))
 				edge.assertPublicTLSLeaf(t, publicLeaf)
 				if f.snapshot(t, "tls-held").Ended {
-					t.Fatal("frontend certificate activation killed an admitted SDK stream")
+					t.Fatal("frontend certificate activation killed an admitted stream")
 				}
 				var nextAuthority *transporttest.Authority
 				var nextLeaves map[string]transporttest.Leaf
@@ -184,7 +185,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 						edge.assertTLSRole(t, f, role, edgeTLSRoleStatus(role), 1, fixture.Leaves["edge"].Parsed.SerialNumber.String())
 					}
 					if f.snapshot(t, "tls-held").Ended {
-						t.Fatal("trust overlap killed an admitted SDK stream")
+						t.Fatal("trust overlap killed an admitted stream")
 					}
 					newMaterial := edgeTLSMaterial{Leaves: map[string]transporttest.Leaf{"public-api": publicLeaf, "edge": nextLeaves["edge"]}, Trust: overlap}
 					fixture.Control.publishSecrets(t, translateEdgeTLSGeneration(t, fixture, "native-next-edge-leaf", newMaterial))
@@ -196,7 +197,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 						edge.assertTLSRole(t, f, role, edgeTLSRoleStatus(role), 1, nextLeaves["edge"].Parsed.SerialNumber.String())
 					}
 					if f.snapshot(t, "tls-held").Ended {
-						t.Fatal("leaf renewal or graceful handover killed the held SDK stream")
+						t.Fatal("leaf renewal or graceful handover killed the held stream")
 					}
 				}
 				request := f.start(t, "", "")
@@ -204,7 +205,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 				end := f.end(t, request)
 				seen := f.waitEvent(t, "tls-held", "span.model_request_end", 1)
 				if seen.Ended || !edgeTLSEventPresent(seen.Events, message) || !edgeTLSEventPresent(seen.Events, end) {
-					t.Fatal("held SDK stream did not retain its exact committed events through TLS activation")
+					t.Fatal("held stream did not retain its exact committed events through TLS activation")
 				}
 				var retired *translatedEnvoySnapshot
 				if profile == "hardened" {
@@ -213,20 +214,19 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					retired = translateEdgeTLSGeneration(t, fixture, "public-renewed-after-drain", publicMaterial)
 				}
 				fixture.Control.drain(t, func() {
-					closed := decodePublicSnapshot(t, f.client.control(t, "close_viewer", map[string]any{"viewer": "tls-held"}))
+					closed := f.client.closeViewer(t, "tls-held")
 					if !closed.Ended {
-						t.Fatal("SDK stream cancellation did not join drain")
+						t.Fatal("stream cancellation did not join drain")
 					}
-					edge.client.CloseIdleConnections()
 					for _, old := range lifecycle.retired {
 						old.join(t)
 					}
-					// Session provisioning owns a separate SDK process and idle
-					// pool. Join that finished owner before retiring edge trust;
-					// the streaming SDK remains available for restart/history.
-					fixture.Control.drainConnections(edge.ctx, t, "before-provisioning-sdk-join")
-					f.sdk.stop(t)
-					fixture.Control.drainConnections(edge.ctx, t, "after-provisioning-sdk-join")
+				}, func() {
+					// The test's clients keep finished connections open in their
+					// idle pools; the edge waits on them until they close.
+					f.client.closeIdleConnections()
+					edge.transport.CloseIdleConnections()
+					f.developer.closeIdleConnections()
 				})
 				for _, role := range []string{"auth", "api", "event-stream", "git-proxy"} {
 					lifecycle.http[role].join(t)
@@ -297,7 +297,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					page = *history.Next
 				}
 				if !complete || !foundMessage || !foundEnd {
-					t.Fatal("real SDK list lost exact committed history after edge drain/restart")
+					t.Fatal("the developer's list lost exact committed history after edge drain/restart")
 				}
 				fence := f.start(t, "", "")
 				fenceEnd := f.end(t, fence)
@@ -305,7 +305,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 				if !edgeTLSEventPresent(recovered.Events, fenceEnd) || edgeTLSEventPresent(recovered.Events, message) || edgeTLSEventPresent(recovered.Events, end) {
 					t.Fatal("recovered TLS stream omitted new fence or replayed old history")
 				}
-				t.Logf("envoy_gateway_tls_assertion=actual_edge_lifecycle profile=%s frontend_reload=true held_sdk_stream=true explicit_drain=true native_retirement=%t passed=true", profile, profile == "hardened")
+				t.Logf("envoy_gateway_tls_assertion=actual_edge_lifecycle profile=%s frontend_reload=true held_stream=true explicit_drain=true native_retirement=%t passed=true", profile, profile == "hardened")
 			})
 		}
 	})
@@ -349,6 +349,10 @@ func (edge *translatedPublicEdge) assertTLSRole(t *testing.T, f *publicProjectio
 	request.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		request.Header.Set("X-Api-Key", key)
+	}
+	if role == "auth" {
+		// The probe of Auth is an exchange with no body.
+		request = enginetest.InvalidRequest(request)
 	}
 	response, err := edge.client.Do(request)
 	if err != nil {

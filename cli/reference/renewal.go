@@ -26,7 +26,10 @@ func (server *Server) sendRenewal(conn *connection, pending *credential) {
 	if conn.stream == nil {
 		return
 	}
-	data, messageID := server.event(conn, "credential.renew", wire.CredentialRenewPayload{CredentialID: wire.ID(pending.CredentialID)})
+	data, messageID, ok := server.event(conn, "credential.renew", wire.CredentialRenewPayload{CredentialID: wire.ID(pending.CredentialID)})
+	if !ok {
+		return
+	}
 	conn.stream.send(data, messageID, "credential.renew")
 	pending.renewalSent++
 }
@@ -76,12 +79,11 @@ func (server *Server) credential(w http.ResponseWriter, request *http.Request) {
 				pending.ConnectionKey = wire.ConnectionKeyPrefix + randomHex()
 			}
 			pending.fetched = true
-			body, _ := wire.Encode(wire.CredentialResponse{
+			return ownAnswer(server, wire.CredentialResponse{
 				CredentialID:  wire.ID(pending.CredentialID),
 				ConnectionKey: wire.ConnectionKey(pending.ConnectionKey),
 				ExpiresAt:     wire.Time(pending.ExpiresAt.UTC().Format("2006-01-02T15:04:05.000Z")),
-			})
-			return answer{status: http.StatusOK, body: body, noStore: true}, nil
+			}, true), nil
 		},
 	})
 }

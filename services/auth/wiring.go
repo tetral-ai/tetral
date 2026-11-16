@@ -184,7 +184,7 @@ func buildRouterConfig(ctx context.Context, cfg RouterBuildConfig) (RouterConfig
 func prepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupDatabase, error) {
 	database, err := open(ctx)
 	if err != nil {
-		return StartupDatabase{}, err
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	if database.Client == nil {
 		_ = closeStartupDatabase(database)
@@ -196,11 +196,11 @@ func prepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupD
 	}
 	if err := database.Client.VerifySchema(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return StartupDatabase{}, fmt.Errorf("schema verification: %w", err)
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, fmt.Errorf("schema verification: %w", err))
 	}
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return StartupDatabase{}, err
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	return database, nil
 }

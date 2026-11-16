@@ -2,7 +2,6 @@ import {
 	describe,
 	expect,
 	test } from "bun:test";
-import { readFile } from "node:fs/promises";
 import {
 	ProviderContextRole,
 	ProviderRequestKind,
@@ -45,10 +44,7 @@ import {
 	ThreadState,
 } from "../../../src/thread-loop/thread-state.js";
 import type { ThreadTurnNextStep } from "../../../src/thread-loop/turn/types.js";
-import type {
-	PackageJson,
-	TestContextLoader,
-} from "./thread-loop-test-support.js";
+import type { TestContextLoader } from "./thread-loop-test-support.js";
 import {
 	acceptedInput,
 	acceptedInputCommitResult,
@@ -113,23 +109,28 @@ describe("ThreadLoop", () => {
 			),
 		).toEqual(passiveNextSteps.map(() => "passive"));
 	});
-	test("pins effect to the approved beta version in package metadata", async () => {
-		const packageJson = JSON.parse(
-			await readFile(new URL("../../../package.json", import.meta.url), "utf8"),
-		) as PackageJson;
-		const lockfileText = await readFile(
-			new URL("../../../../../bun.lock", import.meta.url),
-			"utf8",
+	// Two copies of effect in one process give every service tag two
+	// identities, and a version range lets an install move to another beta. The
+	// lockfile repeats each workspace's declarations, and a frozen install
+	// refuses a package.json that differs from it.
+	test("the workspaces name one exact effect version and the lockfile resolves only it", async () => {
+		const lock = Bun.JSONC.parse(await Bun.file(new URL("../../../../../bun.lock", import.meta.url)).text()) as {
+			readonly workspaces: Record<string, Record<string, unknown>>;
+			readonly packages: Record<string, readonly [string, ...unknown[]]>;
+		};
+		const declared = Object.values(lock.workspaces).flatMap((workspace) =>
+			["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].flatMap((kind) => {
+				const version = (workspace[kind] as Record<string, string> | undefined)?.effect;
+				return version === undefined ? [] : [version];
+			}),
 		);
-		expect(packageJson.dependencies?.effect).toBe("4.0.0-beta.103");
-		expect(lockfileText).toContain('"effect": "4.0.0-beta.103"');
-		expect(lockfileText).toContain('"effect": ["effect@4.0.0-beta.103"');
-		// A package's own peer range, such as @effect/opentelemetry's, is not a workspace pin.
-		const workspaceDeclarations = lockfileText.slice(lockfileText.indexOf('"workspaces"'), lockfileText.indexOf('"packages": {'));
-		expect(workspaceDeclarations).toContain('"effect": "4.0.0-beta.103"');
-		expect(workspaceDeclarations).not.toContain('"effect": "^4.0.0-beta.103"');
-		expect(lockfileText).not.toContain('"effect": "4.0.0-beta.74"');
-		expect(lockfileText).not.toContain('"effect": "3.');
+		expect(declared.length).toBeGreaterThan(0);
+		expect(new Set(declared).size).toBe(1);
+		expect(declared[0]).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
+		const resolved = Object.entries(lock.packages)
+			.filter(([name]) => name === "effect" || name.endsWith("/effect"))
+			.map(([, entry]) => entry[0]);
+		expect(resolved).toEqual([`effect@${declared[0]}`]);
 	});
 	test("default layer resolves a void session run frame", async () => {
 		const loader = new RecordingContextLoader([], { type: "empty" });

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -309,30 +308,19 @@ func TestWatcherCacheReadyMatchesSnapshotReadyBitForBit(t *testing.T) {
 	}
 }
 
-func TestWatcherCacheReadyDoesNotCallSnapshot(t *testing.T) {
-	source, err := os.ReadFile("watcher_cache.go")
-	if err != nil {
-		t.Fatalf("read watcher_cache.go: %v", err)
+// A readiness probe does not build the candidate list: on a cache with a
+// candidate, Ready allocates nothing where Snapshot allocates its list.
+func TestWatcherCacheReadyBuildsNoCandidateList(t *testing.T) {
+	pod := readyPod("runtime-a", "pod-uid-a")
+	cache := NewWatcherCache("tetral-runtime")
+	cache.ReplacePods([]corev1.Pod{pod})
+	cache.ReplaceEndpointSlices([]discoveryv1.EndpointSlice{endpointSlice(endpointForPod(pod, []string{"10.0.0.1"}, nil, nil, nil))})
+	if allocations := testing.AllocsPerRun(100, func() { _ = cache.Snapshot() }); allocations == 0 {
+		t.Fatal("Snapshot allocated nothing; the cache holds no candidate to list")
 	}
-	readyBody := readyMethodBody(t, string(source))
-	if strings.Contains(readyBody, "Snapshot()") {
-		t.Fatalf("Ready() must not construct the candidate snapshot:\n%s", readyBody)
+	if allocations := testing.AllocsPerRun(100, func() { _ = cache.Ready() }); allocations != 0 {
+		t.Fatalf("Ready allocated %v times a call; want none", allocations)
 	}
-}
-
-func readyMethodBody(t *testing.T, source string) string {
-	t.Helper()
-	const marker = "func (c *WatcherCache) Ready() bool {"
-	start := strings.Index(source, marker)
-	if start < 0 {
-		t.Fatal("Ready() method not found in watcher_cache.go")
-	}
-	rest := source[start+len(marker):]
-	end := strings.Index(rest, "\n}")
-	if end < 0 {
-		t.Fatal("Ready() method body not terminated")
-	}
-	return rest[:end]
 }
 
 func TestWatcherCacheReadinessErrorStaleAndBackoff(t *testing.T) {

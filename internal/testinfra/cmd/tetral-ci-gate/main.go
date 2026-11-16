@@ -11,34 +11,39 @@ import (
 	"strings"
 
 	"github.com/tetral-ai/tetral/internal/testinfra"
+	"github.com/tetral-ai/tetral/internal/testinfra/ciflow"
 )
 
 func main() {
 	artifacts := flag.String("artifacts", "", "downloaded result artifact root")
-	producers := flag.String("producers", "", "comma-separated expected producer identities; defaults to the PR inventory")
 	output := flag.String("output", "gate-result.json", "gate verdict output")
 	flag.Parse()
-	// The Go shards always come from the inventory, so no command line can
-	// leave the partition check out.
+	needs, err := ciflow.ParseNeeds(os.Getenv("TETRAL_CI_NEEDS"), "decide", "engine")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if failures := needs.Failures(); len(failures) > 0 {
+		fmt.Fprintln(os.Stderr, strings.Join(failures, "\n"))
+		os.Exit(1)
+	}
 	inventory, err := testinfra.LoadPRProducers()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	expectedProducers := split(*producers)
-	if len(expectedProducers) == 0 {
-		expectedProducers = inventory.Producers
+	// A change that selects none of Engine's jobs has no producer; one that
+	// selects them has every producer of the inventory.
+	var producers, goShards []string
+	if needs.Selected {
+		producers, goShards = inventory.Producers, inventory.GoShards
 	}
 	expectation := testinfra.GateExpectation{
 		Repository: os.Getenv("TETRAL_CI_REPOSITORY"), EventHeadSHA: os.Getenv("TETRAL_CI_EVENT_HEAD_SHA"),
 		EventBaseSHA: os.Getenv("TETRAL_CI_EVENT_BASE_SHA"), TestMergeSHA: os.Getenv("TETRAL_CI_TEST_MERGE_SHA"),
 		RequiredCheckSHA: os.Getenv("TETRAL_CI_REQUIRED_CHECK_SHA"), WorkflowSourceSHA: os.Getenv("TETRAL_CI_WORKFLOW_SOURCE_SHA"),
 		Workflow: os.Getenv("TETRAL_CI_WORKFLOW"), RunID: os.Getenv("TETRAL_CI_RUN_ID"), RunAttempt: os.Getenv("TETRAL_CI_RUN_ATTEMPT"),
-		Producers: expectedProducers, ProducerJobs: testinfra.PRProducerJobs(inventory), GoShards: inventory.GoShards,
-	}
-	if err := testinfra.VerifyUpstreamNeeds(os.Getenv("TETRAL_CI_NEEDS"), testinfra.PRUpstreamJobs()); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		Producers: producers, ProducerJobs: testinfra.PRProducerJobs(inventory), GoShards: goShards,
 	}
 	pullRequest, err := strconv.Atoi(os.Getenv("TETRAL_CI_PULL_REQUEST"))
 	if err != nil || pullRequest <= 0 {
@@ -73,14 +78,4 @@ func main() {
 	if err != nil || marshalErr != nil {
 		os.Exit(1)
 	}
-}
-
-func split(value string) []string {
-	var result []string
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			result = append(result, item)
-		}
-	}
-	return result
 }

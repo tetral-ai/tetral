@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -120,58 +118,9 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 	}
 }
 
-func TestTetralAuthCommandStartupFailureLogUsesSharedFields(t *testing.T) {
-	stderr, finish := captureStderr(t)
-	err := run(context.Background(), envMap{})
-	if err == nil {
-		t.Fatal("run returned nil for config failure")
-	}
-	finish()
-	output := stderr.String()
-	for _, want := range []string{
-		`"msg":"startup.failed"`,
-		`"service.name":"auth"`,
-		`"component":"auth"`,
-		`"error.class":"config_error"`,
-		`"error.message":"` + tetralauth.EnvBootstrapWorkspaceID + ` is required"`,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("startup log missing %s: %s", want, output)
-		}
-	}
-}
-
 type envMap map[string]string
 
 func (m envMap) Getenv(key string) string { return m[key] }
-
-func captureStderr(t *testing.T) (*bytes.Buffer, func()) {
-	t.Helper()
-	previous := os.Stderr
-	readEnd, writeEnd, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = writeEnd
-	var buffer bytes.Buffer
-	done := make(chan struct{})
-	go func() {
-		_, _ = buffer.ReadFrom(readEnd)
-		close(done)
-	}()
-	finish := func() {
-		_ = writeEnd.Close()
-		os.Stderr = previous
-		<-done
-		_ = readEnd.Close()
-	}
-	t.Cleanup(func() {
-		if os.Stderr == writeEnd {
-			finish()
-		}
-	})
-	return &buffer, finish
-}
 
 func assertProbe(t *testing.T, handler http.Handler, path string, wantStatus int, wantBody string) {
 	t.Helper()

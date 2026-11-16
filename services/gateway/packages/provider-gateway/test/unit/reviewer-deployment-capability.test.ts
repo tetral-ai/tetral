@@ -1,29 +1,47 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
 import { lookupGatewayProviderRules } from "@tetral/gateway-lowering/src/rules/index.js";
 import { lookupGatewayModel } from "../../src/providers/catalog.js";
 
-const deploymentURLs = [
+// The chart's default rendering and the Runtime's own manifest are held equal
+// to the first file by the deployment tests.
+const manifests = [
   new URL("../../../../../../deploy/kubernetes/agent-runtime.yaml", import.meta.url),
-  new URL("../../../../../../deploy/helm/tetral/templates/agent-runtime.yaml", import.meta.url),
-  new URL("../../../../../agent-runtime/k8s/deployment.yaml", import.meta.url),
+  new URL("../../../../../../deploy/kubernetes/profiles/hardened/workloads.yaml", import.meta.url),
 ] as const;
 
+const reviewerModelVariable = "TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL";
+
+type Manifest = {
+  readonly kind?: string;
+  readonly spec?: {
+    readonly template?: {
+      readonly spec?: { readonly containers?: readonly { readonly env?: readonly { readonly name: string; readonly value?: unknown }[] }[] };
+    };
+  };
+};
+
+async function reviewerModels(manifest: URL): Promise<unknown[]> {
+  const parsed: unknown = Bun.YAML.parse(await Bun.file(manifest).text());
+  const documents = (Array.isArray(parsed) ? parsed : [parsed]) as readonly (Manifest | null)[];
+  return documents
+    .filter((document) => document?.kind === "Deployment")
+    .flatMap((deployment) => deployment?.spec?.template?.spec?.containers ?? [])
+    .flatMap((container) => container.env ?? [])
+    .filter((variable) => variable.name === reviewerModelVariable)
+    .map((variable) => variable.value);
+}
+
 describe("approval reviewer deployment capability", () => {
-  test("every checked-in Runtime deployment selects a structured-output-capable Gateway route", async () => {
-    for (const deploymentURL of deploymentURLs) {
-      const source = await readFile(deploymentURL, "utf8");
-      const modelRef = source.match(
-        /- name: TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL\s+value: ([a-z0-9-]+\/[a-zA-Z0-9._-]+)/,
-      )?.[1];
-      expect(modelRef, deploymentURL.pathname).toBeDefined();
-      const [providerId, modelId, extra] = modelRef?.split("/") ?? [];
-      expect(extra, modelRef).toBeUndefined();
-      const catalogEntry = lookupGatewayModel(providerId ?? "", modelId ?? "");
-      expect(catalogEntry, modelRef).toBeDefined();
+  test("every Runtime deployment names a reviewer model the Gateway routes with structured output", async () => {
+    for (const manifest of manifests) {
+      const models = await reviewerModels(manifest);
+      expect(models, manifest.pathname).toHaveLength(1);
+      const [providerId, modelId, extra] = String(models[0]).split("/");
+      expect(extra, String(models[0])).toBeUndefined();
+      expect(lookupGatewayModel(providerId ?? "", modelId ?? ""), String(models[0])).toBeDefined();
       const rules = lookupGatewayProviderRules(providerId ?? "", modelId ?? "");
-      expect(rules, modelRef).toBeDefined();
-      expect(rules?.structuredOutputStrategy, modelRef).not.toBe("unsupported");
+      expect(rules, String(models[0])).toBeDefined();
+      expect(rules?.structuredOutputStrategy, String(models[0])).not.toBe("unsupported");
     }
   });
 });

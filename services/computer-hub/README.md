@@ -37,7 +37,8 @@ Every request first verifies the signed internal principal
 or invalid one is answered as a credential failure in the body of its path's
 surface. A client route that does not exist answers `404 not_found` with the
 client error body; a management path that does not exist answers `404
-not_found_error`.
+not_found_error`, and one the public API file declares only for other methods
+answers `405` with no body.
 
 Error bodies:
 

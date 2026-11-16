@@ -20,19 +20,20 @@
 //! instruction of a Session without an owner at `session.unbound_admission`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::app_server::wait_until;
+use crate::app_server::{wait_until, wait_until_within};
 use crate::machine::{
-    APP, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
-    task_parent, tool_environment, wait_for_received, wait_for_requests,
+    APP, CLI_START, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential,
+    engine, send, task_parent, tool_environment, wait_for_received, wait_for_requests,
 };
 use crate::record::Case;
 use crate::reference::ReferenceServer;
 use crate::run::{Run, Tetral};
+use crate::seams::Seams;
 
 /// The test build's replacement for the `sandbox-exec` that the macOS
 /// availability check runs.
@@ -115,6 +116,11 @@ pub struct TaskMachine {
     pub project: PathBuf,
     /// The controls issued, which number their `tool_use_event_id`s.
     controls: AtomicU64,
+    /// By how many milliseconds the reference control server's clock was
+    /// ahead of the App Server's when the current connection began. The
+    /// server sends a connection's heartbeats by its own clock from there,
+    /// and [`TaskMachine::step`] moves that clock for them.
+    lead_ms: AtomicI64,
 }
 
 impl TaskMachine {
@@ -179,33 +185,6 @@ impl TaskMachine {
         TaskMachine::prepared(engine, machine, directory)
     }
 
-    /// [`TaskMachine::start`] with `server run` started at a soft limit of
-    /// `soft` open descriptors, set by the shell that then becomes it.
-    pub fn start_with_soft_descriptor_limit(
-        case: &mut Case,
-        directory: &Path,
-        soft: u64,
-    ) -> TaskMachine {
-        let engine = task_engine();
-        let script = format!("ulimit -Sn {soft} && exec \"$0\" \"$@\"");
-        let tetral = crate::binaries::tetral().to_str().unwrap();
-        let mut server_run = Tetral::at(
-            Path::new("/bin/sh"),
-            ["-c", &script, tetral, "server", "run", "--app", APP],
-        )
-        .current_dir(&crate::workspace_dir().join("tests"));
-        for (name, value) in tool_environment() {
-            server_run = server_run.env(name, value);
-        }
-        let machine = Machine::start_as(
-            case,
-            directory,
-            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
-            server_run,
-        );
-        TaskMachine::prepared(engine, machine, directory)
-    }
-
     /// [`TaskMachine::start`] with the App Server run from the `tetral` at
     /// `tetral` with `path` as its `PATH`
     /// ([`Machine::start_with_tools_from`]); a restart runs the default
@@ -251,7 +230,57 @@ impl TaskMachine {
         }
     }
 
+    /// [`TaskMachine::start`] on a machine that mounts drives, with
+    /// `drives`, each a drive ID and its access, bound by the prepared
+    /// binding without the paths of `exclude`. `seed` runs on the reference
+    /// control server before the App Server starts, which gets `arguments`
+    /// after `server run`'s own. On a Mac the root gets `tetral drives
+    /// enable` first.
+    pub fn start_with_drives(
+        case: &mut Case,
+        directory: &Path,
+        arguments: &[&str],
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> TaskMachine {
+        let engine = task_engine();
+        seed(&engine);
+        let mut command_line = vec!["server", "run", "--app", APP];
+        command_line.extend_from_slice(arguments);
+        let mut server_run =
+            Tetral::new(command_line).current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment() {
+            server_run = server_run.env(name, value);
+        }
+        let machine = Machine::start_prepared(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            server_run,
+            |root| {
+                if cfg!(target_os = "macos") {
+                    let run = Tetral::new(["drives", "enable", "--app", APP])
+                        .home(root)
+                        .run();
+                    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+                }
+            },
+        );
+        TaskMachine::prepared_with(engine, machine, directory, drives, exclude)
+    }
+
     fn prepared(engine: ReferenceServer, machine: Machine, directory: &Path) -> TaskMachine {
+        TaskMachine::prepared_with(engine, machine, directory, &[], &[])
+    }
+
+    fn prepared_with(
+        engine: ReferenceServer,
+        machine: Machine,
+        directory: &Path,
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+    ) -> TaskMachine {
         machine.wait_for("online");
         // A test may have put files there before the App Server started.
         let project = directory.join("project");
@@ -262,8 +291,9 @@ impl TaskMachine {
             machine: Some(machine),
             project: project.canonicalize().unwrap(),
             controls: AtomicU64::new(0),
+            lead_ms: AtomicI64::new(0),
         };
-        let issued = tasks.prepare(SESSION, BINDING, &tasks.project, None);
+        let issued = tasks.prepare_with(SESSION, BINDING, &tasks.project, drives, exclude);
         tasks.wait_prepared(&issued);
         // The prepared report is accepted before its answer is applied.
         tasks.answers_settled();
@@ -272,6 +302,13 @@ impl TaskMachine {
 
     pub fn machine(&self) -> &Machine {
         self.machine.as_ref().expect("the machine runs")
+    }
+
+    /// Notes the two clocks at the start of a connection that began after
+    /// the reference control server's clock moved alone.
+    fn connection_began(&self) {
+        let ahead = signed_ms(self.engine.advanced()) - signed_ms(self.machine().seams.advanced());
+        self.lead_ms.store(ahead, Ordering::SeqCst);
     }
 
     /// Kills the App Server with SIGKILL, runs `between` while none runs,
@@ -285,8 +322,29 @@ impl TaskMachine {
         } = self.machine.take().expect("the machine runs");
         app_server.kill();
         between(self);
-        // The killed App Server's connection ends at its lease, so that the
-        // next one is not refused as a second connection of the instance.
+        self.restart(seams, root);
+    }
+
+    /// [`TaskMachine::kill_and_restart`] for a stop by SIGTERM, which runs
+    /// the App Server's shutdown sequence before its exit 0.
+    pub fn stop_and_restart(&mut self) {
+        let Machine {
+            app_server,
+            seams,
+            root,
+        } = self.machine.take().expect("the machine runs");
+        let pid = rustix::process::Pid::from_raw(app_server.pid() as i32).expect("a process id");
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+            .expect("SIGTERM reaches the process");
+        let (run, _) = app_server.exited();
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+        self.restart(seams, root);
+    }
+
+    fn restart(&mut self, seams: Seams, root: PathBuf) {
+        // A killed App Server's connection ends only at its lease, so that
+        // the next one is not refused as a second connection of the
+        // instance; a stopped one has disconnected already.
         self.engine.advance(PAST_LEASE);
         let app_server = Machine::run_with_tools(&root, &seams);
         let machine = Machine {
@@ -296,6 +354,27 @@ impl TaskMachine {
         };
         machine.wait_for("online");
         self.machine = Some(machine);
+        self.connection_began();
+    }
+
+    /// Starts the App Server again on the state root of one that
+    /// [`TaskMachine::exited`], with its clock at the start again and after
+    /// the lease of its last connection; it is online once this returns.
+    pub fn start_again(&mut self) {
+        assert!(self.machine.is_none(), "an App Server still runs");
+        self.engine.advance(PAST_LEASE);
+        let directory = self.project.parent().expect("the machine's directory");
+        let _ = std::fs::remove_file(directory.join("seams.sock"));
+        let seams = Seams::serve(directory, CLI_START);
+        let app_server = Machine::run_with_tools(&self.root, &seams);
+        let machine = Machine {
+            app_server,
+            seams,
+            root: self.root.clone(),
+        };
+        machine.wait_for("online");
+        self.machine = Some(machine);
+        self.connection_began();
     }
 
     /// Waits for the App Server to exit by itself, as after a shutdown, and
@@ -342,6 +421,78 @@ impl TaskMachine {
         }
         let issued = self.engine.control("prepare", control);
         issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Issues `session.prepare` of `session`'s binding `binding` at `cwd`
+    /// with `drives`, each a drive ID and its access, and `exclude`, each a
+    /// drive ID and its excluded paths, and gives its `message_id`.
+    pub fn prepare_with(
+        &self,
+        session: &str,
+        binding: &str,
+        cwd: &Path,
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+    ) -> String {
+        let drives: Vec<Value> = drives
+            .iter()
+            .map(|(drive, access)| json!({ "drive_id": drive, "access": access }))
+            .collect();
+        let exclude: Vec<Value> = exclude
+            .iter()
+            .map(|(drive, paths)| json!({ "drive_id": drive, "paths": paths }))
+            .collect();
+        let issued = self.engine.control(
+            "prepare",
+            json!({
+                "instance_id": INSTANCE,
+                "payload": {
+                    "session_id": session, "binding_id": binding, "cwd": cwd,
+                    "drives": drives, "drive_exclude": exclude, "repositories": [],
+                },
+            }),
+        );
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Issues a `session.drives` that gives `binding` of `session` the
+    /// drive set `drives`, each a drive ID and its access, and gives its
+    /// `message_id`.
+    pub fn change_drives(&self, session: &str, binding: &str, drives: &[(&str, &str)]) -> String {
+        let drives: Vec<Value> = drives
+            .iter()
+            .map(|(drive, access)| json!({ "drive_id": drive, "access": access }))
+            .collect();
+        let issued = self.engine.control(
+            "drives",
+            json!({
+                "instance_id": INSTANCE,
+                "payload": { "session_id": session, "binding_id": binding, "drives": drives },
+            }),
+        );
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// The accepted Session report that answers `message_id`, once it has
+    /// come.
+    pub fn session_report(&self, message_id: &str) -> Value {
+        let mut found = Value::Null;
+        wait_until(
+            &format!("the Session report answering {message_id}"),
+            || match self
+                .engine
+                .received("session-status")
+                .into_iter()
+                .find(|report| report["body"]["request_message_id"] == message_id)
+            {
+                Some(report) => {
+                    found = report["body"].clone();
+                    true
+                }
+                None => false,
+            },
+        );
+        found
     }
 
     /// Waits until the outbox has applied an answer to every report request
@@ -501,9 +652,16 @@ impl TaskMachine {
     /// Waits for the first accepted execution report of `task_id` in
     /// `phase` and gives it.
     pub fn report(&self, task_id: &str, phase: &str) -> Value {
+        self.report_within(crate::seams::WAIT_LIMIT, task_id, phase)
+    }
+
+    /// [`TaskMachine::report`] that waits up to `limit`.
+    pub fn report_within(&self, limit: Duration, task_id: &str, phase: &str) -> Value {
         let mut found = Value::Null;
-        wait_until(&format!("the {phase} report of {task_id}"), || {
-            match self
+        wait_until_within(
+            limit,
+            &format!("the {phase} report of {task_id}"),
+            || match self
                 .reports(task_id)
                 .into_iter()
                 .find(|report| report["phase"] == phase)
@@ -513,8 +671,8 @@ impl TaskMachine {
                     true
                 }
                 None => false,
-            }
-        });
+            },
+        );
         found
     }
 
@@ -547,6 +705,88 @@ impl TaskMachine {
             left -= HEARTBEAT_INTERVAL;
         }
         seams.advance(left);
+    }
+
+    /// Moves the App Server's clock by `step`, which is less than a
+    /// [`HEARTBEAT_INTERVAL`], with the connection kept online: once the
+    /// clock has moved a heartbeat interval further than the reference
+    /// control server's since the connection began, that one moves by the
+    /// interval and its heartbeat is answered first.
+    pub fn step(&self, step: Duration) {
+        let seams = &self.machine().seams;
+        assert!(step < HEARTBEAT_INTERVAL, "a step of {step:?}");
+        let lead = self.lead_ms.load(Ordering::SeqCst);
+        if signed_ms(seams.advanced() + step) + lead
+            >= signed_ms(self.engine.advanced() + HEARTBEAT_INTERVAL)
+        {
+            let heartbeats = self.engine.received("heartbeat").len();
+            let grants = seams.count("connection.granted");
+            self.engine.advance(HEARTBEAT_INTERVAL);
+            wait_for_received(&self.engine, "heartbeat", heartbeats + 1);
+            seams.wait_for_count("connection.granted", grants + 1);
+        }
+        seams.advance(step);
+    }
+
+    /// Moves the reference control server's clock by `step`, which is less
+    /// than a [`HEARTBEAT_INTERVAL`], and then the App Server's, for what
+    /// the server paces by its clock while the App Server times it by its
+    /// own: a throttled transfer, the upload budget. A heartbeat the
+    /// server's move makes due is answered before the App Server's clock
+    /// moves.
+    pub fn step_together(&self, step: Duration) {
+        let seams = &self.machine().seams;
+        assert!(step < HEARTBEAT_INTERVAL, "a step of {step:?}");
+        let sent = || -> i64 {
+            self.engine.state()["connections"]
+                .as_array()
+                .expect("connections")
+                .iter()
+                .map(|connection| connection["heartbeat_seq"].as_i64().expect("a seq"))
+                .sum()
+        };
+        let before = sent();
+        let heartbeats = self.engine.received("heartbeat").len();
+        let grants = seams.count("connection.granted");
+        self.engine.advance(step);
+        let due = usize::try_from(sent() - before).expect("heartbeats sent");
+        if due > 0 {
+            wait_for_received(&self.engine, "heartbeat", heartbeats + due);
+            seams.wait_for_count("connection.granted", grants + due as u64);
+        }
+        seams.advance(step);
+    }
+
+    /// Moves the App Server's clock in steps of `step` until `done` holds,
+    /// for at most `limit` of the clock, each as [`TaskMachine::step`]. It
+    /// is for what the App Server reaches through waits a test cannot see
+    /// start, such as the delays between a request's attempts: a wait that
+    /// starts after a step measures from the moved clock and ends with a
+    /// later step, so each step is followed by a pause in which the App
+    /// Server acts on it.
+    pub fn advance_until(
+        &self,
+        what: &str,
+        step: Duration,
+        limit: Duration,
+        mut done: impl FnMut() -> bool,
+    ) {
+        let mut moved = Duration::ZERO;
+        loop {
+            let paused = Instant::now();
+            while paused.elapsed() < Duration::from_millis(300) {
+                if done() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                moved < limit,
+                "{what} did not happen within {limit:?} of the App Server's clock"
+            );
+            self.step(step);
+            moved += step;
+        }
     }
 
     /// [`TaskMachine::advance`], then waits until a running initial wait
@@ -678,6 +918,35 @@ impl TaskMachine {
         }
     }
 
+    /// Ends the current connection with a connection-ending `disconnect`
+    /// and waits until the App Server has taken its end.
+    pub fn end_connection(&self) {
+        let machine = self.machine();
+        let connection = machine.status()["connection_id"].clone();
+        send(
+            &self.engine,
+            json!({
+                "protocol_version": 1,
+                "connection_id": connection,
+                "message_id": format!("msg_end_{}", connection.as_str().unwrap()),
+                "type": "disconnect",
+                "payload": { "scope": "connection", "retryable": true, "code": "stale_connection" },
+            }),
+        );
+        machine.wait_for("disconnected");
+    }
+
+    /// Waits for the next connection to be online once the ended one's
+    /// lease has passed and the App Server's clock has moved by `backoff`,
+    /// and gives its `connection_id`.
+    pub fn reconnect(&self, backoff: Duration) -> Value {
+        self.engine.advance(PAST_LEASE);
+        self.machine().seams.advance(backoff);
+        let connection = self.machine().wait_for("online")["connection_id"].clone();
+        self.connection_began();
+        connection
+    }
+
     /// Ends the current stream with a stream-only `disconnect` and waits for
     /// the App Server's resume of the connection.
     pub fn resume(&self) {
@@ -695,6 +964,11 @@ impl TaskMachine {
         let events = wait_for_requests(&self.engine, "events", streams + 1);
         assert_eq!(events[streams]["query"]["resume"], "true");
     }
+}
+
+/// `duration` in whole milliseconds, signed for a difference of two clocks.
+fn signed_ms(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).expect("a clock within the test's time")
 }
 
 /// A reference control server that knows the one test credential and ends a

@@ -115,7 +115,9 @@ func text(s string) *string { return &s }
 
 // After one run, removed versions, change records and content are deleted, kept
 // ones stay, and stored_bytes counts each named content once, current and old,
-// while usage counts current files only.
+// while usage counts current files only. A restore to before the removed
+// history restores nothing, lists the file whose version of that time is
+// gone, and leaves out the path whose deletion expired.
 func TestDriveCleanupDeletesWhatRetentionRemoved(t *testing.T) {
 	f := newDriveFixture(t)
 	ws := workspace.DefaultID
@@ -162,9 +164,9 @@ func TestDriveCleanupDeletesWhatRetentionRemoved(t *testing.T) {
 	if f.count(`SELECT count(*) FROM drive_contents WHERE drive_id=$1`, id) != 3 || f.blobs.Has(beeKey) {
 		t.Fatalf("contents = %d, bee blob kept %v; want one, two-two and three-three-3, and b.txt's content gone", f.count(`SELECT count(*) FROM drive_contents WHERE drive_id=$1`, id), f.blobs.Has(beeKey))
 	}
-	restored, err := f.api.Restore(f.ctx, ws, id, "b.txt", time.Now().Add(-41*24*time.Hour-time.Hour), fixtureWriter)
-	if err != nil || restored.Restored != 0 {
-		t.Fatalf("restore of b.txt before its deletion = %+v, %v; want nothing restored", restored, err)
+	restored, err := f.api.Restore(f.ctx, ws, id, "", time.Now().Add(-41*24*time.Hour-time.Hour), fixtureWriter)
+	if err != nil || restored.Restored != 0 || strings.Join(restored.RemovedPaths, ",") != "a.txt" {
+		t.Fatalf("restore to before b.txt's deletion = %+v, %v; want nothing restored, a.txt listed as removed and b.txt absent", restored, err)
 	}
 
 	// A second pass must preserve accounting and the removed cursor watermark.

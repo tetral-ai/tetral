@@ -44,7 +44,7 @@ func TestMemoryRoutesAreRegisteredAndAuthenticated(t *testing.T) {
 
 	for _, route := range routes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
-			code, body := performJSONRequest(t, router, route.method, route.path, "", "")
+			code, body := performJSONRequest(t, outside(router), route.method, route.path, "", "")
 			if code != http.StatusUnauthorized || !strings.Contains(body, `"type":"authentication_error"`) {
 				t.Fatalf("status/body = %d %s; want 401 authentication_error", code, body)
 			}
@@ -71,6 +71,16 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	code, body = performJSONRequest(t, router, http.MethodGet, "/v1/memory_stores/"+store.ID, env.envKey, "")
 	if code != http.StatusOK || !strings.Contains(body, `"name":"http-store"`) {
 		t.Fatalf("get store status/body = %d %s; want created store", code, body)
+	}
+	for _, emptyList := range []string{
+		"/v1/memory_stores?created_at%5Blte%5D=2000-01-01T00%3A00%3A00Z",
+		"/v1/memory_stores/" + store.ID + "/memories",
+		"/v1/memory_stores/" + store.ID + "/memory_versions",
+	} {
+		code, body = performJSONRequest(t, router, http.MethodGet, emptyList, env.envKey, "")
+		if code != http.StatusOK || !strings.Contains(body, `"data":[]`) {
+			t.Fatalf("GET %s status/body = %d %s; want 200 with an empty data array", emptyList, code, body)
+		}
 	}
 	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID, env.envKey, `{"description":null,"metadata":{"team":null,"region":"iad"}}`)
 	if code != http.StatusOK {
@@ -112,6 +122,10 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	if updated.Content == nil || *updated.Content != "updated" {
 		t.Fatalf("updated content = %v; want updated", updated.Content)
 	}
+	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID+"/memories/"+created.ID, env.envKey, `{"content":"stale","precondition":{"type":"content_sha256","content_sha256":"`+created.ContentSHA256+`"}}`)
+	if code != http.StatusConflict || !strings.Contains(body, `"type":"invalid_request_error"`) {
+		t.Fatalf("update with a stale content_sha256 status/body = %d %s; want 409 invalid_request_error", code, body)
+	}
 	code, body = performJSONRequest(t, router, http.MethodGet, "/v1/memory_stores/"+store.ID+"/memories?view=full&order_by=path&order=asc", env.envKey, "")
 	if code != http.StatusOK || !strings.Contains(body, `"path":"/notes/a.md"`) {
 		t.Fatalf("list memories status/body = %d %s; want memory", code, body)
@@ -133,9 +147,8 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("list versions by session_id status/body = %d %s; want 200", code, body)
 	}
-	decodeMemoryJSON(t, body, &versionList)
-	if len(versionList.Data) != 0 {
-		t.Fatalf("session_id filter returned %d versions; want 0", len(versionList.Data))
+	if !strings.Contains(body, `"data":[]`) {
+		t.Fatalf("list versions by an unknown session_id = %s; want an empty data array", body)
 	}
 	code, body = performJSONRequest(t, router, http.MethodGet, "/v1/memory_stores/"+store.ID+"/memory_versions/"+versionID+"?view=full", env.envKey, "")
 	if code != http.StatusOK || !strings.Contains(body, `"created_by":{"type":"api_actor","api_key_id":"`+principal.APIKeyID+`"}`) {
@@ -213,7 +226,7 @@ func TestMemoryHTTPStrictValidation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, body := performJSONRequest(t, router, tc.method, tc.path, env.envKey, tc.body)
+			code, body := performJSONRequest(t, outside(router), tc.method, tc.path, env.envKey, tc.body)
 			if code != http.StatusBadRequest && code != http.StatusRequestEntityTooLarge {
 				t.Fatalf("status/body = %d %s; want 400 or 413", code, body)
 			}
@@ -457,7 +470,7 @@ func TestMemoryHTTPUnsupportedVersionMutationRoutesDoNotMutate(t *testing.T) {
 	}
 	for _, route := range routes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
-			code, body := performJSONRequest(t, router, route.method, route.path, env.envKey, `{"content":"mutate"}`)
+			code, body := performJSONRequest(t, outside(router), route.method, route.path, env.envKey, `{"content":"mutate"}`)
 			if code != http.StatusNotFound && code != http.StatusMethodNotAllowed && code != http.StatusNotImplemented {
 				t.Fatalf("status/body = %d %s; want absent, 405, or existing stub response", code, body)
 			}
@@ -481,7 +494,7 @@ func TestMemoryVersionRedactRejectsBodyWithoutSideEffect(t *testing.T) {
 	router := env.router(httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 	store, oldVersionID := createRedactableVersionViaHTTPTestService(t, service, "redact-body")
 
-	code, body := performJSONRequest(t, router, http.MethodPost,
+	code, body := performJSONRequest(t, outside(router), http.MethodPost,
 		"/v1/memory_stores/"+store.ID+"/memory_versions/"+oldVersionID+"/redact",
 		env.envKey,
 		`{}`,

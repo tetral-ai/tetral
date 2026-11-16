@@ -156,7 +156,7 @@ func (h *instanceHandler) createInstance(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	h.auditIssue(ctx, principal, issued)
-	writeJSON(w, http.StatusCreated, struct {
+	httpapi.WriteJSON(w, r, http.StatusCreated, struct {
 		Instance   instance.InstanceObject         `json:"instance"`
 		Credential instance.IssuedCredentialObject `json:"credential"`
 	}{issued.object, issued.credentialObject()})
@@ -255,7 +255,7 @@ func (h *instanceHandler) issueCredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.auditIssue(ctx, principal, issued)
-	writeJSON(w, issued.status, issued.credentialObject())
+	httpapi.WriteJSON(w, r, issued.status, issued.credentialObject())
 }
 
 func (h *instanceHandler) listInstances(w http.ResponseWriter, r *http.Request) {
@@ -292,7 +292,7 @@ func (h *instanceHandler) listInstances(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	httpapi.WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *instanceHandler) readInstance(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +314,7 @@ func (h *instanceHandler) readInstance(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, object)
+	httpapi.WriteJSON(w, r, http.StatusOK, object)
 }
 
 func (h *instanceHandler) deregisterInstance(w http.ResponseWriter, r *http.Request) {
@@ -383,7 +383,7 @@ func (h *instanceHandler) listCredentials(w http.ResponseWriter, r *http.Request
 		h.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	httpapi.WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *instanceHandler) revokeCredential(w http.ResponseWriter, r *http.Request) {
@@ -605,10 +605,4 @@ func mustPrincipal(r *http.Request) auth.Principal {
 
 func actorOf(principal auth.Principal) instance.Actor {
 	return instance.Actor{CredentialKind: principal.Credential.Kind, CredentialID: principal.Credential.ID}
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
 }

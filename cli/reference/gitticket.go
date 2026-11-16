@@ -26,10 +26,9 @@ func (server *Server) gitTicket(w http.ResponseWriter, request *http.Request) {
 			computer := computerKey{instanceID: conn.instance.id, sessionID: prepared.sessionID}
 			ticket := randomHex()
 			server.tickets[computer] = append(server.tickets[computer], ticket)
-			body, _ := wire.Encode(wire.GitTicketResponse{
+			return ownAnswer(server, wire.GitTicketResponse{
 				GitProxyURL: wire.HTTPSOrigin(server.config.GitProxyURL), Ticket: wire.NonEmpty(ticket),
-			})
-			return answer{status: http.StatusOK, body: body, noStore: true}, nil
+			}, true), nil
 		},
 	})
 }

@@ -129,10 +129,7 @@ func TestPostgreSQLPublicStreamingEndPublication(t *testing.T) {
 			if err := h.db.QueryRow(`SELECT event_id FROM session_events WHERE session_id=$1 AND type='agent.tool_use' AND payload_json::jsonb->>'evaluated_permission'='ask'`, h.session).Scan(&tool); err != nil {
 				t.Fatal(err)
 			}
-			var listed publicProjectionPage
-			if json.Unmarshal(h.client.control(t, "list", map[string]any{"sessionId": h.session, "limit": 100, "order": "asc"}), &listed) != nil {
-				t.Fatal("actual SDK history decode")
-			}
+			listed := h.client.list(t, h.session, "", 100, "asc", "")
 			found := false
 			for _, event := range listed.Data {
 				if publicEventType(event) == "agent.message" && publicText(event) == "alpha βeta omega\n" {
@@ -142,7 +139,7 @@ func TestPostgreSQLPublicStreamingEndPublication(t *testing.T) {
 			if !found || provider.calls.Load() != 0 {
 				t.Fatal("committed text unavailable in history or permission wait dispatched tool")
 			}
-			h.client.control(t, "confirm", map[string]any{"sessionId": h.session, "toolUseEventId": tool, "result": variant.decision})
+			h.client.confirm(t, h.session, tool, variant.decision)
 			waitContentSQLCount(t, h.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='user.tool_confirmation'`, h.session, 1)
 			// Observe the actual Runtime confirmation ACK through its committed
 			// inbox and Queue custody before releasing the original provider End.

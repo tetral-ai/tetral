@@ -14,12 +14,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetral-ai/tetral/api"
 )
 
 type RunOptions struct {
@@ -67,11 +68,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	if options.MaxWorkers <= 0 {
 		options.MaxWorkers = max(1, min(runtime.NumCPU(), 4))
 	}
-	if options.OutputDir == "" {
-		options.OutputDir = filepath.Join(options.Root, ".test-results", result.StartedAt.Format("20060102T150405.000000000Z"))
-	} else if !filepath.IsAbs(options.OutputDir) {
-		options.OutputDir = filepath.Join(options.Root, options.OutputDir)
-	}
+	options.OutputDir = resultDirectory(options, result.StartedAt)
 	if err := os.MkdirAll(options.OutputDir, 0o700); err != nil {
 		return result, err
 	}
@@ -100,7 +97,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		}
 	}
 	if runErr == nil && len(goSelections) > 0 {
-		steps, stepErr := executeGoSelections(ctx, plan.Profile, goSelections, options, dependencies)
+		steps, stepErr := executeGoSelections(ctx, plan, goSelections, options, dependencies)
 		result.Steps = append(result.Steps, steps...)
 		runErr = errors.Join(runErr, stepErr)
 	}
@@ -127,6 +124,37 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		runErr = errors.Join(runErr, writeErr)
 	}
 	return result, runErr
+}
+
+// resultDirectory is where a run started at startedAt writes its result.
+func resultDirectory(options RunOptions, startedAt time.Time) string {
+	if options.OutputDir == "" {
+		return filepath.Join(options.Root, ".test-results", startedAt.Format("20060102T150405.000000000Z"))
+	}
+	if !filepath.IsAbs(options.OutputDir) {
+		return filepath.Join(options.Root, options.OutputDir)
+	}
+	return options.OutputDir
+}
+
+// PlanFailed writes the result of a run whose plan could not be built, as
+// Execute writes one, with a plan step that failed with planErr; a plan step
+// that ctx stopped fails with what stopped it.
+func PlanFailed(ctx context.Context, profile Profile, options RunOptions, startedAt time.Time, planErr error) (Result, error) {
+	finished := time.Now().UTC()
+	step := StepResult{Group: "plan", WorkingDir: options.Root, Status: "apparatus-failed", StartedAt: startedAt.UTC(), FinishedAt: finished, Elapsed: finished.Sub(startedAt), FirstFailure: planErr.Error()}
+	if ctx.Err() != nil {
+		step.Status, step.FirstFailure = "fail", stoppedBy(ctx).Error()
+	}
+	result := Result{Plan: Plan{Profile: profile}, Execution: executionEnvelopeFromEnvironment(), StartedAt: startedAt.UTC(), FinishedAt: finished, Status: step.Status, Steps: []StepResult{step}}
+	if options.PlanOnly {
+		return result, planErr
+	}
+	directory := resultDirectory(options, result.StartedAt)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return result, errors.Join(planErr, err)
+	}
+	return result, errors.Join(planErr, writeJSON(filepath.Join(directory, "result.json"), result))
 }
 
 func executionEnvelopeFromEnvironment() ExecutionEnvelope {
@@ -222,20 +250,11 @@ func executeSelection(ctx context.Context, plan Plan, selection Selection, optio
 	return results, nil
 }
 
-// The registered SDK wrapper runs two fixed child scenarios (11 minutes each)
-// inside a 24-minute context. Only its inventory-owned selection needs a larger
-// enclosing Go budget; ordinary commands use the package watchdog policy.
-func goTestSelectionTimeout(selection Selection) string {
-	if slices.Contains(selection.Tests, "TestForkSDKIntegrationCompatibilityProofs") {
-		return "-timeout=30m"
-	}
-	return goPackageTimeout(selection.Packages)
-}
-
-func goTestExecutionArguments(profile Profile, selection Selection) []string {
+func goTestExecutionArguments(plan Plan, selection Selection) []string {
+	profile := plan.Profile
 	arguments := []string{"go", "test", "-json", "-count=1"}
 	if profile != ProfileFast {
-		arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
+		arguments = append(arguments, "-race", goPackageTimeout(plan, selection.Packages))
 	}
 	if len(selection.Tests) > 0 {
 		tests := make([]string, len(selection.Tests))
@@ -249,7 +268,8 @@ func goTestExecutionArguments(profile Profile, selection Selection) []string {
 	return append(arguments, selection.Packages[0])
 }
 
-func executeGoSelections(ctx context.Context, profile Profile, selections []Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
+func executeGoSelections(ctx context.Context, plan Plan, selections []Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
+	profile := plan.Profile
 	type outcome struct {
 		index int
 		step  StepResult
@@ -265,7 +285,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 			defer wait.Done()
 			for index := range jobs {
 				selection := selections[index]
-				arguments := goTestExecutionArguments(profile, selection)
+				arguments := goTestExecutionArguments(plan, selection)
 				command := commandSpec{
 					Arguments:         arguments,
 					Artifact:          "go-" + string(profile) + "-" + sanitizeArtifact(selection.Packages[0]) + ".jsonl",
@@ -273,6 +293,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 					RejectSkip:        true,
 					ExpectedRunnables: selection.Tests,
 					ExpectedPackages:  selection.Packages,
+					Environment:       []string{api.CoverageFileEnv + "=" + filepath.Join(options.OutputDir, apiCoverageFile)},
 				}
 				step, err := runStep(ctx, options.Root, "go", command, dependencies, options.OutputDir)
 				outcomes <- outcome{index: index, step: step, err: err}
@@ -296,6 +317,10 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 	return results, runErr
 }
 
+// apiCoverageFile is the file, in a result directory, that the Go tests of
+// the run append what they checked against Engine's OpenAPI file to.
+const apiCoverageFile = "api-coverage.jsonl"
+
 type commandSpec struct {
 	Arguments  []string
 	WorkingDir string
@@ -312,9 +337,18 @@ type commandSpec struct {
 
 const descendantRegistryEnv = "TETRAL_TEST_DESCENDANT_REGISTRY"
 
-func goPackageTimeout(packages []string) string {
+// shardedIntegrationWatchdogMinutes bounds the integration package's slice in
+// a sharded run. Each shard dispatches that slice first and plans about six
+// minutes for it, so its watchdog fires, and Go names the hung test, before
+// the Go Race job's limit ends the job with the result unwritten.
+const shardedIntegrationWatchdogMinutes = 15
+
+func goPackageTimeout(plan Plan, packages []string) string {
 	for _, name := range packages {
 		if name == "github.com/tetral-ai/tetral/integration" {
+			if plan.GoSelection != nil && plan.GoSelection.ShardCount > 1 {
+				return fmt.Sprintf("-timeout=%dm", shardedIntegrationWatchdogMinutes)
+			}
 			return "-timeout=25m"
 		}
 	}
@@ -324,9 +358,7 @@ func goPackageTimeout(packages []string) string {
 // Report-only coverage runs every Go package once without Race, so the
 // integration package executes all of its top-level tests sequentially in one
 // binary instead of in duration-balanced Race slices. The budget is more than
-// twice that package's coverage run time (docs/testing.md names the runs) and
-// longer than the remaining tests plus the SDK wrapper's 24-minute context, so
-// the wrapper reports its own deadline before the package watchdog fires.
+// twice that package's coverage run time (docs/testing.md names the runs).
 // TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests checks it against
 // the package's Race total in go_shard_weights.json. The scheduled coverage
 // job limit holds this budget plus dependency setup, compilation and the Bun
@@ -350,7 +382,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		arguments := []string{"go", "test", "-json", "-count=1"}
 		if plan.Profile != ProfileFast {
-			arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
+			arguments = append(arguments, "-race", goPackageTimeout(plan, selection.Packages))
 		}
 		arguments = append(arguments, packages...)
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil
@@ -408,12 +440,9 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		return commands, nil
 	case "protocol":
 		return []commandSpec{
-			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
-			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
 			{Arguments: []string{"buf", "lint"}},
-			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness|TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal|TestGitHubIntegrationRuntimeEventsTrackForkSDKShapes|TestForkSDKAgentModelUnionTracksDraftPinnedCatalog|TestPublicEventProjectionTracksFrozenForkSDKUnion", "-count=1"}},
+			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness", "-count=1"}},
 			{Arguments: []string{"go", "test", "-race", "-count=1", "./integration/grpcinterop"}},
-			{Arguments: []string{"./scripts/check-sdk-compatibility-traceability.sh"}},
 		}, nil
 	case "deployment":
 		lock, err := loadEdgeDependencyLock(root)
@@ -445,13 +474,6 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			commands = append(commands, commandSpec{Arguments: []string{"python3", "scripts/check-envoy-secret-helper.py"}})
 		}
 		return append(commands, commandSpec{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}}), nil
-	case "cli":
-		// Every test file of the CLI's tests package writes its acceptance
-		// record into the directory this variable names, and fails without it.
-		return []commandSpec{
-			{Arguments: []string{"cargo", "build", "--locked"}, WorkingDir: "cli"},
-			{Arguments: []string{"cargo", "test", "--locked"}, WorkingDir: "cli", Environment: []string{"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}},
-		}, nil
 	case "sandbox-image":
 		return []commandSpec{
 			{Arguments: []string{"./scripts/run-helper-privilege-container.sh"}},
@@ -584,6 +606,12 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	}
 	step.FirstFailure = firstFailure
 	err = reconcileProcessAndReport(processErr, reportErr, spec.Kind != "")
+	if ctx.Err() != nil {
+		// The run ended the command, so its report is cut short wherever it
+		// stopped; why it ended is the failure.
+		err = stoppedBy(ctx)
+		step.FirstFailure = err.Error()
+	}
 	if cleanupErr := dependencies.closeProcessRun(processRunID); cleanupErr != nil {
 		err = errors.Join(err, invalidReport("test process cleanup failed"))
 	}
@@ -603,6 +631,12 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 		return step, fmt.Errorf("%s evidence failed (diagnostic %s): %w", group, logPath, err)
 	}
 	return step, nil
+}
+
+// stoppedBy is why ctx ended a command: the signal that stopped the run, or
+// its limit.
+func stoppedBy(ctx context.Context) error {
+	return context.Cause(ctx)
 }
 
 func terminateRegisteredDescendants(path string) error {

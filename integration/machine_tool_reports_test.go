@@ -52,6 +52,7 @@ func TestAReportSentAgainGetsItsFirstAcknowledgement(t *testing.T) {
 	use, task := s.admitted(computerID, "make test")
 	instruction, _ := stream.execute()
 	body := execution(stream.connectionID, "report_terminal", instruction, "terminal", 1, execEnvelope("success", task, "ok"))
+	stream.held(enginetest.CaseEnded, instruction, body)
 	first := stream.acked(body, "report_terminal")
 	again := stream.acked(body, "report_terminal")
 	if !bytes.Equal(first.Body, again.Body) {
@@ -116,7 +117,8 @@ func TestReportsAndProtocolErrorsNeverShareAnIdentity(t *testing.T) {
 	}
 }
 
-// A running report settles the call and starts its background task; the
+// A running report settles the call with its result, the drive downloads it
+// lists included, and starts its background task; the
 // terminal report, posted to the other hub server, ends the task and writes
 // one task notification for the calling thread and its job in the same
 // transaction, which also marks the tool.execute reported so it is not sent
@@ -129,9 +131,20 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	use, task := s.admitted(computerID, "sleep 60")
 	instruction, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
-	if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "running" {
-		t.Fatalf("call = %s %v; want settled by the running report", state, record)
+	const downloading = `{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"downloading":[{"path":"/drives/team/data.bin","downloaded_bytes":4096,"size_bytes":262144}]}`
+	runningReport := execution(stream.connectionID, "report_running", instruction, "running", 1,
+		strings.TrimSuffix(execEnvelope("running", task, ""), "}")+`,"drive_sync":`+downloading+`}`)
+	terminalReport := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+	stream.held(enginetest.CaseRanThenEnded, instruction, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
+	state, record := s.settlement(use)
+	result, _ := record["result"].(map[string]any)
+	var sync any
+	if err := json.Unmarshal([]byte(downloading), &sync); err != nil {
+		t.Fatal(err)
+	}
+	if state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "running" || !reflect.DeepEqual(result["drive_sync"], sync) {
+		t.Fatalf("call = %s %v; want settled by the running report with its drive_sync", state, record)
 	}
 	running := f.row(`SELECT status, provider, computer_id, connection_id, dispatch_message_id, sandbox_id FROM session_background_tasks WHERE task_id=$1`, task)
 	if running["status"] != "running" || running["provider"] != "computer" || running["computer_id"] != computerID ||
@@ -141,7 +154,7 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 
 	other := *stream
 	other.cli = f.cli(1, stream.cli.InstanceID, stream.cli.CredentialID)
-	other.acked(execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done")), "report_terminal")
+	other.acked(terminalReport, "report_terminal")
 	ended := f.row(`SELECT status, terminal_result_json::jsonb->'result'->'stdout'->>'text' AS stdout FROM session_background_tasks WHERE task_id=$1`, task)
 	if ended["status"] != "completed" || ended["stdout"] != "done" {
 		t.Fatalf("background task = %v; want completed with the terminal result", ended)
@@ -174,9 +187,17 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 
 	foreground, foregroundTask := s.admitted(computerID, "make test")
 	foregroundInstruction, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_foreground", foregroundInstruction, "terminal", 1, execEnvelope("success", foregroundTask, "ok")), "report_foreground")
-	if state, record := s.settlement(foreground); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" {
-		t.Fatalf("foreground call = %s %v; want settled by its terminal report", state, record)
+	foregroundResult := execEnvelope("success", foregroundTask, "ok")
+	foregroundReport := execution(stream.connectionID, "report_foreground", foregroundInstruction, "terminal", 1, foregroundResult)
+	stream.held(enginetest.CaseEnded, foregroundInstruction, foregroundReport)
+	stream.acked(foregroundReport, "report_foreground")
+	var sent any
+	if err := json.Unmarshal([]byte(foregroundResult), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if state, record := s.settlement(foreground); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" ||
+		!reflect.DeepEqual(record["result"], sent) {
+		t.Fatalf("foreground call = %s %v; want settled by its terminal report with its result", state, record)
 	}
 	foregroundInput := queue.FormatTaskNotificationRuntimeInputID(foregroundTask)
 	if tasks, notices, jobs := f.count(`SELECT count(*) FROM session_background_tasks WHERE task_id=$1`, foregroundTask),
@@ -275,7 +296,10 @@ func TestATaskOfAClosedThreadEndsWithoutItsBinding(t *testing.T) {
 		computerID, stream := s.preparedUserComputer("laptop")
 		use, task := c.admitted(computerID, "sleep 600")
 		instruction, _ := stream.execute()
-		stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
+		runningReport := execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, ""))
+		terminal := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+		stream.held(enginetest.CaseRanThenEnded, instruction, runningReport, terminal)
+		stream.acked(runningReport, "report_running")
 		settle(t, c, use, "running in the background")
 		endRequest(t, c, use)
 		if close {
@@ -292,7 +316,6 @@ func TestATaskOfAClosedThreadEndsWithoutItsBinding(t *testing.T) {
 				t.Fatalf("release the binding = %v, %v", released, err)
 			}
 		}
-		terminal := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
 		end := func() {
 			if byReport {
 				stream.acked(terminal, "report_terminal")
@@ -437,7 +460,10 @@ func TestControlRepliesAndExecutionReportsAreAcknowledgedApart(t *testing.T) {
 			computerID, stream := s.preparedUserComputer("laptop")
 			_, task := s.admitted(computerID, "cat")
 			execute, _ := stream.execute()
-			stream.acked(execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, "")), "report_running")
+			runningReport := execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, ""))
+			terminal := execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "bye"))
+			stream.held(enginetest.CaseRanThenEnded, execute, runningReport, terminal)
+			stream.acked(runningReport, "report_running")
 			stdinUse, response, err := s.control(task, "", nil, nil)
 			if err != nil || response.GetAdmitted() == nil {
 				t.Fatalf("write_stdin = %v, %v", response, err)
@@ -445,7 +471,6 @@ func TestControlRepliesAndExecutionReportsAreAcknowledgedApart(t *testing.T) {
 			stdin := stream.next()
 			reply := reportJSON(stream.connectionID, "report_reply", stdin, `"kind":"control","result":`+
 				strings.Replace(execEnvelope("success", task, "bye"), `"tool":"exec_command"`, `"tool":"stdin"`, 1))
-			terminal := execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "bye"))
 			posts := [][2]any{{reply, "report_reply"}, {terminal, "report_terminal"}}
 			if !replyFirst {
 				posts[0], posts[1] = posts[1], posts[0]
@@ -491,14 +516,17 @@ func TestReportSizesFollowTheCallsTool(t *testing.T) {
 	}
 
 	use, instruction := viewImage()
-	for _, refused := range []string{image(protocol.ViewImageDecodedBytes+1, protocol.ViewImageDecodedBytes+1, "image/png"),
-		image(1024, 1023, "image/png"), image(1024, 1024, "image/jpeg")} {
-		stream.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, refused), http.StatusBadRequest, protocol.ErrorInvalidMessage)
+	outside := stream.invalid()
+	for _, refused := range []string{image(protocol.ViewImageDecodedBytes+1, protocol.ViewImageDecodedBytes+1, "image/png"), image(1024, 1023, "image/png")} {
+		outside.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, refused), http.StatusBadRequest, protocol.ErrorInvalidMessage)
 	}
+	// Only Engine, which reads the bytes, finds that they are not the
+	// declared type.
+	stream.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, image(1024, 1024, "image/jpeg")), http.StatusBadRequest, protocol.ErrorInvalidMessage)
 	dense := execution(stream.connectionID, "report_image", instruction, "terminal", 1, image(1024, 1024, "image/png"))
 	dense = append(dense[:len(dense)-1], `,"sentinel_member":[`+strings.Repeat("0,", protocol.MaxReportJSONValues)+`0]}`...)
 	uploads := f.count(`SELECT count(*) FROM session_attachment_uploads`)
-	if response := stream.refused(dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
+	if response := outside.refused(dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
 		bytes.Contains(response.Body, []byte("sentinel")) {
 		t.Fatalf("refusal %s; want the value budget's, naming no member of the report", response.Body)
 	}
@@ -524,7 +552,7 @@ func TestReportSizesFollowTheCallsTool(t *testing.T) {
 	exec, _ := stream.execute()
 	ordinary := execution(stream.connectionID, "report_large", exec, "terminal", 1, execEnvelope("success", task, "PAD"))
 	padded := bytes.Replace(ordinary, []byte("PAD"), bytes.Repeat([]byte("v"), protocol.OrdinaryToolStatusJSONBytes+1-len(ordinary)+3), 1)
-	stream.refused(padded, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge)
+	outside.refused(padded, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge)
 	withImage := execution(stream.connectionID, "report_large", exec, "terminal", 1, image(290_000, 290_000, "image/png"))
 	if len(withImage) < 350_000 || len(withImage) > 400_000 {
 		t.Fatalf("image report of %d bytes; want about 400,000", len(withImage))
@@ -661,7 +689,10 @@ func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	_, running := s.admitted(computerID, "sleep 60")
 	original, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", original, "running", 1, execEnvelope("running", running, "")), "report_running")
+	runningReport := execution(stream.connectionID, "report_running", original, "running", 1, execEnvelope("running", running, ""))
+	terminalReport := execution(stream.connectionID, "report_terminal", original, "terminal", 2, execEnvelope("success", running, "done"))
+	stream.held(enginetest.CaseRanThenEnded, original, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
 	use, _ := s.admitted(computerID, "make test")
 	refused, _ := stream.execute()
 	stream.acked(reportJSON(stream.connectionID, "report_rejected", refused,
@@ -674,7 +705,7 @@ func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
 	if _, record := s.settlement(use); record["code"] != "resource_exhausted" {
 		t.Fatalf("a second rejection changed the call: %v", record)
 	}
-	stream.acked(execution(stream.connectionID, "report_terminal", original, "terminal", 2, execEnvelope("success", running, "done")), "report_terminal")
+	stream.acked(terminalReport, "report_terminal")
 	if status := f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, running)["status"]; status != "completed" {
 		t.Fatalf("the running task is %v; want completed by its own report", status)
 	}
@@ -720,17 +751,26 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 }
 
 // On one connection, three sandbox_unavailable rejections of one Session and
-// one of a second Session write one computer_sandbox_error in each Session;
+// one of a second Session settle each call rejected and write one
+// computer_sandbox_error in each Session;
 // binding_unavailable writes none. Neither code is logged as
-// tool.report_rejected.
+// tool.report_rejected. A rejection on the instance's next connection writes
+// the Session's second error.
 func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
+	rejected := func(s *toolSession, use string) {
+		t.Helper()
+		if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "rejected" || record["code"] != string(protocol.RejectionSandboxUnavailable) {
+			t.Fatalf("call %s = %s %v; want rejected with sandbox_unavailable", use, state, record)
+		}
+	}
 	for i := range 3 {
-		s.admitted(computerID, fmt.Sprintf("make test %d", i))
+		use, _ := s.admitted(computerID, fmt.Sprintf("make test %d", i))
 		instruction, _ := stream.execute()
 		stream.acked(rejection(stream.connectionID, fmt.Sprintf("report_%d", i), instruction, string(protocol.RejectionSandboxUnavailable)), fmt.Sprintf("report_%d", i))
+		rejected(s, use)
 	}
 	s.admitted(computerID, "make lint")
 	instruction, _ := stream.execute()
@@ -742,9 +782,10 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 		return err
 	})
 	stream.prepare("")
-	other.admitted(otherComputer, "make test")
+	otherUse, _ := other.admitted(otherComputer, "make test")
 	instruction, _ = stream.execute()
 	stream.acked(rejection(stream.connectionID, "report_other", instruction, string(protocol.RejectionSandboxUnavailable)), "report_other")
+	rejected(other, otherUse)
 	for _, session := range []struct{ id, computer string }{{s.id, computerID}, {other.id, otherComputer}} {
 		errs := f.row(`SELECT count(*) AS n, min(payload_json::jsonb->'error'->>'computer_id') AS computer, min(payload_json::jsonb->'error'->>'message') AS message
 			FROM session_events WHERE session_id=$1 AND type='session.error' AND payload_json::jsonb->'error'->>'type'='computer_sandbox_error'`, session.id)
@@ -758,10 +799,24 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 	if logged := diagnosticRecords(t, &f.hubLogs, "tool.report_rejected"); len(logged) != 0 {
 		t.Fatalf("tool.report_rejected logged %v; want none", logged)
 	}
+
+	stream.expire()
+	next := stream.reopen()
+	next.ready(nil)
+	// The ready prepares both Sessions' computers again.
+	next.prepare("")
+	next.prepare("")
+	s.admitted(computerID, "make test again")
+	instruction, _ = next.execute()
+	next.acked(rejection(next.connectionID, "report_next", instruction, string(protocol.RejectionSandboxUnavailable)), "report_next")
+	if n := len(f.sessionErrors(s.id)); n != 2 {
+		t.Fatalf("%d session errors after a rejection on the next connection; want a second sandbox error", n)
+	}
 }
 
-// Each drive a report lists as unmounted writes one drive_mount_error for the
-// report's computer; the report sent again writes none.
+// Each entry a report lists as unmounted writes one drive_mount_error for the
+// report's computer, two different errors of one drive included; the report
+// sent again writes none.
 func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -769,8 +824,9 @@ func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 	_, task := s.admitted(computerID, "ls /drives")
 	instruction, _ := stream.execute()
 	envelope := strings.TrimSuffix(execEnvelope("success", task, "ok"), "}") +
-		`,"drive_sync":{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"unmounted":[{"drive_id":"drv_notes","error":"mount failed"},{"drive_id":"drv_data","error":"no space"}]}}`
+		`,"drive_sync":{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"unmounted":[{"drive_id":"drv_notes","error":"mount failed"},{"drive_id":"drv_notes","error":"listing malformed"},{"drive_id":"drv_data","error":"no space"}]}}`
 	body := execution(stream.connectionID, "report_unmounted", instruction, "terminal", 1, envelope)
+	stream.held(enginetest.CaseEnded, instruction, body)
 	stream.acked(body, "report_unmounted")
 	stream.acked(body, "report_unmounted")
 	rows, err := f.admin.QueryContext(f.ctx, `SELECT payload_json::jsonb->'error'->>'drive_id', payload_json::jsonb->'error'->>'computer_id', payload_json::jsonb->'error'->>'message'
@@ -787,7 +843,7 @@ func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 		}
 		got = append(got, drive+" "+computer+" "+message)
 	}
-	want := []string{"drv_notes " + computerID + " mount failed", "drv_data " + computerID + " no space"}
+	want := []string{"drv_notes " + computerID + " mount failed", "drv_notes " + computerID + " listing malformed", "drv_data " + computerID + " no space"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("drive_mount_error events = %v; want %v", got, want)
 	}
@@ -849,7 +905,9 @@ func TestAwaitToolCallEndsOnItsNoticeOnAnyBridgePod(t *testing.T) {
 		}
 	}
 	report := func(instruction enginetest.Event, task string) {
-		stream.acked(execution(stream.connectionID, "report_"+task, instruction, "terminal", 1, execEnvelope("success", task, "ok")), "report_"+task)
+		body := execution(stream.connectionID, "report_"+task, instruction, "terminal", 1, execEnvelope("success", task, "ok"))
+		stream.held(enginetest.CaseEnded, instruction, body)
+		stream.acked(body, "report_"+task)
 	}
 
 	// The test CLI sends no heartbeat; the lease outlasts the long wait.
@@ -928,7 +986,9 @@ func TestToolReportSpansFollowTheReportedMetrics(t *testing.T) {
 	other := *stream
 	other.cli = f.cli(1, stream.cli.InstanceID, stream.cli.CredentialID)
 	before := time.Now()
-	other.acked(execution(stream.connectionID, "report_metrics", instruction, "terminal", 1, execEnvelope("success", task, "ok")), "report_metrics")
+	metricsReport := execution(stream.connectionID, "report_metrics", instruction, "terminal", 1, execEnvelope("success", task, "ok"))
+	stream.held(enginetest.CaseEnded, instruction, metricsReport)
+	other.acked(metricsReport, "report_metrics")
 	after := time.Now()
 
 	byName := map[string]tracetest.SpanStub{}
@@ -990,15 +1050,24 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 		// they settle.
 		run func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint
 	}
-	terminal := func(stream *cliStream, messageID string, instruction enginetest.Event, seq int) {
+	// terminal sends instruction's terminal report after the earlier reports
+	// of its task.
+	terminal := func(stream *cliStream, messageID string, instruction enginetest.Event, earlier ...[]byte) {
 		a := addressOf(instruction)
-		stream.acked(execution(stream.connectionID, messageID, instruction, "terminal", seq, execEnvelope("success", a.taskID, "ok")), messageID)
+		body := execution(stream.connectionID, messageID, instruction, "terminal", len(earlier)+1, execEnvelope("success", a.taskID, "ok"))
+		name := enginetest.CaseEnded
+		if len(earlier) > 0 {
+			name = enginetest.CaseRanThenEnded
+		}
+		stream.held(name, instruction, append(earlier, body)...)
+		stream.acked(body, messageID)
 	}
 	for _, sc := range []scenario{
 		{"concurrent copies of one report", func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint {
 			use, _ := s.admitted(computerID, "make test")
 			instruction, _ := stream.execute()
 			body := execution(stream.connectionID, "report_copy", instruction, "terminal", 1, execEnvelope("success", addressOf(instruction).taskID, "ok"))
+			stream.held(enginetest.CaseEnded, instruction, body)
 			responses, errs := make([]enginetest.Response, 4), make([]error, 4)
 			var wg sync.WaitGroup
 			for i := range responses {
@@ -1042,7 +1111,8 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 		{"a partial write, and a write cancelled before its reply", func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint {
 			use, task := s.admitted(computerID, "cat")
 			execute, _ := stream.execute()
-			stream.acked(execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, "")), "report_running")
+			running := execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, ""))
+			stream.acked(running, "report_running")
 			stdinResult := strings.Replace(execEnvelope("running", task, ""), `"tool":"exec_command"`, `"tool":"stdin"`, 1)
 			stdinReply := func(messageID string, instruction enginetest.Event, extra string) {
 				stream.acked(reportJSON(stream.connectionID, messageID, instruction, `"kind":"control","result":`+stdinResult+extra), messageID)
@@ -1073,7 +1143,7 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 			if task := s.f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, task); task["status"] != "running" {
 				t.Fatalf("task after a closed stdin = %v; want running until its terminal report", task)
 			}
-			terminal(stream, "report_terminal", execute, 2)
+			terminal(stream, "report_terminal", execute, running)
 			return s.hints(use, write, late)
 		}},
 		{"a terminal report after a turn-end cancel settled the call", func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint {
@@ -1083,7 +1153,7 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			stream.next() // tool.cancel
-			terminal(stream, "report_terminal", execute, 1)
+			terminal(stream, "report_terminal", execute)
 			return s.hints(use)
 		}},
 		{"a report after a stream-only resume", func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint {
@@ -1095,7 +1165,7 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 			if resent.Envelope.MessageID != execute.Envelope.MessageID {
 				t.Fatalf("resent %s; want %s", resent.Envelope.MessageID, execute.Envelope.MessageID)
 			}
-			terminal(resumed, "report_terminal", execute, 1)
+			terminal(resumed, "report_terminal", execute)
 			return s.hints(use)
 		}},
 		{"a cwd_not_found result, then a new call", func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint {
@@ -1104,7 +1174,9 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 			missing := `{"schema_version":1,"tool":"exec_command","status":"error","truncated":false,` +
 				`"error":{"kind":"cwd_not_found","message":"the working directory does not exist","path":"/Users/me/shop"},"result":{},` +
 				`"metrics":{"wall_time_ms":2,"queued_ms":0,"drive_wait_ms":0,"run_ms":0,"sync_ms":0}}`
-			stream.acked(execution(stream.connectionID, "report_missing", execute, "terminal", 1, missing), "report_missing")
+			missingReport := execution(stream.connectionID, "report_missing", execute, "terminal", 1, missing)
+			stream.held(enginetest.CaseEnded, execute, missingReport)
+			stream.acked(missingReport, "report_missing")
 			if _, record := s.settlement(use); record["settlement"] != "report" || !strings.Contains(fmt.Sprint(record["result"]), "cwd_not_found") {
 				t.Fatalf("call = %v; want settled by the cwd_not_found result", record)
 			}
@@ -1113,7 +1185,7 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 			if again.Envelope.MessageID == execute.Envelope.MessageID {
 				t.Fatal("the new call replayed the failed instruction")
 			}
-			terminal(stream, "report_next", again, 1)
+			terminal(stream, "report_next", again)
 			return s.hints(use, next)
 		}},
 		{"two Sessions on one instance", func(t *testing.T, s *toolSession, computerID string, stream *cliStream) []resultnotify.ExecutionResultHint {
@@ -1128,11 +1200,11 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 			stream.prepare("")
 			otherUse, _ := other.admitted(otherComputer, "make test")
 			second, _ := stream.execute()
-			terminal(stream, "report_second", second, 1)
+			terminal(stream, "report_second", second)
 			if state, _ := s.settlement(use); state != "pending" {
 				t.Fatalf("the other Session's report settled this call: %s", state)
 			}
-			terminal(stream, "report_first", first, 1)
+			terminal(stream, "report_first", first)
 			return append(s.hints(use), other.hints(otherUse)...)
 		}},
 	} {

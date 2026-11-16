@@ -22,8 +22,8 @@ func TestPostgreSQLPublicStreamingBrokerFailure(t *testing.T) {
 	for _, mode := range []string{"unavailable-at-start", "disconnect-after-first-delta"} {
 		t.Run(mode, func(t *testing.T) {
 			broker := publicFaultBroker(t)
-			stop := func() { publicBrokerCommand(t, broker, "stop") }
-			start := func() { publicBrokerCommand(t, broker, "start") }
+			var start func()
+			stop := func() { start = stopContainer(t, broker.Container, 1) }
 			if mode == "unavailable-at-start" {
 				stop()
 			}
@@ -145,7 +145,7 @@ func runPublicAcceptedFlushFailure(t *testing.T) {
 	h.releaseFragments(t, 1)
 	publicWait(t, "server positively accepted held flush batch", func() bool { s := publicPublisherState(t, h); return s.FlushWaiting && s.FlushServerProcessed > before })
 	h.waitEvent(t, "preview", "event_delta", 1)
-	publicBrokerCommand(t, h.broker, "stop")
+	start := stopContainer(t, h.broker.Container, 1)
 	publicWait(t, "native publisher observes disconnect during held flush", func() bool { return publicGatewayMetric(t, h, "connected") == 0 })
 	publicPublisherControl(t, h, "release_flush")
 	h.releaseFragments(t, 3)
@@ -155,7 +155,7 @@ func runPublicAcceptedFlushFailure(t *testing.T) {
 	}
 	assertContentE2EProvider(t, h.contentE2E, h.gateway.control(t, map[string]any{"kind": "observe"}, "observation"), 1, 0)
 	old := countPublicEvents(h.snapshot(t, "preview"), "event_delta")
-	publicBrokerCommand(t, h.broker, "start")
+	start()
 	publicWait(t, "native publisher and subscriber recover after accepted flush cut", func() bool {
 		return publicGatewayMetric(t, h, "connected") == 1 && len(publicBrokerSubscriptions(t, h.broker, h.session)) == 1
 	})
@@ -276,20 +276,6 @@ func publicFaultBroker(t *testing.T) testinfra.NATSFixture {
 	return broker
 }
 
-func publicBrokerCommand(t *testing.T, broker testinfra.NATSFixture, operation string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	args := []string{operation}
-	if operation == "stop" {
-		args = append(args, "--time", "1")
-	}
-	args = append(args, broker.Container)
-	command := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // Fixed start/stop operation on the runner-owned fixture.
-	if err := command.Run(); err != nil {
-		t.Fatalf("broker %s failed", operation)
-	}
-}
 func publicGatewayMetric(t *testing.T, h *publicStreamingHarness, name string) float64 {
 	t.Helper()
 	observation := h.gateway.control(t, map[string]any{"kind": "observe"}, "observation")

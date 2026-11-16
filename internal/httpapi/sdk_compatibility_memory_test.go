@@ -15,7 +15,7 @@ func TestTCompatMEM19HTTPCreateNullRejectsAndEmptyContentSucceeds(t *testing.T) 
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
 	router := env.router(httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 
-	code, body := performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/memstore_missing/memories", env.envKey, `{"path":"/null.md","content":null}`)
+	code, body := performJSONRequest(t, outside(router), http.MethodPost, "/v1/memory_stores/memstore_missing/memories", env.envKey, `{"path":"/null.md","content":null}`)
 	if code != http.StatusBadRequest || !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, `"message":"content must be a string"`) {
 		t.Fatalf("content:null status/body = %d %s; want named 400", code, body)
 	}
@@ -59,7 +59,7 @@ func TestTCompatMEM20HTTPUpdateNullsRejectAndOmissionLeavesValuesUnchanged(t *te
 		"content": `{"content":null}`,
 		"path":    `{"path":null}`,
 	} {
-		code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID+"/memories/"+created.ID, env.envKey, requestBody)
+		code, body = performJSONRequest(t, outside(router), http.MethodPost, "/v1/memory_stores/"+store.ID+"/memories/"+created.ID, env.envKey, requestBody)
 		wantMessage := `"message":"` + field + ` must be a string"`
 		if code != http.StatusBadRequest || !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, wantMessage) {
 			t.Fatalf("%s:null status/body = %d %s; want named 400", field, code, body)
@@ -145,7 +145,7 @@ func TestSDKCompatibilityMemoryStoreNullNameRejectedAndMetadataClearSurvivesStor
 	}
 	var store memory.Store
 	decodeMemoryJSON(t, body, &store)
-	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID, env.envKey, `{"name":null,"metadata":null}`)
+	code, body = performJSONRequest(t, outside(router), http.MethodPost, "/v1/memory_stores/"+store.ID, env.envKey, `{"name":null,"metadata":null}`)
 	if code != http.StatusBadRequest || !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "name must be a string") {
 		t.Fatalf("null name status/body = %d %s; want 400 invalid_request_error", code, body)
 	}

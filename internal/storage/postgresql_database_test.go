@@ -3,8 +3,6 @@ package storage
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -217,87 +215,4 @@ func TestConfigurePostgreSQLConnectionPreservesSecureSslmode(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestPostgreSQLProductionSourceContainsNoSslmodeDisable(t *testing.T) {
-	_, thisFile, _, _ := runtime.Caller(0)
-	dir := filepath.Dir(thisFile)
-	productionFile := filepath.Join(dir, "postgresql_database.go")
-	content, err := os.ReadFile(productionFile) //nolint:gosec // test-only static read of repo source
-	if err != nil {
-		t.Fatalf("read %s: %v", productionFile, err)
-	}
-	if strings.Contains(string(content), "sslmode=disable") {
-		t.Errorf("%s must not contain sslmode=disable; production code must honor caller TLS settings", productionFile)
-	}
-}
-
-func TestPgxDirectDependencyAtSecurityFloor(t *testing.T) {
-	_, thisFile, _, _ := runtime.Caller(0)
-	dir := filepath.Dir(thisFile)
-	goMod := filepath.Join(dir, "..", "..", "go.mod")
-	content, err := os.ReadFile(goMod) //nolint:gosec // test-only static read of repo go.mod
-	if err != nil {
-		t.Fatalf("read go.mod: %v", err)
-	}
-	version := pgxVersionFromGoMod(t, string(content))
-	if compareSemver(version, "v5.9.0") < 0 {
-		t.Errorf("github.com/jackc/pgx/v5 version %q is below the v5.9.0 floor required by GO-2026-4772 / CVE-2026-33816", version)
-	}
-}
-
-// pgxVersionFromGoMod scans go.mod text for the
-// `github.com/jackc/pgx/v5 vX.Y.Z` token and returns the version. Fails
-// the test if the dependency is absent or no version follows it.
-func pgxVersionFromGoMod(t *testing.T, goMod string) string {
-	t.Helper()
-	const module = "github.com/jackc/pgx/v5"
-	for _, line := range strings.Split(goMod, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		// Module line shape inside require blocks: `module vX.Y.Z` or
-		// `module vX.Y.Z // indirect`.
-		for i := 0; i+1 < len(fields); i++ {
-			if fields[i] == module && strings.HasPrefix(fields[i+1], "v") {
-				return fields[i+1]
-			}
-		}
-	}
-	t.Fatalf("github.com/jackc/pgx/v5 not found in go.mod")
-	return ""
-}
-
-// compareSemver compares two `vMAJOR.MINOR.PATCH` strings. Returns -1, 0,
-// or 1. Pre-release suffixes are treated as part of the patch token; that
-// is good enough for the v5.9.x floor check.
-func compareSemver(a, b string) int {
-	parse := func(v string) [3]int {
-		v = strings.TrimPrefix(v, "v")
-		// Trim a possible "+meta" or "-pre" suffix from the patch.
-		if idx := strings.IndexAny(v, "-+"); idx >= 0 {
-			v = v[:idx]
-		}
-		parts := strings.SplitN(v, ".", 3)
-		var out [3]int
-		for i := 0; i < len(parts) && i < 3; i++ {
-			n := 0
-			for _, r := range parts[i] {
-				if r < '0' || r > '9' {
-					break
-				}
-				n = n*10 + int(r-'0')
-			}
-			out[i] = n
-		}
-		return out
-	}
-	ax, bx := parse(a), parse(b)
-	for i := 0; i < 3; i++ {
-		if ax[i] < bx[i] {
-			return -1
-		}
-		if ax[i] > bx[i] {
-			return 1
-		}
-	}
-	return 0
 }

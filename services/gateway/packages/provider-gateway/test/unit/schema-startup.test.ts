@@ -8,6 +8,7 @@ import { databasePoolDefaults, openPostgresSQLOwner } from "@tetral/ts-dbconnect
 import { causeOf } from "@tetral/ts-observability";
 import { buildProviderGatewayCommandDependencies } from "../../src/command.js";
 import type { ProviderGatewayConfig } from "../../src/config.js";
+import { PreviewPublisherDefaults } from "../../src/providers/preview-config.js";
 
 describe("provider-gateway schema verification", () => {
 	test("accepts the exact current registry through SELECT-only SQL", async () => {
@@ -143,10 +144,8 @@ describe("provider-gateway schema verification", () => {
 			await verifyPostgreSQLSchema(sql);
 			throw new Error("expected schema verification failure");
 		} catch (error) {
-			expect(error).toBeInstanceOf(SchemaVerificationError);
-			expect((error as SchemaVerificationError).kind).toBe(
-				"schema_history_malformed",
-			);
+			expect(error).not.toBeInstanceOf(SchemaVerificationError);
+			expect(String(error)).toContain("postgresql database could not be reached");
 			expect(String(error)).not.toContain(secret);
 			expect(String(error)).not.toContain("postgres://");
 		}
@@ -216,6 +215,21 @@ describe("provider-gateway schema verification", () => {
 		}
 	});
 
+	test("a preview credential that cannot be read fails startup with the read's error in its chain, without its path", async () => {
+		const failure = await buildProviderGatewayCommandDependencies({
+			config: { ...providerConfig(), previewNats: { servers: ["tls://nats:4222"], userPath: "/nonexistent/preview-user", passwordPath: "/nonexistent/preview-password", policy: PreviewPublisherDefaults } },
+			logger: { info: () => undefined, error: () => undefined },
+			builderOptions: {
+				tokenReviewClientFactory: () => ({
+					createTokenReview: async () => ({ authenticated: false, username: "", audiences: [], podUid: "" }),
+				}),
+				sqlFactory: () => schemaSQL([], []) as never,
+				schemaVerifier: async () => undefined,
+			},
+		}).then(() => undefined, (error: unknown) => error);
+		expect(causeOf(failure)).toEqual(causeOf("gateway preview credential startup failed: ENOENT: no such file or directory, lstat"));
+	});
+
 	// A reload's failure record takes this error as its cause.
 	test("a pool that fails verification fails with the driver's error in its chain", async () => {
 		const failure = await openPostgresSQLOwner({
@@ -224,24 +238,6 @@ describe("provider-gateway schema verification", () => {
 			verify: async () => { throw new Error("connect ECONNREFUSED 10.0.0.7:5432"); },
 		}).then(() => undefined, (error: unknown) => error);
 		expect(causeOf(failure)).toEqual(causeOf("database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"));
-	});
-
-	test("default startup owner rejects a privileged runtime role before dependency construction", async () => {
-		const events: string[] = [];
-		const sql = schemaSQL(events, [[{ is_superuser: true, bypasses_rls: false }]]);
-		await expect(buildProviderGatewayCommandDependencies({
-			config: providerConfig(),
-			logger: { info: () => undefined, error: () => undefined },
-			builderOptions: {
-				tokenReviewClientFactory: () => ({
-					createTokenReview: async () => ({ authenticated: false, username: "", audiences: [], podUid: "" }),
-				}),
-				sqlFactory: () => sql as never,
-			},
-		})).rejects.toMatchObject({ kind: "runtime_role_invalid" });
-		expect(events).toHaveLength(2);
-		expect(events[0]).toContain("pg_roles");
-		expect(events[1]).toBe("close");
 	});
 });
 

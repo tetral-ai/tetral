@@ -84,20 +84,7 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
           WORKFLOW_REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
-          test "$WORKFLOW_REF" = refs/heads/main
-          test "$WORKFLOW_SHA" = "$(git rev-parse origin/main)"
-          git cat-file -e "$SOURCE_COMMIT^{commit}"
-          if [[ "$MODE" = candidate ]]; then
-            test "$SOURCE_COMMIT" = "$WORKFLOW_SHA"
-          fi
-          version_json="$(go run ./internal/release/cmd/tetral-release validate-version --version "$VERSION")"
-          artifact_version="$(jq -r .artifact <<<"$version_json")"
-          test "$artifact_version" != "dev"
-          echo "artifact_version=$artifact_version" >> "$GITHUB_OUTPUT"
-          echo "candidate_tag=candidate-$artifact_version" >> "$GITHUB_OUTPUT"
+        run: ./scripts/release-validate-source.sh
       - name: Validate transition-specific digests
         env:
           MODE: ${{ inputs.mode }}
@@ -404,14 +391,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -euo pipefail
-          bases="$(go run ./internal/release/cmd/tetral-release verify-bases --repository-root . | jq .bases)"
-          database="$(go run ./internal/release/cmd/tetral-release database-identity)"
-          images="$(jq 'with_entries(.value={repository:("ghcr.io/tetral-ai/"+.key),top_level_digest:.value.top_level_digest,top_level_media_type:.value.top_level_media_type,linux_amd64_child_digest:.value.child_digest,linux_amd64_child_media_type:.value.child_media_type,platform:{os:"linux",architecture:"amd64"}})' images.json)"
-          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg source "$SOURCE_COMMIT" --argjson images "$images" --arg package "$(cat chart.digest)" --arg values "$(cat values.digest)" --arg render "$(cat render.digest)" --arg render_command "helm template tetral dist/tetral-$ARTIFACT_VERSION.tgz -f release-values.json" --argjson bases "$bases" --arg now "$(date -u +%FT%TZ)" \
-            --argjson database "$database" \
-            '{schema:"tetral.release-candidate/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,platform:"linux/amd64",images:$images,chart:{candidate_manifest_digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",package_sha256:$package,render_sha256:$render,values_sha256:$values,render_command:$render_command},database_schema_version:$database.version,database_schema_checksum:$database.checksum,base_images:$bases,created_at:$now}' > candidate.json
+        run: ./scripts/release-candidate-manifest.sh
       - name: Publish exact chart bytes and manifest records
         env:
           VERSION: ${{ needs.validate.outputs.artifact_version }}
@@ -655,24 +635,6 @@ jobs:
             case "$(jq -r .kind disposition.json)" in superseded|revoked) disposition_found=true ;; *) exit 1 ;; esac
           fi
 
-          require_exclusive_candidate_tag() {
-            local repository="$1" digest="$2" expected_tag="$3" found=false tag current
-            while IFS= read -r tag; do
-              current="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$repository:$tag")"
-              if test "$current" = "$digest"; then
-                test "$tag" = "$expected_tag" || {
-                  echo "$repository@$digest is also retained by tag $tag" >&2
-                  exit 1
-                }
-                found=true
-              fi
-            done < <(oras repo tags "$repository" --format json | jq -r '.tags[]')
-            test "$found" = true || {
-              echo "$repository:$expected_tag does not own the candidate digest" >&2
-              exit 1
-            }
-          }
-
           : > deletion-set.txt
           for image in tetral gateway agent-runtime sandbox; do
             digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
@@ -680,11 +642,11 @@ jobs:
               echo "candidate has a final image reference" >&2
               exit 1
             fi
-            require_exclusive_candidate_tag "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
+            ./scripts/release-require-exclusive-tag.sh "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
             echo "ghcr.io/tetral-ai/$image@$digest" >> deletion-set.txt
           done
           candidate_chart_digest="$(jq -r .chart.candidate_manifest_digest candidate.json)"
-          require_exclusive_candidate_tag "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
+          ./scripts/release-require-exclusive-tag.sh "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
           echo "$RELEASE_METADATA_REPOSITORY@$candidate_chart_digest" >> deletion-set.txt
           sort -o deletion-set.txt deletion-set.txt
           set_digest="sha256:$(sha256sum deletion-set.txt | awk '{print $1}')"
@@ -713,10 +675,10 @@ jobs:
           for image in tetral gateway agent-runtime sandbox; do
             ! docker buildx imagetools inspect "ghcr.io/tetral-ai/$image:$VERSION" >/dev/null 2>&1 || { echo "final image appeared before cleanup" >&2; exit 1; }
             digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
-            require_exclusive_candidate_tag "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
+            ./scripts/release-require-exclusive-tag.sh "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
           done
           ! oras manifest fetch "ghcr.io/tetral-ai/charts/tetral:$VERSION" >/dev/null 2>&1 || { echo "final Chart appeared before cleanup" >&2; exit 1; }
-          require_exclusive_candidate_tag "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
+          ./scripts/release-require-exclusive-tag.sh "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
           while IFS= read -r reference; do
             oras manifest delete --force "$reference"
           done < deletion-set.txt

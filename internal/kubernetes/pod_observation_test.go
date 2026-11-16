@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -83,5 +88,70 @@ func TestClientsetFreshPodObservation(t *testing.T) {
 				t.Fatalf("fresh Pod facts=%v", observation)
 			}
 		})
+	}
+}
+
+// Every request the visibility client sends is a read of Pods or of
+// EndpointSlices in the namespace it was asked for, the reads its Role grants.
+// A method added to the client is driven here before it can pass.
+func TestVisibilityClientSendsOnlyReadsOfPodsAndEndpointSlices(t *testing.T) {
+	var mu sync.Mutex
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := r.Method + " " + r.URL.Path
+		if r.URL.Query().Get("watch") == "true" {
+			request += " watch"
+		}
+		mu.Lock()
+		requests = append(requests, request)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	sdk, err := clientset.NewForConfig(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &ClientsetVisibilityClient{client: sdk}
+	ctx := t.Context()
+	watching := func(watcher watch.Interface, err error) error {
+		if err == nil {
+			watcher.Stop()
+		}
+		return err
+	}
+	calls := []struct {
+		method string
+		call   func() error
+		sends  string
+	}{
+		{"ListPods", func() error { _, err := client.ListPods(ctx, "runtime", metav1.ListOptions{}); return err }, "GET /api/v1/namespaces/runtime/pods"},
+		{"GetPod", func() error { _, err := client.GetPod(ctx, "runtime", "pod-a"); return err }, "GET /api/v1/namespaces/runtime/pods/pod-a"},
+		{"WatchPods", func() error { return watching(client.WatchPods(ctx, "runtime", metav1.ListOptions{})) }, "GET /api/v1/namespaces/runtime/pods watch"},
+		{"ListEndpointSlices", func() error { _, err := client.ListEndpointSlices(ctx, "runtime", metav1.ListOptions{}); return err },
+			"GET /apis/discovery.k8s.io/v1/namespaces/runtime/endpointslices"},
+		{"WatchEndpointSlices", func() error { return watching(client.WatchEndpointSlices(ctx, "runtime", metav1.ListOptions{})) },
+			"GET /apis/discovery.k8s.io/v1/namespaces/runtime/endpointslices watch"},
+	}
+	var driven, want []string
+	for _, one := range calls {
+		if err := one.call(); err != nil {
+			t.Fatalf("%s: %v", one.method, err)
+		}
+		driven, want = append(driven, one.method), append(want, one.sends)
+	}
+	var methods []string
+	for index := range reflect.TypeOf(client).NumMethod() {
+		methods = append(methods, reflect.TypeOf(client).Method(index).Name)
+	}
+	slices.Sort(driven)
+	if !slices.Equal(methods, driven) {
+		t.Fatalf("the client has the methods %v; this test drives %v", methods, driven)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(requests, want) {
+		t.Fatalf("requests:\n%s\nwant:\n%s", strings.Join(requests, "\n"), strings.Join(want, "\n"))
 	}
 }

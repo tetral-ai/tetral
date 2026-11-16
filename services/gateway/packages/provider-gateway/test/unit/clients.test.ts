@@ -18,7 +18,11 @@ import {
   OpenAICodexResponsesEndpoint,
   OpenAIOAuthDummyAPIKey,
 } from "../../src/providers/openai-oauth.js";
-import { unusedProviderFetch, validProviderRequest } from "./fixtures.js";
+import { unusedProviderFetch, validProviderRequest, writtenLogs } from "./fixtures.js";
+import { buildProviderGatewayCommandDependencies } from "../../src/command.js";
+import { loadProviderGatewayConfigFromEnv } from "../../src/config.js";
+import { commandEnv } from "../fixtures/command-process.js";
+import type { GatewayCredentialSQL } from "../../src/providers/credentials.js";
 import type { TextStreamPart, ToolSet } from "ai";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
 import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -1242,6 +1246,45 @@ describe("ProviderClientRegistry provider streaming", () => {
     // The refresh's own error goes with the refusal to the Gateway's record.
     expect((refused as ProviderRequestLoweringError).cause).toBe(refreshFailure);
     expect(modelStreamCalls).toBe(0);
+  });
+
+  test("the command's provider streamer refreshes an expired OpenAI OAuth credential through its database", async () => {
+    const queries: string[] = [];
+    let reachable = true;
+    const sql = Object.assign(async (strings: TemplateStringsArray) => {
+      queries.push(strings.join("?"));
+      if (reachable) return [];
+      throw new Error("database unavailable");
+    }, {
+      begin: async <T>(fn: (tx: GatewayCredentialSQL) => Promise<T>): Promise<T> => fn(sql),
+      close: async () => undefined,
+    }) as unknown as GatewayCredentialSQL & { readonly close: () => Promise<void> };
+    const config = loadProviderGatewayConfigFromEnv(commandEnv());
+    if (!config.ok) throw new Error(config.error.message);
+    const dependencies = await buildProviderGatewayCommandDependencies({
+      config: config.config,
+      logger: writtenLogs([]),
+      builderOptions: {
+        sqlFactory: () => sql,
+        schemaVerifier: async () => undefined,
+        tokenReviewClientFactory: () => ({ createTokenReview: async () => ({ authenticated: false, audiences: [], username: "", podUid: "" }) }),
+      },
+    });
+    try {
+      reachable = false;
+      queries.length = 0;
+      const refused = await collectEvents(dependencies.providerStreamer.stream({
+        request: openAIRequest(),
+        credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
+      })).catch((error: unknown) => error);
+
+      expect(refused).toBeInstanceOf(ProviderRequestLoweringError);
+      expect((refused as ProviderRequestLoweringError).providerError).toMatchObject({ code: "credential_required" });
+      expect(((refused as ProviderRequestLoweringError).cause as Error | undefined)?.message).toBe("database unavailable");
+      expect(queries).not.toEqual([]);
+    } finally {
+      await dependencies.close?.();
+    }
   });
 
   test("OpenAI OAuth fails closed when the Vault rotation boundary is not wired", async () => {

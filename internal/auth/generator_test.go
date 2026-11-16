@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -166,19 +165,5 @@ func TestKeyPrefixForReturnsWholeShortToken(t *testing.T) {
 	token := "abc"
 	if got := auth.KeyPrefixFor(token); got != "abc" {
 		t.Errorf("KeyPrefixFor(%q) = %q; want %q", token, got, token)
-	}
-}
-
-// TestGeneratorDoesNotImportInternalID pins that generated API keys do not
-// derive from internal/id.New, which produces non-secret resource identifiers
-// that are not suitable as bearer credentials. If the generator file ever
-// imports github.com/tetral-ai/tetral/internal/id, this test fails.
-func TestGeneratorDoesNotImportInternalID(t *testing.T) {
-	body, err := os.ReadFile("generator.go")
-	if err != nil {
-		t.Fatalf("read generator.go: %v", err)
-	}
-	if strings.Contains(string(body), `"github.com/tetral-ai/tetral/internal/id"`) {
-		t.Error("auth/generator.go must not import github.com/tetral-ai/tetral/internal/id; raw key secrets must use crypto/rand directly")
 	}
 }

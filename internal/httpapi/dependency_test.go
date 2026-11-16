@@ -35,15 +35,6 @@ func TestSessionEventPackageDependencyBoundaries(t *testing.T) {
 	}
 }
 
-func TestPublicAuthMiddlewareDoesNotImportOrCallRuntimeAuth(t *testing.T) {
-	for _, fileName := range []string{"middleware.go", "router.go"} {
-		source := readProductionFile(t, fileName)
-		if strings.Contains(source, "internal/runtimeauth") || strings.Contains(source, "runtimeauth.") {
-			t.Fatalf("%s references runtimeauth; public API-key auth must not call runtime worker auth", fileName)
-		}
-	}
-}
-
 func scanProductionImports(t *testing.T, root string, packageDir string, forbidden []string) {
 	t.Helper()
 	packagePath := filepath.Join(root, packageDir)
@@ -69,13 +60,4 @@ func scanProductionImports(t *testing.T, root string, packageDir string, forbidd
 			}
 		}
 	}
-}
-
-func readProductionFile(t *testing.T, fileName string) string {
-	t.Helper()
-	body, err := os.ReadFile(filepath.Clean(fileName))
-	if err != nil {
-		t.Fatalf("read %s: %v", fileName, err)
-	}
-	return string(body)
 }

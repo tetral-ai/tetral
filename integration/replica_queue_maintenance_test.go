@@ -20,7 +20,7 @@ import (
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
-func TestPostgreSQLReplicaQueueMaintenanceShutdown(t *testing.T) {
+func TestPostgreSQLReplicaQueueMaintenanceCancellation(t *testing.T) {
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "commit", true: "rollback_and_replacement"}[force], func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -87,7 +87,7 @@ func TestPostgreSQLReplicaQueueMaintenanceShutdown(t *testing.T) {
 			select {
 			case err := <-done:
 				if !force && err != nil {
-					t.Fatalf("completed shutdown outcome=%v", err)
+					t.Fatalf("completed drain outcome=%v", err)
 				}
 				if force && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("missing forced-drain outcome: %v", err)

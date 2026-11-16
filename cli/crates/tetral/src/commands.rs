@@ -229,7 +229,7 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
     let observer = observe::install(
         level,
         observe::FlushClock {
-            now: state::seams::now,
+            now: flush_clock,
             recheck: state::seams::recheck_interval(),
         },
     );
@@ -245,6 +245,15 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
     let result = run_checked(cli.command, &root, &app, &observer);
     observer.flush(observe::EXIT_FLUSH_LIMIT);
     result
+}
+
+/// The clock of the observer's flushes, each reading of it reported as the
+/// test seam counter `flush.clock`: the first one of a flush fixes its
+/// deadline.
+fn flush_clock() -> Duration {
+    let now = state::seams::now();
+    state::seams::count("flush.clock");
+    now
 }
 
 fn run_checked(

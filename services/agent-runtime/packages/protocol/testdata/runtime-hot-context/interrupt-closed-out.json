@@ -1,0 +1,36 @@
+[
+  {
+    "role": 1,
+    "content": [
+      {
+        "text": {
+          "text": "run the durable operation"
+        }
+      }
+    ]
+  },
+  {
+    "role": 2,
+    "content": [
+      {
+        "reasoning": {
+          "text": "interrupt Tool reasoning",
+          "metadataJson": "{\"anthropic\":{\"signature\":\"sig_interrupt_composition\"}}"
+        }
+      },
+      {
+        "toolCall": {
+          "modelToolCallId": "call_interrupt_composition",
+          "name": "Bash",
+          "inputJson": "{\"command\":\"durable-operation\"}"
+        }
+      },
+      {
+        "toolResult": {
+          "modelToolCallId": "call_interrupt_composition",
+          "cancelled": {}
+        }
+      }
+    ]
+  }
+]

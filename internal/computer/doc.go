@@ -97,7 +97,8 @@
 // binding's drive set that message's and writes its mount and lost-changes
 // errors. CheckDrivesFit refuses new bindings with which an attached
 // computer's session.prepare would exceed PrepareEnvelopeLimit, alone or with
-// its latest prepared drive set. A binding transfers its drives while its
+// its latest prepared drive set or that of a preparation not yet answered. A
+// binding transfers its drives while its
 // prepared report is stored and its closed one is not (TransferBinding); the
 // connections whose ready declared drives.mount and whose such bindings hold
 // a drive receive its drive.changed (DriveListeners).

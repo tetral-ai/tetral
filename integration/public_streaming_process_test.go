@@ -40,9 +40,7 @@ func buildPublicStreamCommand(t *testing.T) string {
 	binary := filepath.Join(t.TempDir(), "event-stream")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "go", "build", "-race", "-o", binary, "./services/event-stream/cmd/event-stream") //nolint:gosec // Repository-owned command.
-	command.Dir = ".."
-	if output, err := command.CombinedOutput(); err != nil {
+	if output, err := buildCommand(ctx, binary, "./services/event-stream/cmd/event-stream").CombinedOutput(); err != nil {
 		t.Fatalf("build actual Event Stream: %v: %s", err, output)
 	}
 	return binary
@@ -265,7 +263,7 @@ func publicIsolatedProcessCase(t *testing.T, body func(*testing.T)) {
 	if err != nil {
 		t.Fatalf("actual public process composition failed: %v", err)
 	}
-	if !strings.Contains(output.String(), "--- PASS: "+t.Name()) || !strings.Contains(output.String(), "public_streaming_sdk_assertion=") {
+	if !strings.Contains(output.String(), "--- PASS: "+t.Name()) || !strings.Contains(output.String(), "public_streaming_assertion=") {
 		t.Fatal("isolated composition lacks executed named assertions")
 	}
 }

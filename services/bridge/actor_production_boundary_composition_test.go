@@ -56,12 +56,6 @@ func (s *lostACKSubagentBridge) capturedRequests() []*bridgev1.CreateSubagentThr
 	return append([]*bridgev1.CreateSubagentThreadRequest(nil), s.requests...)
 }
 
-func (s *lostACKSubagentBridge) calls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.createCalls
-}
-
 type subagentProductionCompositionResult struct {
 	ResultType          string            `json:"resultType"`
 	ProviderInvocations int               `json:"providerInvocations"`
@@ -245,40 +239,6 @@ func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicFor
 	}
 }
 
-func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_subagent_prompt_bound"
-		threadID  = "thr_subagent_prompt_bound"
-		bindingID = "bind_subagent_prompt_bound"
-		podUID    = "pod_subagent_prompt_bound"
-	)
-	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
-	result := runSubagentProductionComposition(
-		t, wrapped, sessionID, threadID, bindingID, 1, podUID,
-		"oversized-worker", strings.Repeat("x", 2*1024*1024+1), "none",
-	)
-	if result.ResultType != "observed" || result.ProviderInvocations != 3 || wrapped.calls() != 0 {
-		t.Fatalf("oversized prompt production result = %+v create calls=%d", result, wrapped.calls())
-	}
-	var children, operations, inbox, jobs int
-	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='subagent'),
-		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread'),
-		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1),
-		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1)`, sessionID).
-		Scan(&children, &operations, &inbox, &jobs); err != nil {
-		t.Fatalf("read oversized prompt mutation census: %v", err)
-	}
-	if children != 0 || operations != 0 || inbox != 0 || jobs != 0 {
-		t.Fatalf("oversized prompt child/operation/inbox/queue mutations = %d/%d/%d/%d", children, operations, inbox, jobs)
-	}
-}
-
 func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -447,15 +407,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cold-load child first provider context: %v", err)
 	}
-	prefixWires := runPendingPrefixProviderWireComposition(t, runRuntimeProviderComposition(t, firstLoaded.GetContextJson()))
-	if len(prefixWires) != 3 {
-		t.Fatalf("child first-request provider families = %d; want 3", len(prefixWires))
-	}
-	for _, wire := range prefixWires {
-		if wire.Pathname == "" || wire.SafeTextCount != 1 || wire.ToolCallCount != 0 {
-			t.Fatalf("child first-request provider wire = %+v", wire)
-		}
-	}
+	pinBridgeContext(t, "subagent-first-request-with-parent-prefix", firstLoaded.GetContextJson())
 
 	seedActorSourceEvent(t, admin, sessionID, parentID, mailSourceID, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"provider-owned-different","message":"provider-owned-different"}}`)
@@ -478,91 +430,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 	if !strings.Contains(loaded.GetContextJson(), deliveryID) || !strings.Contains(loaded.GetContextJson(), mailContent) {
 		t.Fatalf("cold target context does not contain durable delivery/content: %s", loaded.GetContextJson())
 	}
-	assertRuntimeDirectContextComposition(t, loaded.GetContextJson())
-}
-
-type pendingPrefixProviderWireComposition struct {
-	Family        string `json:"family"`
-	Pathname      string `json:"pathname"`
-	SafeTextCount int    `json:"safeTextCount"`
-	ToolCallCount int    `json:"toolCallCount"`
-}
-
-func runPendingPrefixProviderWireComposition(t *testing.T, requests []json.RawMessage) []pendingPrefixProviderWireComposition {
-	t.Helper()
-	input, err := json.Marshal(map[string]any{"requests": requests})
-	if err != nil {
-		t.Fatalf("encode pending-prefix provider requests: %v", err)
-	}
-	inputPath := t.TempDir() + "/pending-prefix-provider-requests.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write pending-prefix provider requests: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/provider-gateway/test/fixtures/pending-prefix-wire.ts", inputPath) //nolint:gosec // Fixed provider composition fixture and test-owned input.
-	command.Dir = "../gateway"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run pending-prefix provider wire composition: %v: %s", err, output)
-	}
-	var result []pendingPrefixProviderWireComposition
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode pending-prefix provider wire composition: %v: %s", err, output)
-	}
-	return result
-}
-
-func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {
-	t.Helper()
-	var direct map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(contextJSON), &direct); err != nil {
-		t.Fatalf("decode generated LoadContext direct facts: %v", err)
-	}
-	if _, ok := direct["messages"]; !ok {
-		t.Fatalf("generated LoadContext omitted messages: %s", contextJSON)
-	}
-	input, err := json.Marshal(map[string]any{"contextJson": contextJSON, "providerComposition": true})
-	if err != nil {
-		t.Fatalf("encode Runtime direct-context composition input: %v", err)
-	}
-	inputPath := t.TempDir() + "/runtime-direct-context.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write Runtime direct-context composition input: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("compose generated LoadContext through Runtime parser/reducer: %v: %s", err, output)
-	}
-	var composed struct {
-		Checkpoint json.RawMessage `json:"checkpoint"`
-		NextStep   struct {
-			Action string `json:"action"`
-		} `json:"nextStep"`
-		ProviderComposition struct {
-			CarrierMessages []json.RawMessage `json:"carrierMessages"`
-			Strategies      []struct {
-				Validation struct {
-					OK bool `json:"ok"`
-				} `json:"validation"`
-			} `json:"strategies"`
-		} `json:"providerComposition"`
-	}
-	if err := json.Unmarshal(output, &composed); err != nil || len(composed.Checkpoint) == 0 || composed.NextStep.Action == "" {
-		t.Fatalf("Runtime direct-context composition = %s err:%v", output, err)
-	}
-	if len(composed.ProviderComposition.Strategies) == 0 {
-		t.Fatalf("Runtime provider composition omitted strategies: %s", output)
-	}
-	for _, strategy := range composed.ProviderComposition.Strategies {
-		if !strategy.Validation.OK {
-			t.Fatalf("Runtime provider composition rejected a strategy: %s", output)
-		}
-	}
+	pinBridgeContext(t, "subagent-mail-delivered", loaded.GetContextJson())
 }
 
 func seedActorSourceEvent(t *testing.T, db *sql.DB, sessionID, threadID, eventID, eventType, payload string) {

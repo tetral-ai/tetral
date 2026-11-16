@@ -1,3 +1,5 @@
+// Layer 2: the Agent service and its PostgreSQL store against a real
+// PostgreSQL.
 package agent_test
 
 import (
@@ -5,7 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 
@@ -167,6 +171,152 @@ func TestPostgreSQLAgentStoreUpdatePatchVersionConflict(t *testing.T) {
 	}
 	if got.System != nil {
 		t.Fatalf("stale UpdatePatch persisted system = %q; want nil", *got.System)
+	}
+}
+
+// heldSkillReferenceResolver holds the first write that reaches it inside its
+// transaction, where the write already holds the Agent's row lock, until the
+// test releases it.
+type heldSkillReferenceResolver struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *heldSkillReferenceResolver) ValidateAgentSkillReferences(ctx context.Context, _ agent.Transaction, _ string, _ []agent.SkillReference) error {
+	first := false
+	r.once.Do(func() { first = true })
+	if !first {
+		return nil
+	}
+	close(r.entered)
+	select {
+	case <-r.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// A write that waited for the Agent's row lock while an update committed a new
+// version acts on that version.
+func TestPostgreSQLAgentStoreWriteBehindAConcurrentUpdateSeesItsVersion(t *testing.T) {
+	system := func(value string) *string { return &value }
+	for _, testCase := range []struct {
+		name  string
+		write func(context.Context, *agent.Service, *agent.Agent) (*agent.Agent, error)
+		check func(*testing.T, *agent.Agent, error)
+	}{
+		{
+			name: "an update with the version the first update replaced",
+			write: func(ctx context.Context, service *agent.Service, created *agent.Agent) (*agent.Agent, error) {
+				config := created.AgentConfig
+				config.System = system("second")
+				return service.Update(ctx, workspace.DefaultID, created.ID, agent.UpdateAgentRequest{Version: created.Version, AgentConfig: config})
+			},
+			check: assertAgentVersionConflict,
+		},
+		{
+			name: "a patch with the version the first update replaced",
+			write: func(ctx context.Context, service *agent.Service, created *agent.Agent) (*agent.Agent, error) {
+				var patch agent.AgentPatch
+				if err := json.Unmarshal([]byte(`{"version":1,"system":"second"}`), &patch); err != nil {
+					return nil, err
+				}
+				return service.UpdatePatch(ctx, workspace.DefaultID, created.ID, patch)
+			},
+			check: assertAgentVersionConflict,
+		},
+		{
+			name: "an archive",
+			write: func(ctx context.Context, service *agent.Service, created *agent.Agent) (*agent.Agent, error) {
+				return service.Archive(ctx, workspace.DefaultID, created.ID)
+			},
+			check: func(t *testing.T, archived *agent.Agent, err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("Archive behind an update: %v", err)
+				}
+				if archived.Version != 2 || archived.ArchivedAt == nil || archived.System == nil || *archived.System != "first" {
+					t.Fatalf("archived Agent = version %d, archived_at %v, system %v; want the first update's version 2, archived", archived.Version, archived.ArchivedAt, archived.System)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, admin := newPGAgentEnv(t)
+			store := agent.NewPostgreSQLAgentStore(dbconnect.NewClientForTesting(runtime))
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			created, err := agent.NewService(store, nil).Create(ctx, workspace.DefaultID, basicAgentRequest())
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			held := &heldSkillReferenceResolver{entered: make(chan struct{}), release: make(chan struct{})}
+			firstDone := make(chan error, 1)
+			go func() {
+				config := created.AgentConfig
+				config.System = system("first")
+				_, err := agent.NewService(store, held).Update(ctx, workspace.DefaultID, created.ID, agent.UpdateAgentRequest{Version: created.Version, AgentConfig: config})
+				firstDone <- err
+			}()
+			select {
+			case <-held.entered:
+			case err := <-firstDone:
+				t.Fatalf("first Update ended before it was held: %v", err)
+			}
+
+			secondDone := make(chan agentWriteOutcome, 1)
+			go func() {
+				got, err := testCase.write(ctx, agent.NewService(store, nil), created)
+				secondDone <- agentWriteOutcome{got, err}
+			}()
+			waitForRowLockWaiter(ctx, t, admin, secondDone)
+			close(held.release)
+			if err := <-firstDone; err != nil {
+				t.Fatalf("first Update: %v", err)
+			}
+			second := <-secondDone
+			testCase.check(t, second.agent, second.err)
+		})
+	}
+}
+
+func assertAgentVersionConflict(t *testing.T, _ *agent.Agent, err error) {
+	t.Helper()
+	var conflict *agent.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("write with a replaced version = %T (%v); want *agent.ConflictError", err, err)
+	}
+}
+
+type agentWriteOutcome struct {
+	agent *agent.Agent
+	err   error
+}
+
+// waitForRowLockWaiter returns once a backend of the test's database waits
+// for a row lock. The write that should wait must not end before that.
+func waitForRowLockWaiter(ctx context.Context, t *testing.T, admin *sql.DB, write <-chan agentWriteOutcome) {
+	t.Helper()
+	for {
+		var waiting int
+		if err := admin.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waiters: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		select {
+		case ended := <-write:
+			t.Fatalf("the second write ended before it waited for the Agent's row lock: %v", ended.err)
+		case <-ctx.Done():
+			t.Fatal("the second write never waited for the Agent's row lock")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

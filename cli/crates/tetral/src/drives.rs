@@ -45,7 +45,7 @@ mod macos {
     use std::path::Path;
     use std::process::{ExitCode, Stdio};
 
-    use drive::mount_macos::{force_unmount, listed, mount_nfs};
+    use drive::mount_macos::{force_unmount, listed, mount_nfs, unmount_stale};
     use drive::nfs::TestDrive;
     use state::config::{self, Config};
     use state::paths::{self, StateRoot};
@@ -156,20 +156,7 @@ mod macos {
                     if let Some(mut stdout) = child.stdout.take() {
                         let _ = stdout.read_to_string(&mut output).await;
                     }
-                    let error = match output.parse::<i32>() {
-                        Ok(code) if code != 0 => io::Error::from_raw_os_error(code),
-                        _ => io::Error::other(format!("the test read ended with {status}")),
-                    };
-                    let failure = state::files::IoFailure::new(&file, error);
-                    // `EPERM` and `EACCES` alike.
-                    if failure.source.kind() == io::ErrorKind::PermissionDenied {
-                        Err(CommandError::new(
-                            Code::DrivesAccessDenied,
-                            failure.to_string(),
-                        ))
-                    } else {
-                        Err(io_failed(failure))
-                    }
+                    Err(read_failed(&file, &output, status))
                 }
                 Some(Err(error)) => Err(io_failed(state::files::IoFailure::new(&file, error))),
             };
@@ -179,6 +166,23 @@ mod macos {
         })
     }
 
+    /// The failure of a test read that ended with `ended`, its OS error
+    /// number on `output`: access withheld when the read was refused, by
+    /// the test drive's server or by macOS.
+    fn read_failed(file: &Path, output: &str, ended: impl std::fmt::Display) -> CommandError {
+        let error = match output.parse::<i32>() {
+            Ok(code) if code != 0 => io::Error::from_raw_os_error(code),
+            _ => io::Error::other(format!("the test read ended with {ended}")),
+        };
+        let failure = state::files::IoFailure::new(file, error);
+        // `EPERM` and `EACCES` alike.
+        if failure.source.kind() == io::ErrorKind::PermissionDenied {
+            CommandError::new(Code::DrivesAccessDenied, failure.to_string())
+        } else {
+            io_failed(failure)
+        }
+    }
+
     /// The mount point `R/run/drives-enable` with mode `0700`, after a
     /// stale mount there is force-unmounted without touching the path.
     fn prepare(point: &Path) -> Result<(), CommandError> {
@@ -186,7 +190,7 @@ mod macos {
             .map_err(|error| mount_failed(format!("mount: {error}")))?
             .is_some()
         {
-            force_unmount(point)
+            unmount_stale(point)
                 .map_err(|error| mount_failed(format!("force unmount: {error}")))?;
         }
         state::files::create_private_dirs(point)
@@ -202,5 +206,26 @@ mod macos {
             .encode()
             .map_err(|error| CommandError::new(Code::IoFailed, error.to_string()))?;
         encoded.replace(root).map_err(io_failed)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::path::Path;
+
+        use super::read_failed;
+        use crate::output::Code;
+
+        #[test]
+        fn a_test_read_refused_by_the_server_or_by_macos_is_access_withheld() {
+            for (output, code) in [
+                ("1", Code::DrivesAccessDenied),  // EPERM
+                ("13", Code::DrivesAccessDenied), // EACCES
+                ("5", Code::IoFailed),            // EIO
+                ("", Code::IoFailed),
+            ] {
+                let failed = read_failed(Path::new("/check.txt"), output, "exit status: 1");
+                assert_eq!(failed.code, code, "{output:?}: {}", failed.message);
+            }
+        }
     }
 }

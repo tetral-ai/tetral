@@ -61,7 +61,7 @@ func (h *SessionHandler) addDrive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, binding)
+	WriteJSON(w, r, http.StatusCreated, binding)
 }
 
 // updateDrive serves POST /v1/sessions/{session_id}/drives/{drive_id}: 200
@@ -91,7 +91,7 @@ func (h *SessionHandler) updateDrive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, binding)
+	WriteJSON(w, r, http.StatusOK, binding)
 }
 
 // removeDrive serves DELETE /v1/sessions/{session_id}/drives/{drive_id}: 204.

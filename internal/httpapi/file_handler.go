@@ -84,7 +84,7 @@ func (h *FileHandler) createFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, created)
+	WriteJSON(w, r, http.StatusOK, created)
 }
 
 func (h *FileHandler) parseUploadMultipart(w http.ResponseWriter, r *http.Request) (*files.StagedUpload, error) {
@@ -228,7 +228,7 @@ func (h *FileHandler) listFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func parseFileListOptions(r *http.Request) (files.ListOptions, error) {
@@ -295,7 +295,7 @@ func (h *FileHandler) getFile(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "file", got.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, got)
+	WriteJSON(w, r, http.StatusOK, got)
 }
 
 // deleteFile handles DELETE /v1/files/{file_id}.
@@ -319,7 +319,7 @@ func (h *FileHandler) deleteFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, deleted)
+	WriteJSON(w, r, http.StatusOK, deleted)
 }
 
 // getFileContent handles GET /v1/files/{file_id}/content.

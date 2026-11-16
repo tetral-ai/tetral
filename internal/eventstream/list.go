@@ -146,7 +146,7 @@ func (handler *ListHandler) ServeSessionEvents(writer http.ResponseWriter, reque
 		httpapi.WriteError(writer, request, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, normalizeListResult(result))
+	httpapi.WriteJSON(writer, request, http.StatusOK, normalizeListResult(result))
 }
 
 func (handler *ListHandler) ServeThreadEvents(writer http.ResponseWriter, request *http.Request) {
@@ -173,7 +173,7 @@ func (handler *ListHandler) ServeThreadEvents(writer http.ResponseWriter, reques
 		httpapi.WriteError(writer, request, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, normalizeListResult(result))
+	httpapi.WriteJSON(writer, request, http.StatusOK, normalizeListResult(result))
 }
 
 func decodeListOptions(request *http.Request, allowFilters bool) (ListOptions, error) {
@@ -380,12 +380,6 @@ func NormalizeEvent(event Event) Event {
 		event.Payload = json.RawMessage(`{}`)
 	}
 	return event
-}
-
-func writeJSON(writer http.ResponseWriter, status int, body any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(body)
 }
 
 func requestWorkspace(ctx context.Context) (workspace.ID, error) {

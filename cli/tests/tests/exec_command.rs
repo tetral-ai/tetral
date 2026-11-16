@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
-use tetral_tests::machine::{INSTANCE, answer_fault, seconds, wait_for_received};
+use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send_invalid, wait_for_received};
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
@@ -106,10 +106,10 @@ fn a_command_inherits_the_raised_descriptor_limit() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "server run started with a soft descriptor limit of 256; a command prints its soft limit",
+        "server run started with a soft descriptor limit of 256, as every App Server of the harness; a command prints its soft limit",
     );
     let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start_with_soft_descriptor_limit(&mut case, directory.path(), 256);
+    let tasks = TaskMachine::start(&mut case, directory.path());
     tasks.execute(
         "task_limit",
         json!({"cmd": "ulimit -Sn", "on_wait_expiry": "kill", "wait_ms": 1000}),
@@ -905,9 +905,7 @@ fn resend_after_resume(tasks: &TaskMachine, message_id: &str) {
     );
     // Events are handled in stream order: once the event after the resent
     // instruction has its protocol error, the instruction has been taken.
-    tasks
-        .engine
-        .control("send", json!({"instance_id": INSTANCE, "data": "not json"}));
+    send_invalid(&tasks.engine, "not json");
     wait_for_received(&tasks.engine, "protocol-error", 1);
     assert_eq!(
         machine.routed(),

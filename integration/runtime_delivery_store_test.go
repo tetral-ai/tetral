@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -28,6 +30,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/testvector"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -406,7 +409,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotificatio
 	})
 }
 
-func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *testing.T) {
+func TestMCPManifestOverCapGenerationReachesTheRuntimeAsACommand(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_manifest_composition"
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thrd_"+sessionID)
@@ -473,31 +476,19 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 	if err != nil {
 		t.Fatalf("load replacement Runtime context: %v", err)
 	}
-	sender := &bunRuntimeManifestCompositionSender{
-		InputPath:                t.TempDir() + "/manifest-composition.json",
-		RuntimeConfigPayloadJSON: runtimeConfigPayload,
-		ReadyManifestPayloadJSON: readyPayload,
-		ColdContextJSON:          cold.GetContextJson(),
-		ColdRuntimeBindingToken:  cold.GetRuntimeBindingToken(),
-		ReadyGeneration:          1,
-		UnreadyGeneration:        2,
-		ToolName:                 "github_search",
-	}
+	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	delivery := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliveryResult, err := (jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}).DeliverRuntimeJob(
 		context.Background(), queuedManifestJob(t, admin, sessionID, 2),
 	)
-	if err != nil {
-		t.Fatalf("deliver unready manifest through Runtime command host: %v", err)
+	if err != nil || deliveryResult.Status != jobrunner.RuntimeDeliveryAccepted {
+		t.Fatalf("unready manifest delivery = %+v/%v; want an accepted Runtime command", deliveryResult, err)
 	}
-	if deliveryResult.Status != jobrunner.RuntimeDeliveryAccepted {
-		t.Fatalf("unready manifest delivery = %+v; want accepted Runtime command", deliveryResult)
+	command, ok := sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest)
+	if len(sender.requests) != 1 || !ok || command.GetMcpManifest().GetMcpServerName() != "github" || command.GetMcpManifest().GetGeneration() != 2 {
+		t.Fatalf("Runtime commands = %#v; want one ApplyRuntimeConfig of github generation 2", sender.requests)
 	}
-	if sender.Result.WarmCurrentGeneration != 2 || sender.Result.ColdCurrentGeneration != 2 ||
-		sender.Result.WarmMCPConnectorCalls != 0 || sender.Result.WarmNextProviderRequests < 1 ||
-		sender.Result.ColdMCPConnectorCalls != 0 || sender.Result.ColdNextProviderRequests < 1 {
-		t.Fatalf("Runtime manifest composition = %+v; want warm/cold generation 2, completed next provider requests, and zero connector calls", sender.Result)
-	}
+	pinMCPManifestCommandVector(t, "unready-generation-removes-tool", runtimeConfigPayload, 1, readyPayload, command, cold.GetContextJson())
 }
 
 func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBeforePartitionFollower(t *testing.T) {
@@ -683,76 +674,29 @@ func queuedManifestJob(t *testing.T, admin *sql.DB, sessionID string, generation
 	return job
 }
 
-type runtimeManifestCompositionResult struct {
-	CommandResponse struct {
-		Applied *struct{} `json:"applied"`
-	} `json:"commandResponse"`
-	WarmCurrentGeneration    int `json:"warmCurrentGeneration"`
-	ColdCurrentGeneration    int `json:"coldCurrentGeneration"`
-	WarmMCPConnectorCalls    int `json:"warmMcpConnectorCalls"`
-	WarmNextProviderRequests int `json:"warmNextProviderRequests"`
-	ColdMCPConnectorCalls    int `json:"coldMcpConnectorCalls"`
-	ColdNextProviderRequests int `json:"coldNextProviderRequests"`
-}
-
-type bunRuntimeManifestCompositionSender struct {
-	Recovery bool
-	recordingRuntimeCommandSender
-	InputPath                string
-	RuntimeConfigPayloadJSON string
-	ReadyManifestPayloadJSON string
-	ColdContextJSON          string
-	ColdRuntimeBindingToken  string
-	ReadyGeneration          int
-	UnreadyGeneration        int
-	ToolName                 string
-	Result                   runtimeManifestCompositionResult
-}
-
-func (s *bunRuntimeManifestCompositionSender) ApplyRuntimeConfig(ctx context.Context, _ jobrunner.RuntimePodTarget, request *agentruntimev1.ApplyRuntimeConfigRequest) (*agentruntimev1.ApplyRuntimeConfigResponse, error) {
-	inputJSON, err := json.Marshal(map[string]any{
-		"recovery":                 s.Recovery,
-		"workspaceId":              request.GetWorkspaceId(),
-		"sessionId":                request.GetSessionId(),
-		"runtimeConfigPayloadJson": s.RuntimeConfigPayloadJSON,
-		"readyManifestPayloadJson": s.ReadyManifestPayloadJSON,
-		"runtimeCommandRequest": map[string]any{
-			"workspaceId":       request.GetWorkspaceId(),
-			"sessionId":         request.GetSessionId(),
-			"bindingId":         request.GetBindingId(),
-			"bindingGeneration": request.GetBindingGeneration(),
-			"targetPodUid":      request.GetTargetPodUid(), "runtimeProcessId": request.GetRuntimeProcessId(),
-			"mcpManifest": map[string]any{
-				"mcpServerName": request.GetMcpManifest().GetMcpServerName(),
-				"generation":    request.GetMcpManifest().GetGeneration(),
-				"contentJson":   request.GetMcpManifest().GetContentJson(),
-			},
-		},
-		"coldContextJson":         s.ColdContextJSON,
-		"coldRuntimeBindingToken": s.ColdRuntimeBindingToken,
-		"readyGeneration":         s.ReadyGeneration,
-		"unreadyGeneration":       s.UnreadyGeneration,
-		"toolName":                s.ToolName,
+// pinMCPManifestCommandVector pins what the Runtime receives around one MCP
+// manifest command: the session config and manifest it has installed, the
+// command the Job Runner sends, and the context Bridge serves a replacement.
+func pinMCPManifestCommandVector(t *testing.T, name, runtimeConfigContentJSON string, installedGeneration int, installedContentJSON string, command *agentruntimev1.ApplyRuntimeConfigRequest, coldContextJSON string) {
+	t.Helper()
+	commandJSON, err := protojson.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, commandJSON); err != nil {
+		t.Fatal(err)
+	}
+	vector, err := json.Marshal(map[string]any{
+		"runtimeConfigContentJson": runtimeConfigContentJSON,
+		"installedManifest":        map[string]any{"generation": installedGeneration, "contentJson": installedContentJSON},
+		"command":                  json.RawMessage(compact.Bytes()),
+		"coldContextJson":          coldContextJSON,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("encode Runtime composition input: %w", err)
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(s.InputPath, inputJSON, 0o600); err != nil {
-		return nil, fmt.Errorf("write Runtime composition input: %w", err)
-	}
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", s.InputPath) //nolint:gosec // Fixed repository script and test-owned input.
-	command.Dir = "../services/agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("run Runtime manifest composition: %w: %s", err, output)
-	}
-	if err := json.Unmarshal(output, &s.Result); err != nil {
-		return nil, fmt.Errorf("decode Runtime manifest composition: %w: %s", err, output)
-	}
-	if s.Result.CommandResponse.Applied == nil {
-		return nil, errors.New("Runtime manifest composition did not apply the config")
-	}
-	return &agentruntimev1.ApplyRuntimeConfigResponse{Outcome: &agentruntimev1.ApplyRuntimeConfigResponse_Applied{Applied: &agentruntimev1.ApplyRuntimeConfigApplied{}}}, nil
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/mcp-manifest-commands/"+name+".json", vector)
 }
 
 func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testing.T) {

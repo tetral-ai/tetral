@@ -18,10 +18,10 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 			t.Run(eventType+"/"+mode, func(t *testing.T) {
 				c := startContentE2EWithOptions(t, "durable-interleaved", false, false, contentE2EOptions{ACKMode: mode, ACKEventType: eventType, Runtime: map[string]any{"controlCommands": true, "observeColdLoad": true}, Gateway: map[string]any{"holdFinish": false}})
 				c.provider.finish()
-				c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "start-content-fixture"})
+				c.developer.send(t, c.session, "start-content-fixture")
 				if mode == "correct" {
 					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
-					assertContentSDKTexts(t, c, []string{"alpha", "beta", "done"})
+					assertContentTexts(t, c, []string{"alpha", "beta", "done"})
 					if c.provider.calls.Load() != 1 {
 						t.Fatal("correct ACK did not dispatch exactly once")
 					}
@@ -31,7 +31,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 					if eventType == "agent.message" {
 						expectedTexts = []string{"alpha"}
 					}
-					assertContentSDKTextHistory(t, c, expectedTexts)
+					assertContentTextHistory(t, c, expectedTexts)
 					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_use'`, c.session, 0)
 					if c.provider.calls.Load() != 0 {
 						t.Fatal("wrong ACK allowed dependent dispatch")
@@ -61,7 +61,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 				if mode != "correct" {
 					// A new public input reloads the absent hot owner. The next provider
 					// script returns done; it cannot regenerate or declare the refused member.
-					c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "resume-content-fixture"})
+					c.developer.send(t, c.session, "resume-content-fixture")
 					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
 					cold := c.runtime.marker(t, "cold-context-loaded-2")
 					var actualMessages any
@@ -97,7 +97,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 					if eventType == "agent.message" {
 						expected = []string{"alpha", "done"}
 					}
-					assertContentSDKTexts(t, c, expected)
+					assertContentTexts(t, c, expected)
 					if c.provider.calls.Load() != 0 {
 						t.Fatal("cold recovery dispatched an unacknowledged dependent Tool")
 					}

@@ -37,7 +37,7 @@ type ScheduledReport struct {
 // ExecuteScheduled repeats only the concurrency-sensitive package owners.
 // A later pass is diagnostic evidence and never erases an earlier failure.
 func ExecuteScheduled(ctx context.Context, root, outputDir string) (ScheduledReport, error) {
-	plan, err := BuildPlan(root, ProfileFull, "")
+	plan, err := BuildPlan(ctx, root, ProfileFull, "")
 	if err != nil {
 		return ScheduledReport{}, err
 	}

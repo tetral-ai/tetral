@@ -444,38 +444,32 @@ func sameJSON(a, b any, path string) (string, bool) {
 	}
 }
 
-func TestClientErrorsPairEachSchemaErrorCodeWithItsStatus(t *testing.T) {
+// TestClientErrorsMatchTheSchemaErrorTable compares ClientErrors with the
+// connection schema: its codes with ErrorCode and each code's status with
+// ErrorStatuses.
+func TestClientErrorsMatchTheSchemaErrorTable(t *testing.T) {
 	var connection struct {
 		Defs struct {
 			ErrorCode struct {
-				Enum []string `json:"enum"`
+				Enum []ErrorCode `json:"enum"`
+			}
+			ErrorStatuses struct {
+				Const map[ErrorCode]int `json:"const"`
 			}
 		} `json:"$defs"`
 	}
 	readSchema(t, "connection-v1.schema.json", &connection)
-	codes := connection.Defs.ErrorCode.Enum
-	slices.Sort(codes)
-	if got := errorCodeNames(); !slices.Equal(got, codes) {
-		t.Fatalf("ClientErrors has codes %q, the schema %q", got, codes)
+	statuses := connection.Defs.ErrorStatuses.Const
+	if !maps.Equal(ClientErrors, statuses) {
+		t.Errorf("ClientErrors is %v, the schema's ErrorStatuses %v", ClientErrors, statuses)
 	}
-	// The schema names the codes; the client connection error table pairs
-	// each with its status.
-	table := []string{
-		"400 invalid_message", "400 content_hash_mismatch", "401 credential_invalid", "401 credential_expired",
-		"401 credential_revoked", "403 instance_unavailable", "403 cli_upgrade_required", "403 drive_access_denied",
-		"404 not_found", "404 content_not_found", "409 connection_conflict", "409 previous_connection_active",
-		"409 stale_connection", "409 stale_binding", "409 content_missing", "409 message_conflict",
-		"409 unknown_instruction", "410 drive_cursor_expired", "413 request_too_large", "413 file_too_large",
-		"416 range_not_satisfiable", "429 rate_limited",
+	for _, code := range connection.Defs.ErrorCode.Enum {
+		if _, ok := statuses[code]; !ok {
+			t.Errorf("ErrorStatuses names no status for the code %s", code)
+		}
 	}
-	got := make([]string, 0, len(ClientErrors))
-	for code, status := range ClientErrors {
-		got = append(got, strconv.Itoa(status)+" "+string(code))
-	}
-	slices.Sort(got)
-	slices.Sort(table)
-	if !slices.Equal(got, table) {
-		t.Fatalf("ClientErrors pairs %q, the error table %q", got, table)
+	if codes := len(connection.Defs.ErrorCode.Enum); codes != len(statuses) {
+		t.Errorf("ErrorCode has %d codes, ErrorStatuses %d", codes, len(statuses))
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -23,6 +24,7 @@ const bootstrapEnvKey = "tetral_test_bootstrap_key_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 // tests share: a runtime *sql.DB, an admin *sql.DB for fixture
 // seeding, and the bootstrap raw key.
 type authTestEnv struct {
+	t       *testing.T
 	runtime *sql.DB
 	admin   *sql.DB
 	envKey  string
@@ -36,6 +38,7 @@ func newAuthTestEnv(t *testing.T) *authTestEnv {
 		t.Fatalf("seed bootstrap: %v", err)
 	}
 	return &authTestEnv{
+		t:       t,
 		runtime: runtime,
 		admin:   admin,
 		envKey:  bootstrapEnvKey,
@@ -47,11 +50,16 @@ func newAuthTestEnv(t *testing.T) *authTestEnv {
 // architecture, so this helper only installs authentication context for
 // route families that still belong here.
 func (e *authTestEnv) router(opts ...httpapi.RouterOption) http.Handler {
+	return enginetest.NewDeveloper(e.t).Handler(e.unchecked(opts...))
+}
+
+// unchecked is router for a test that serves it over a socket and holds its
+// requests and answers to the OpenAPI file at its HTTP client.
+func (e *authTestEnv) unchecked(opts ...httpapi.RouterOption) http.Handler {
 	options := []httpapi.RouterOption{
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(e.runtime, "", nil).AuthenticateKey)),
 	}
-	options = append(options, opts...)
-	return httpapi.NewRouter(nil, "", options...)
+	return httpapi.NewRouter(nil, "", append(options, opts...)...)
 }
 
 func (e *authTestEnv) seedWorkspace(t *testing.T, id, name string) {

@@ -81,14 +81,16 @@ func DecodeUpdateVaultRequest(body []byte) (VaultPatch, error) {
 		return VaultPatch{}, err
 	}
 	if value, ok := raw["display_name"]; ok {
-		if !isJSONNull(value) {
-			displayName, err := decodeString("display_name", value)
-			if err != nil {
-				return VaultPatch{}, err
-			}
-			if err := validateRequiredDisplayName("display_name", displayName); err != nil {
-				return VaultPatch{}, err
-			}
+		// A vault always has a name, so null cannot clear it.
+		if isJSONNull(value) {
+			return VaultPatch{}, &ValidationError{Message: "display_name must not be null"}
+		}
+		displayName, err := decodeString("display_name", value)
+		if err != nil {
+			return VaultPatch{}, err
+		}
+		if err := validateRequiredDisplayName("display_name", displayName); err != nil {
+			return VaultPatch{}, err
 		}
 	}
 	if value, ok := raw["metadata"]; ok {
@@ -104,18 +106,14 @@ func (p VaultPatch) Materialize(current Vault) (Vault, error) {
 	out := current
 	out.Metadata = normalizeMetadata(current.Metadata)
 	if value, ok := p.raw["display_name"]; ok {
-		if isJSONNull(value) {
-			out.DisplayName = ""
-		} else {
-			displayName, err := decodeString("display_name", value)
-			if err != nil {
-				return Vault{}, err
-			}
-			if err := validateRequiredDisplayName("display_name", displayName); err != nil {
-				return Vault{}, err
-			}
-			out.DisplayName = displayName
+		displayName, err := decodeString("display_name", value)
+		if err != nil {
+			return Vault{}, err
 		}
+		if err := validateRequiredDisplayName("display_name", displayName); err != nil {
+			return Vault{}, err
+		}
+		out.DisplayName = displayName
 	}
 	if value, ok := p.raw["metadata"]; ok {
 		metadata, err := mergeMetadataPatch(out.Metadata, value)

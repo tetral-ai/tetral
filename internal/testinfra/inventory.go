@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -20,6 +21,9 @@ type Inventory struct {
 	Groups            []Group  `json:"groups"`
 	GoTests           []GoTest `json:"go_tests"`
 	FullFallbackPaths []string `json:"full_fallback_paths"`
+	// OtherProductPaths are the trees another product verifies with its own
+	// command: no group here owns them, and a change there selects nothing.
+	OtherProductPaths []string `json:"other_product_paths"`
 }
 
 // GoTest declares the complete dependency contract for a Go test whose
@@ -64,7 +68,7 @@ func LoadInventory() (Inventory, error) {
 		seenTests[key] = true
 		for _, dependency := range test.Dependencies {
 			switch dependency {
-			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "sdk", "envoy", "edge-envoy", "egctl", "bun-image":
+			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "envoy", "edge-envoy", "egctl", "bun-image":
 			default:
 				return Inventory{}, fmt.Errorf("go test %q declares unknown dependency %q", test.Name, dependency)
 			}
@@ -94,27 +98,29 @@ func (i Inventory) GroupsForProfile(profile string) []Group {
 }
 
 func (i Inventory) MatchPath(path string) []Group {
-	path = filepath.ToSlash(path)
+	if i.OtherProduct(path) {
+		return nil
+	}
 	var matched []Group
 	for _, group := range i.Groups {
-		for _, pattern := range group.Paths {
-			if matchPath(pattern, path) {
-				matched = append(matched, group)
-				break
-			}
+		if matchesAny(group.Paths, path) {
+			matched = append(matched, group)
 		}
 	}
 	return matched
 }
 
-func (i Inventory) RequiresFull(path string) bool {
+func (i Inventory) OtherProduct(path string) bool {
+	return matchesAny(i.OtherProductPaths, path)
+}
+
+func matchesAny(patterns []string, path string) bool {
 	path = filepath.ToSlash(path)
-	for _, pattern := range i.FullFallbackPaths {
-		if matchPath(pattern, path) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(patterns, func(pattern string) bool { return matchPath(pattern, path) })
+}
+
+func (i Inventory) RequiresFull(path string) bool {
+	return matchesAny(i.FullFallbackPaths, path)
 }
 
 func matchPath(pattern, path string) bool {

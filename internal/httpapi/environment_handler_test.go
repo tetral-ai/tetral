@@ -183,7 +183,7 @@ func TestCreateEnvironmentRejectsUnknownAndOldShapeFields(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/environments", strings.NewReader(tc.body))
 		request.Header.Set("Content-Type", "application/json")
 		setAuthHeader(request)
-		router.ServeHTTP(recorder, request)
+		outside(router).ServeHTTP(recorder, request)
 
 		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.want) {
 			t.Fatalf("body %s: expected 400 with %q, got %d: %s", tc.body, tc.want, recorder.Code, recorder.Body.String())
@@ -393,7 +393,7 @@ func TestListEnvironmentsRejectsLegacyAndMalformedQueryParams(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		setAuthHeader(request)
-		router.ServeHTTP(recorder, request)
+		outside(router).ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected 400, got %d: %s", path, recorder.Code, recorder.Body.String())
 		}
@@ -565,7 +565,7 @@ func TestUpdateEnvironmentRejectsVersionAndUnknownFields(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/environments/"+envID, strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		setAuthHeader(request)
-		router.ServeHTTP(recorder, request)
+		outside(router).ServeHTTP(recorder, request)
 
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("body %s: expected 400, got %d: %s", body, recorder.Code, recorder.Body.String())
@@ -727,7 +727,7 @@ func TestDeleteEnvironmentRejectsDurableSessionReferences(t *testing.T) {
 }
 
 func TestEnvironmentArchiveStays501(t *testing.T) {
-	router := newAuthenticatedRouter(t, newTestHandler(t))
+	router := newHandlerRouter(newTestHandler(t))
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/environments/env_test/archive", nil)

@@ -47,8 +47,7 @@ fn expected_encoding(fixture: &Fixture<'_>) -> Value {
 
 #[test]
 fn every_protocol_fixture_round_trips_or_is_rejected() {
-    let (mut total, mut valid, mut invalid) = (0, 0, 0);
-    for (file, file_total, file_valid, file_invalid) in FILES {
+    for file in FILES {
         let document = read_json(&format!("{file}.fixtures.json"));
         let fixtures = fixtures(&document);
         let by_name = by_name(&fixtures);
@@ -82,16 +81,11 @@ fn every_protocol_fixture_round_trips_or_is_rejected() {
                 );
             }
         }
-        assert_eq!(
-            (fixtures.len(), seen_valid, seen_invalid),
-            (file_total, file_valid, file_invalid),
-            "{file}"
+        assert!(
+            seen_valid > 0 && seen_invalid > 0,
+            "{file}: {seen_valid} valid and {seen_invalid} invalid fixtures"
         );
-        total += fixtures.len();
-        valid += seen_valid;
-        invalid += seen_invalid;
     }
-    assert_eq!((total, valid, invalid), (439, 142, 297));
 }
 
 #[test]

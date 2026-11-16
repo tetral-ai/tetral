@@ -35,7 +35,7 @@ func runPublicStreamingFanout(t *testing.T) {
 	h.open(t, "ordinary", nil, "")
 	h.open(t, "primary-thread", nil, h.thread(t))
 	second := h.newSession(t)
-	h.client.control(t, "open", map[string]any{"viewer": "second-session", "sessionId": second, "eventDeltas": []string{"agent.message"}})
+	h.client.open(t, "second-session", second, []string{"agent.message"}, "")
 	group.selectProcess(1)
 	h.open(t, "b1", []string{"agent.message"}, "")
 	publicWait(t, "two independent process subscriptions", func() bool { return len(publicBrokerSubscriptions(t, h.broker, h.session)) == 2 })
@@ -48,7 +48,7 @@ func runPublicStreamingFanout(t *testing.T) {
 	for _, viewer := range []string{"a1", "a2", "b1"} {
 		h.waitEvent(t, viewer, "event_delta", 1)
 	}
-	h.client.control(t, "close_viewer", map[string]any{"viewer": "a1"})
+	h.client.closeViewer(t, "a1")
 	if group.processes[0].metric(t, "event_stream_preview_subscriptions") != 2 {
 		t.Fatal("first close removed shared process subscription")
 	}
@@ -75,8 +75,8 @@ func runPublicStreamingFanout(t *testing.T) {
 	h.releaseFragments(t, 3)
 	h.finish(t)
 	h.waitEvent(t, "a-new", "span.model_request_end", 1)
-	h.client.control(t, "close_viewer", map[string]any{"viewer": "a-new"})
-	h.client.control(t, "close_viewer", map[string]any{"viewer": "b1"})
+	h.client.closeViewer(t, "a-new")
+	h.client.closeViewer(t, "b1")
 	publicAssertProcessBaseline(t, group.processes[0])
 	publicAssertProcessBaseline(t, group.processes[1])
 	publicWait(t, "broker unsubscribe after last viewers", func() bool { return len(publicBrokerSubscriptions(t, h.broker, h.session)) == 0 })
@@ -140,7 +140,7 @@ func runPublicLastUnsubscribeRace(t *testing.T) {
 		t.Fatal("ordinary Session or child formal viewers changed native refcount")
 	}
 	transport.hold.Store(true)
-	f.client.control(t, "close_viewer", map[string]any{"viewer": "old"})
+	f.client.closeViewer(t, "old")
 	select {
 	case <-transport.entered:
 	case <-time.After(5 * time.Second):
@@ -152,7 +152,7 @@ func runPublicLastUnsubscribeRace(t *testing.T) {
 	select {
 	case <-joinArrived:
 	case <-time.After(5 * time.Second):
-		t.Fatal("new SDK join did not reach production hub")
+		t.Fatal("new viewer join did not reach production hub")
 	}
 	if transport.installs.Load() != 1 {
 		t.Fatal("new viewer installed against a closing native registration")
@@ -172,11 +172,11 @@ func runPublicLastUnsubscribeRace(t *testing.T) {
 	f.waitEvent(t, "new", "event_delta", 1)
 	f.end(t, r)
 	f.assertFormal(t, f.waitEvent(t, "new", "span.model_request_end", 1), []string{"alpha βeta omega\n"})
-	f.client.control(t, "close_viewer", map[string]any{"viewer": "new"})
+	f.client.closeViewer(t, "new")
 	publicWait(t, "race final native subscription removed", func() bool {
 		return f.metric(t, "event_stream_preview_subscriptions") == 0 && len(publicBrokerSubscriptions(t, f.broker, f.session)) == 0
 	})
-	publicLogAssertion(t, "actual-native-teardown-barrier-serializes-new-SDK-join-and-formal-child-has-no-refcount")
+	publicLogAssertion(t, "actual-native-teardown-barrier-serializes-new-viewer-join-and-formal-child-has-no-refcount")
 }
 
 type publicBrokerSubscription struct {

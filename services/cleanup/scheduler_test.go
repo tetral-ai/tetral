@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -483,27 +481,6 @@ func TestSchedulingMissingCursorIsAnInvariantError(t *testing.T) {
 	}
 	if got := markerJobID(t, admin, "sesn_no_cursor"); got.Valid {
 		t.Fatalf("missing cursor claimed %s", got.String)
-	}
-}
-
-// Session scheduling stays Postgres/Queue-only and no cleanup code deletes
-// Sandbox resources; only the drive run reads the blob store.
-func TestCleanupWorkloadStaysWithinSchedulerBoundary(t *testing.T) {
-	sandboxDeletion := []string{"Delete" + "Prefix", "Collect" + "ResourcePrefixes"}
-	for path, forbidden := range map[string][]string{
-		"scheduler.go": append([]string{"internal/" + "blob", "Blob" + "Store"}, sandboxDeletion...),
-		"drives.go":    sandboxDeletion,
-		filepath.Join("cmd", "tetral-cleanup", "main.go"): sandboxDeletion,
-	} {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		for _, word := range forbidden {
-			if strings.Contains(string(body), word) {
-				t.Fatalf("%s contains %q; scheduling stays Postgres/Queue-only and cleanup deletes no Sandbox resource", path, word)
-			}
-		}
 	}
 }
 

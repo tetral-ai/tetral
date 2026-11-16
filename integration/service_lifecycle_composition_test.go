@@ -261,7 +261,7 @@ func TestPostgreSQLSeparatedOwnersResourceLifecycle(t *testing.T) {
 				owner.Close(ctx)
 				cancel()
 				if time.Since(started) > time.Second {
-					t.Fatal("diagnostic shutdown exceeded budget")
+					t.Fatal("diagnostic close exceeded budget")
 				}
 				stats := owner.Stats()
 				if sink == "backpressured" && stats.Dropped == 0 {

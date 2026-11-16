@@ -110,6 +110,22 @@ export async function verifyPostgreSQLReadiness(sql: SchemaSQL): Promise<void> {
 	await verifyPostgreSQLRLS(sql);
 }
 
+// Only a query the server refused for its syntax or access rules (SQLSTATE
+// class 42: a missing table or column, a privilege the role lacks) names a
+// fault of the schema or the role. Any other failure is a database that could
+// not be reached or refused the work, which the command reports as a
+// dependency: the driver reports a refused connection (a wrong password, a
+// missing database, a server starting up or out of connections) as a server
+// answer too. The driver's text may hold the connection string, so only its
+// SQLSTATE or error code is kept.
+function verificationFailure(error: unknown, kind: SchemaVerificationErrorKind): Error {
+	const failure = typeof error === "object" && error !== null ? (error as { code?: unknown; errno?: unknown }) : {};
+	const sqlstate = typeof failure.errno === "string" && /^[0-9A-Z]{5}$/.test(failure.errno) ? failure.errno : "";
+	if (failure.code === "ERR_POSTGRES_SERVER_ERROR" && sqlstate.startsWith("42")) return new SchemaVerificationError(kind);
+	const code = sqlstate !== "" ? `SQLSTATE ${sqlstate}` : typeof failure.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(failure.code) ? failure.code : "";
+	return new Error(`postgresql database could not be reached${code === "" ? "" : ` (${code})`}`);
+}
+
 async function verifyRuntimeRole(sql: SchemaSQL): Promise<void> {
 	let rows: readonly RuntimeRoleRow[];
 	try {
@@ -117,8 +133,8 @@ async function verifyRuntimeRole(sql: SchemaSQL): Promise<void> {
       SELECT rolsuper AS is_superuser, rolbypassrls AS bypasses_rls
         FROM pg_roles WHERE rolname = current_user
     `;
-	} catch {
-		throw new SchemaVerificationError("runtime_role_invalid");
+	} catch (error) {
+		throw verificationFailure(error, "runtime_role_invalid");
 	}
 	const row = rows[0];
 	if (rows.length !== 1 || row === undefined || row.is_superuser || row.bypasses_rls) {
@@ -157,8 +173,8 @@ async function verifyPostgreSQLRLS(sql: SchemaSQL): Promise<void> {
        WHERE n.nspname = current_schema()
        ORDER BY c.relname, p.polname
     `;
-	} catch {
-		throw new SchemaVerificationError("schema_rls_drift");
+	} catch (error) {
+		throw verificationFailure(error, "schema_rls_drift");
 	}
 	if (!catalogTablesMatch(tables) || !catalogPoliciesMatch(policies)) {
 		throw new SchemaVerificationError("schema_rls_drift");
@@ -261,7 +277,7 @@ export async function verifyPostgreSQLSchema(sql: SchemaSQL): Promise<void> {
 		}
 	} catch (error) {
 		if (error instanceof SchemaVerificationError) throw error;
-		throw new SchemaVerificationError("schema_history_malformed");
+		throw verificationFailure(error, "schema_history_malformed");
 	}
 
 	const seen = new Set<number>();

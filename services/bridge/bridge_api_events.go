@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -696,19 +697,20 @@ func incrementSessionServerToolUsageTx(
 	return nil
 }
 
+// runtimeWritableEventTypes are the event types the Runtime writes through
+// WriteEvent.
+var runtimeWritableEventTypes = []string{
+	"agent.message",
+	"agent.thinking",
+	"approval_review.decision",
+	"approval_review.failure",
+	"session.status_running",
+	"session.error",
+	"span.model_request_start",
+}
+
 func writeEventTypeAllowed(eventType string) bool {
-	switch eventType {
-	case "agent.message",
-		"agent.thinking",
-		"approval_review.decision",
-		"approval_review.failure",
-		"session.status_running",
-		"session.error",
-		"span.model_request_start":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(runtimeWritableEventTypes, eventType)
 }
 
 type requestStartFact struct {

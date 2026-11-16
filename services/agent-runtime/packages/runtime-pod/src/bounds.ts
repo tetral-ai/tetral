@@ -6,7 +6,7 @@
 // Every client factory also carries the caller's trace context, because each of
 // these channels reaches an Engine service.
 
-import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import { MaxProviderRequestMessageBytes, MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { traceparentClientInterceptor } from "@tetral/ts-observability";
 import type { ClientOptions, ServerOptions } from "@grpc/grpc-js";
 
@@ -21,12 +21,8 @@ export const MaxAttachmentGrpcMessageBytes = 32 * 1024 * 1024;
 // services/bridge/cmd/bridge-api/main.go.
 export const MaxBridgeDurableContextGrpcMessageBytes = 64 * 1024 * 1024;
 /** Maximum serialized provider request the Runtime Pod sends to Gateway. */
-// UPDATE-WITH: services/gateway/packages/provider-gateway/src/bounds.ts
-// (MaxGrpcInboundMessageBytes).
-export const MaxGatewayRequestGrpcMessageBytes = 64 * 1024 * 1024;
+export const MaxGatewayRequestGrpcMessageBytes = MaxProviderRequestMessageBytes;
 /** Maximum provider stream event the Runtime Pod accepts from Gateway. */
-// UPDATE-WITH: services/gateway/packages/provider-gateway/src/bounds.ts
-// (MaxGrpcOutboundMessageBytes).
 export const MaxGatewayStreamEventGrpcMessageBytes = MaxProviderResponseFrameBytes;
 /** Maximum encoded Web request sent from Runtime to web-connector. */
 export const MaxWebRequestGrpcMessageBytes = 1024 * 1024;

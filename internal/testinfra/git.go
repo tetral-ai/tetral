@@ -2,37 +2,38 @@ package testinfra
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
 )
 
-func inspectRevision(root, base string) Revision {
+func inspectRevision(ctx context.Context, root, base string) Revision {
 	revision := Revision{}
-	shallow, err := gitOutput(root, "rev-parse", "--is-shallow-repository")
+	shallow, err := gitOutput(ctx, root, "rev-parse", "--is-shallow-repository")
 	if err != nil || shallow == "true" {
 		revision.FullFallbackCause = "repository history is shallow or cannot be inspected"
 		return revision
 	}
-	head, err := gitOutput(root, "rev-parse", "HEAD^{commit}")
+	head, err := gitOutput(ctx, root, "rev-parse", "HEAD^{commit}")
 	if err != nil {
 		revision.FullFallbackCause = "HEAD is not a commit"
 		return revision
 	}
 	revision.Head = head
-	status, _ := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=all")
+	status, _ := gitOutput(ctx, root, "status", "--porcelain=v1", "--untracked-files=all")
 	revision.WorktreeDirty = status != ""
 	if base == "" {
 		base = "refs/remotes/origin/main"
 	}
-	baseTip, err := gitOutput(root, "rev-parse", "--verify", base+"^{commit}")
+	baseTip, err := gitOutput(ctx, root, "rev-parse", "--verify", base+"^{commit}")
 	if err != nil {
 		revision.FullFallbackCause = "base does not resolve to one local commit"
 		return revision
 	}
 	revision.ResolvedBaseTip = baseTip
-	comparison, err := gitOutput(root, "merge-base", baseTip, head)
+	comparison, err := gitOutput(ctx, root, "merge-base", baseTip, head)
 	if err != nil || comparison == "" {
 		revision.FullFallbackCause = "base and HEAD have no merge base"
 		return revision
@@ -47,7 +48,7 @@ func inspectRevision(root, base string) Revision {
 		{"ls-files", "--others", "--exclude-standard", "-z"},
 	}
 	for _, arguments := range commands {
-		output, commandErr := gitBytes(root, arguments...)
+		output, commandErr := gitBytes(ctx, root, arguments...)
 		if commandErr != nil {
 			revision.FullFallbackCause = "cannot enumerate repository change set"
 			return revision
@@ -65,15 +66,15 @@ func inspectRevision(root, base string) Revision {
 	return revision
 }
 
-func gitOutput(root string, arguments ...string) (string, error) {
-	output, err := gitBytes(root, arguments...)
+func gitOutput(ctx context.Context, root string, arguments ...string) (string, error) {
+	output, err := gitBytes(ctx, root, arguments...)
 	return strings.TrimSpace(string(output)), err
 }
 
-func gitBytes(root string, arguments ...string) ([]byte, error) {
+func gitBytes(ctx context.Context, root string, arguments ...string) ([]byte, error) {
 	// Arguments are assembled by fixed repository-inspection call sites; no shell is used.
 	//nolint:gosec
-	command := exec.Command("git", arguments...)
+	command := exec.CommandContext(ctx, "git", arguments...)
 	command.Dir = root
 	output, err := command.Output()
 	if err != nil {

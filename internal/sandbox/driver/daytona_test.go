@@ -6,7 +6,6 @@ import (
 	"errors"
 	"maps"
 	"net/http"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -1014,14 +1013,7 @@ func TestHelperStdinInputClampsYieldTime(t *testing.T) {
 	}
 }
 
-func TestOutputCaptureUsesSandboxInternalHelperMode(t *testing.T) {
-	data, err := os.ReadFile("daytona_output_capture.go")
-	if err != nil {
-		t.Fatalf("read daytona_output_capture.go: %v", err)
-	}
-	if !strings.Contains(string(data), "__capture") {
-		t.Fatal("daytona output capture does not invoke the Sandbox-internal helper mode")
-	}
+func TestOutputCaptureChildPathRejectsAnEscapingName(t *testing.T) {
 	if _, err := outputCaptureChildPath("/mnt/session/outputs", "../escape"); err == nil {
 		t.Fatal("outputCaptureChildPath accepted escape name")
 	}

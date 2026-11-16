@@ -1,17 +1,14 @@
+// Layer 2: the database client, its transactions and its diagnostics against a
+// real PostgreSQL, or against none where a test needs no server.
 package dbconnect
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
-	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +18,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const sensitivePlainDSNSentinel = "do-not-leak-dbconnect"
@@ -247,6 +245,20 @@ func TestStartupHelpersMapStorageErrorsToDiagnostics(t *testing.T) {
 	diagnostic := assertDiagnostic(t, err, PhaseVerifySchema, KindSchemaVerificationFailed)
 	if !errors.As(diagnostic, &migrationErr) || migrationErr.Kind != storage.SchemaErrorMissing {
 		t.Fatalf("diagnostic must unwrap missing SchemaMigrationError, got %#v", migrationErr)
+	}
+
+	// A database that refuses the schema read is not ready; the startup
+	// record says so whatever the caller marks the step.
+	if _, err := emptyAdmin.Exec(`CREATE FUNCTION refuse_history() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'busy' USING ERRCODE = '53300'; END $$;
+		CREATE VIEW tetral_schema_migrations AS SELECT refuse_history() AS version, ''::text AS checksum`); err != nil {
+		t.Fatal(err)
+	}
+	err = emptyClient.VerifySchema(context.Background())
+	_ = assertDiagnostic(t, err, PhaseVerifySchema, KindEndpointUnreachable)
+	var record bytes.Buffer
+	workload.WriteStartupFailure(workload.NewLogger(&record, "dbconnect-test", "test", "unit"), "startup.failed", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
+	if !strings.Contains(record.String(), `"startup.cause":"dependency_readiness"`) || !strings.Contains(record.String(), "SQLSTATE 53300") {
+		t.Fatalf("startup record of a refused schema read = %s; want dependency_readiness with its SQLSTATE", record.String())
 	}
 
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -493,7 +505,7 @@ func TestRuntimeOperationalErrorsClassifyConservatively(t *testing.T) {
 func TestInvalidOperationLabelsAreRejectedSafelyAcrossDispatchPaths(t *testing.T) {
 	db := storagetest.NewPostgreSQLDB(t)
 	client := newTestClient(db)
-	for _, operation := range []string{"", "SELECT * FROM secrets", "agent.create.workspace_123", "Agent.Create", "agent/create"} {
+	for _, operation := range []string{"", "SELECT * FROM secrets", "select id from agent.sessions", "agent.create.workspace_123", "Agent.Create", "agent/create"} {
 		t.Run(operation, func(t *testing.T) {
 			_, err := client.Exec(context.Background(), operation, `SELECT 1`)
 			assertInvalidOperationDiagnostic(t, err, operation)
@@ -741,67 +753,45 @@ func TestWithWorkspaceTxAndCleanupSemantics(t *testing.T) {
 	}
 }
 
-func TestTransactionCodeUsesDatabaseSQLTransactions(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+// A transaction ends through database/sql: when it commits or rolls back, its
+// connection is back in the pool.
+func TestTransactionsGiveTheirConnectionBackWhenTheyEnd(t *testing.T) {
+	sentinel := errors.New("rollback sentinel")
+	withTx := func(ctx context.Context, client *Client, fn func(*Tx) error) error {
+		return client.WithTx(ctx, "dbconnect.release", nil, fn)
 	}
-	dir := filepath.Dir(thisFile)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dbconnect dir: %v", err)
+	withWorkspaceTx := func(ctx context.Context, client *Client, fn func(*Tx) error) error {
+		return client.WithWorkspaceTx(ctx, "workspace_tx_release", "dbconnect.release", fn)
 	}
-	var source strings.Builder
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		body, err := os.ReadFile(path) //nolint:gosec // test reads local source
-		if err != nil {
-			t.Fatalf("read %s: %v", entry.Name(), err)
-		}
-		source.Write(body)
-		assertNoTransactionLifecycleSQLLiterals(t, path)
-	}
-	allProductionSource := source.String()
-	for _, required := range []string{".BeginTx(", ".Commit(", ".Rollback("} {
-		if !strings.Contains(allProductionSource, required) {
-			t.Fatalf("dbconnect production source missing database/sql transaction call %s", required)
-		}
-	}
-}
-
-func assertNoTransactionLifecycleSQLLiterals(t *testing.T, path string) {
-	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	ast.Inspect(file, func(node ast.Node) bool {
-		lit, ok := node.(*ast.BasicLit)
-		if !ok {
-			return true
-		}
-		value, err := literalString(lit)
-		if err != nil {
-			return true
-		}
-		normalized := strings.ToLower(strings.TrimSpace(value))
-		for _, forbidden := range []string{"begin", "commit", "rollback"} {
-			if normalized == forbidden || strings.HasPrefix(normalized, forbidden+" ") || strings.HasPrefix(normalized, forbidden+";") {
-				t.Fatalf("%s contains hand-written transaction lifecycle SQL literal %q", path, value)
+	for _, row := range []struct {
+		name string
+		run  func(context.Context, *Client, func(*Tx) error) error
+		end  error
+	}{
+		{"WithTx commits", withTx, nil},
+		{"WithTx rolls back", withTx, sentinel},
+		{"WithWorkspaceTx commits", withWorkspaceTx, nil},
+		{"WithWorkspaceTx rolls back", withWorkspaceTx, sentinel},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			db := storagetest.NewPostgreSQLDB(t)
+			db.SetMaxOpenConns(1)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := row.run(ctx, newTestClient(db), func(tx *Tx) error {
+				if _, err := tx.Exec(ctx, `SELECT 1`); err != nil {
+					return err
+				}
+				return row.end
+			})
+			if !errors.Is(err, row.end) {
+				t.Fatalf("transaction ended with %v; want %v", err, row.end)
 			}
-		}
-		return true
-	})
-}
-
-func literalString(lit *ast.BasicLit) (string, error) {
-	if lit.Kind != token.STRING {
-		return "", errors.New("not a string literal")
+			if err := db.QueryRowContext(ctx, `SELECT 1`).Scan(new(int)); err != nil {
+				t.Fatalf("the pool's one connection after the transaction ended: %v", err)
+			}
+		})
 	}
-	return strconv.Unquote(lit.Value)
 }
 
 func assertWorkspaceCount(t *testing.T, db *sql.DB, workspaceID string, want int) {

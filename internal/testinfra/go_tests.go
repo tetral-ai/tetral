@@ -2,6 +2,7 @@ package testinfra
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,8 +42,8 @@ type testFunction struct {
 	reason         string
 }
 
-func fastGoSelections(root string) ([]Selection, []Exclusion, error) {
-	packages, err := listGoPackages(root)
+func fastGoSelections(ctx context.Context, root string) ([]Selection, []Exclusion, error) {
+	packages, err := listGoPackages(ctx, root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -76,8 +77,8 @@ func fastGoSelections(root string) ([]Selection, []Exclusion, error) {
 	return selections, exclusions, nil
 }
 
-func fullGoSelections(root, reason string) ([]Selection, []Exclusion, error) {
-	packages, err := listGoPackages(root)
+func fullGoSelections(ctx context.Context, root, reason string) ([]Selection, []Exclusion, error) {
+	packages, err := listGoPackages(ctx, root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -141,10 +142,10 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 		capabilities := append([]string{exclusion.Capability}, exclusion.Capabilities...)
 		for _, capability := range capabilities {
 			switch capability {
-			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "sdk", "envoy", "edge-envoy", "egctl", "bun-image":
+			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "envoy", "edge-envoy", "egctl", "bun-image":
 				set[capability] = true
-			case "external-sdk-checkout", "cross-language-integration":
-				set["sdk"] = true
+			case "cross-language-integration":
+				set["bun-workspaces"] = true
 			}
 		}
 	}
@@ -164,7 +165,7 @@ var goPackageListings = struct {
 	byRoot map[string][]listedPackage
 }{byRoot: map[string][]listedPackage{}}
 
-func listGoPackages(root string) ([]listedPackage, error) {
+func listGoPackages(ctx context.Context, root string) ([]listedPackage, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -173,7 +174,7 @@ func listGoPackages(root string) ([]listedPackage, error) {
 	defer goPackageListings.Unlock()
 	packages, ok := goPackageListings.byRoot[absolute]
 	if !ok {
-		packages, err = readGoPackages(absolute)
+		packages, err = readGoPackages(ctx, absolute)
 		if err != nil {
 			return nil, err
 		}
@@ -189,8 +190,8 @@ func listGoPackages(root string) ([]listedPackage, error) {
 	return copies, nil
 }
 
-func readGoPackages(root string) ([]listedPackage, error) {
-	command := exec.Command("go", "list", "-json", "./...")
+func readGoPackages(ctx context.Context, root string) ([]listedPackage, error) {
+	command := exec.CommandContext(ctx, "go", "list", "-json", "./...")
 	command.Dir = root
 	output, err := command.Output()
 	if err != nil {
@@ -247,7 +248,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 // transportDockerConstructors start containers through testinfra Docker
 // resources, so a test calling one cannot run in the infrastructure-free
 // profile even when its inventory declaration is missing.
-var transportDockerConstructors = map[string]bool{"NewProxyPair": true, "NewRuntimePair": true, "NewRuntimeWithoutInitialCredentials": true, "NewMinIO": true, "NewPostgreSQL": true}
+var transportDockerConstructors = map[string]bool{"NewRuntimePair": true, "NewRuntimeWithoutInitialCredentials": true, "NewMinIO": true, "NewPostgreSQL": true}
 
 func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusion, error) {
 	declared := map[string][]string{}
@@ -335,7 +336,7 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 						if transportImports[identifier.Name] && transportDockerConstructors[selector.Sel.Name] {
 							item.requireCapability("docker", "starts a transporttest Docker fixture")
 						}
-						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext") {
+						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext" || selector.Sel.Name == "LookPath") {
 							argument := 0
 							if selector.Sel.Name == "CommandContext" {
 								argument = 1
@@ -434,8 +435,6 @@ func markInfrastructureCapability(function *testFunction, value string) {
 		capability = "minio"
 	case strings.Contains(value, "TETRAL_TEST_DOCKER_AVAILABLE"):
 		capability = "docker"
-	case strings.Contains(value, "TETRAL_ENGINE_SDK_ROOT"):
-		capability = "external-sdk-checkout"
 	case strings.Contains(value, "TETRAL_RUN_GO_BUN_GRPC_INTEROP"):
 		capability = "cross-language-integration"
 	case strings.Contains(strings.ToLower(value), "root ci lane"), strings.Contains(strings.ToLower(value), "production root helper"):

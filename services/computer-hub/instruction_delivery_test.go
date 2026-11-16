@@ -128,6 +128,7 @@ func TestResumeOnAnotherPodResendsEachUnreportedInstructionOnce(t *testing.T) {
 	if _, ok := resumed.next().Envelope.Payload.(protocol.HeartbeatPayload); !ok {
 		t.Fatal("the resumed stream did not start with a heartbeat")
 	}
+	requireConnectionObject(t, f.connectionState(cli.InstanceID), stream.connectionID, cli.CredentialID, instance.ConnectionOnline)
 	f.requireInstructions(resumed, first, second)
 	requireNoEvent(t, resumed)
 	if events := stream.ended(); len(events) != 0 {
@@ -137,6 +138,54 @@ func TestResumeOnAnotherPodResendsEachUnreportedInstructionOnce(t *testing.T) {
 	if after["lease_expires_at"] != before["lease_expires_at"] || after["hub_pod"] != secondPod || after["stream_count"] != float64(2) {
 		t.Fatalf("connection after the resume = %v; want the same lease, hub_pod %s and stream_count 2", after, secondPod)
 	}
+
+	// 4,031 unreported instructions, the most a CLI holds at once, are all
+	// written again, in the order issued, and the stream stays open. The
+	// connection's first Session report has lifted the cap of 64.
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET first_session_report_at=clock_timestamp() WHERE id=$1`, stream.connectionID); err != nil {
+		t.Fatal(err)
+	}
+	unreported := []string{first, second}
+	if err := f.client.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_issue", func(tx *dbconnect.Tx) error {
+		connection, err := instance.ReadConnection(f.ctx, tx, f.ws, stream.connectionID)
+		for i := 0; err == nil && i < 4029; i++ {
+			var issued string
+			issued, err = instance.IssueInstruction(f.ctx, tx, f.ws, connection, protocol.SessionClosePayload{SessionID: fmt.Sprintf("sess_%04d", i), BindingID: fmt.Sprintf("bind_%04d", i)}, "")
+			unreported = append(unreported, issued)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored := map[string][]byte{}
+	rows, err := f.admin.QueryContext(f.ctx, `SELECT message_id,envelope FROM connection_instructions WHERE connection_id=$1`, stream.connectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var messageID string
+		var envelope []byte
+		if err := rows.Scan(&messageID, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		stored[messageID] = envelope
+	}
+	written := func(on *testStream, messageIDs []string) {
+		t.Helper()
+		for i, messageID := range messageIDs {
+			if event := on.next(); !bytes.Equal(event.Data, stored[messageID]) {
+				t.Fatalf("event %d = %s; want instruction %s as stored", i, event.Data, messageID)
+			}
+		}
+	}
+	written(resumed, unreported[2:])
+	back := f.resume(cli.BaseURL, cli, stream.connectionID)
+	if _, ok := back.next().Envelope.Payload.(protocol.HeartbeatPayload); !ok {
+		t.Fatal("the stream resumed again did not start with a heartbeat")
+	}
+	written(back, unreported)
+	requireNoEvent(t, back)
 }
 
 func TestLateResumeHeartbeatRenewsBeyondTheEarlierGrant(t *testing.T) {
@@ -163,6 +212,10 @@ func TestLateResumeHeartbeatRenewsBeyondTheEarlierGrant(t *testing.T) {
 	}
 }
 
+// While an instance's connection lives, a start that does not resume it is
+// refused and replaces nothing. Once the connection has ended, at the CLI's
+// disconnect or at its lease's end, a start with no previous connection
+// opens a new one.
 func TestStartsWithoutTheLiveConnectionReplaceNothing(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli, stream := f.openOnline()
@@ -180,6 +233,27 @@ func TestStartsWithoutTheLiveConnectionReplaceNothing(t *testing.T) {
 		requireRowUnchanged(t, before, f.connectionRow(stream.connectionID))
 		if n := f.count(`SELECT count(*) FROM instance_connections WHERE instance_id=$1`, cli.InstanceID); n != 1 {
 			t.Fatalf("%s: connections = %d; want the live one only", name, n)
+		}
+	}
+
+	for cause, end := range map[string]func(*enginetest.CLI, *testStream){
+		instance.EndLeaseExpired: func(_ *enginetest.CLI, live *testStream) {
+			if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, live.connectionID); err != nil {
+				t.Fatal(err)
+			}
+		},
+		instance.EndDisconnected: func(cli *enginetest.CLI, live *testStream) {
+			response, err := cli.Disconnect(f.ctx, protocol.DisconnectRequest{ConnectionID: live.connectionID, MessageID: "disconnect_1"})
+			if err != nil || response.Status != http.StatusOK {
+				t.Fatalf("disconnect = %d %s, %v", response.Status, response.Body, err)
+			}
+		},
+	} {
+		cli, live := f.openOnline()
+		end(cli, live)
+		fresh := f.openClientStream(f.url, cli, cli.EventsQuery("", nil), false)
+		if fresh.connectionID == live.connectionID || f.connectionRow(live.connectionID)["end_cause"] != cause {
+			t.Fatalf("start after the connection ended %s = %s, the old one %v; want a new connection", cause, fresh.connectionID, f.connectionRow(live.connectionID))
 		}
 	}
 }
@@ -231,10 +305,12 @@ func TestRetryAfterIsTheLeaseLeftInMillisecondsRoundedUp(t *testing.T) {
 	}
 }
 
+// A stream ends at its maximum age with a stream-only disconnect. Its
+// connection reads online without a stream and after the resume, and the
+// resumed stream's heartbeat is accepted.
 func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour, withStreamMaxAge(10*time.Minute))
-	cli := f.userInstance(time.Time{})
-	stream := f.open(cli)
+	cli, stream := f.openOnline()
 	f.clock.waitTimers(t, 1)
 	f.clock.Advance(10*time.Minute - time.Millisecond)
 	requireNoEvent(t, stream)
@@ -243,7 +319,19 @@ func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 	if len(events) != 1 || events[0].Envelope.Payload != (protocol.DisconnectPayload{Scope: "stream"}) {
 		t.Fatalf("events by 11 minutes = %d; want one stream-only disconnect", len(events))
 	}
-	f.resume(f.url, cli, stream.connectionID)
+	online := func(when string) {
+		t.Helper()
+		if connection, _ := f.instanceRead(cli.InstanceID)["connection"].(map[string]any); connection["id"] != stream.connectionID || connection["state"] != instance.ConnectionOnline {
+			t.Fatalf("connection %s = %v; want %s online", when, connection, stream.connectionID)
+		}
+	}
+	online("without a stream")
+	resumed := f.resume(f.url, cli, stream.connectionID)
+	online("after the resume")
+	if response, err := cli.Heartbeat(f.ctx, resumed.heartbeat("heartbeat_after_resume")); err != nil || response.Status != http.StatusOK {
+		t.Fatalf("heartbeat on the resumed stream = %d %s, %v", response.Status, response.Body, err)
+	}
+	online("after the resumed stream's heartbeat")
 }
 
 // TestEveryStreamOfAStoppingPodGetsItsDisconnect drains a pod with a window
@@ -346,22 +434,42 @@ func TestStreamsHeldBeforeTheFirstListenAreWokenOnceItIsInPlace(t *testing.T) {
 	}
 }
 
+// A ready on an instance with 70 attached computers is answered within the
+// CLI's 10-second request total and issues one session.prepare per computer;
+// the first 64 go out before the connection's first session report and the
+// rest after it.
 func TestSixtyFourInstructionsGoOutBeforeTheFirstSessionReport(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
-	_, stream := f.openOnline()
-	var issued []string
+	cli := f.userInstance(time.Time{})
+	sessions := map[string]bool{}
 	for i := range 70 {
-		issued = append(issued, f.issueInstruction(f.ctx, stream.connectionID, "sess_"+strconv.Itoa(i)))
+		sessions["sess_"+strconv.Itoa(i)] = true
+		f.userComputer(cli, "sess_"+strconv.Itoa(i))
 	}
-	f.requireInstructions(stream, issued[:64]...)
-	requireNoEvent(t, stream)
+	stream := f.open(cli)
+	started := time.Now()
+	f.acceptReady(cli, stream, "ready_1")
+	if answered := time.Since(started); answered > 10*time.Second {
+		t.Fatalf("the ready over 70 computers was answered after %s; the CLI gives up at 10s", answered)
+	}
+	prepares := func(count int) {
+		t.Helper()
+		for range count {
+			event, payload := prepareOn(t, stream)
+			if !sessions[payload.SessionID] || !bytes.Equal(event.Data, f.envelopeOf(event.Envelope.MessageID)) {
+				t.Fatalf("event %s; want a stored session.prepare of a Session not yet prepared", event.Data)
+			}
+			delete(sessions, payload.SessionID)
+		}
+		requireNoEvent(t, stream)
+	}
+	prepares(64)
 	if err := f.client.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_report", func(tx *dbconnect.Tx) error {
 		return instance.MarkFirstSessionReport(f.ctx, tx, f.ws, stream.connectionID)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.requireInstructions(stream, issued[64:]...)
-	requireNoEvent(t, stream)
+	prepares(6)
 }
 
 func TestRevocationAndInstructionWritesNeverInterleave(t *testing.T) {
@@ -493,6 +601,12 @@ func TestWritersCommitWhileAPassTakesItsLocks(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			cli, stream := f.openOnline()
+			// The stream's first pass reads every instruction the connection
+			// counts when it locks the connection, so one still in flight
+			// would write the instruction issued below and leave the next
+			// pass to be held. A pass after a written instruction reads only
+			// up to the bound it started with.
+			f.requireInstructions(stream, f.issueInstruction(f.ctx, stream.connectionID, "sess_before_"+row.name))
 			start := row.prepare(cli, stream)
 			pause := f.pauseOn("FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE")
 			release := sync.OnceFunc(func() { close(pause.release) })

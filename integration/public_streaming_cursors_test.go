@@ -240,15 +240,15 @@ func publicProjectionForeignKey(t *testing.T, f *publicProjectionFixture) string
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := startContentSDKChildContext(f.ctx, t, f.baseURL, key.APIKey)
-	created := client.control(t, "provision", map[string]any{"environmentId": env.ID, "agent": map[string]any{"name": "foreign projection", "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}}})
+	client := newPublicDeveloper(t, f.baseURL, key.APIKey)
+	created := client.provision(t, env.ID, map[string]any{"name": "foreign projection", "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 	var provisioned struct {
 		Session struct {
 			ID string `json:"id"`
 		} `json:"session"`
 	}
 	if json.Unmarshal(created, &provisioned) != nil || provisioned.Session.ID == "" {
-		t.Fatal("workspace-B actual SDK provision failed")
+		t.Fatal("workspace-B provision failed")
 	}
 	return key.APIKey
 }

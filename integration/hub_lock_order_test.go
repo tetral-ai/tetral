@@ -67,11 +67,13 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 			computerID, stream := s.preparedUserComputer("laptop")
 			_, task := s.admitted(computerID, "sleep 600")
 			instruction, _ := stream.execute()
-			stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
+			runningReport := execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, ""))
+			terminalReport := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+			stream.held(enginetest.CaseRanThenEnded, instruction, runningReport, terminalReport)
+			stream.acked(runningReport, "report_running")
 			revoke := func() overlapResult { return f.revocation(stream.cli) }
 			report := func() overlapResult {
-				response, err := stream.cli.Post(f.ctx, "/v1/client/tool-status",
-					execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done")))
+				response, err := stream.cli.Post(f.ctx, "/v1/client/tool-status", terminalReport)
 				return overlapResult{response: response, err: err}
 			}
 			return revoke, report, func(revoked, reported overlapResult) {
@@ -123,7 +125,7 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 				return overlapResult{response: enginetest.Response{Status: status, Body: body}, err: err}
 			}
 			add := func() overlapResult {
-				status, body := f.developerSend(http.MethodPost, "/v1/sessions/"+s.id+"/computers",
+				status, body := f.developerSend(f.ctx, http.MethodPost, "/v1/sessions/"+s.id+"/computers",
 					`{"instance_id":"`+cli.InstanceID+`","working_directory":"/Users/me/shop"}`, "add-laptop")
 				return overlapResult{response: enginetest.Response{Status: status, Body: body}}
 			}
@@ -222,9 +224,11 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 			s.idle()
 			s.requireRemoved(removed, http.StatusAccepted, "closing")
 			close, payload := stream.closeInstruction(s.id)
+			closed := protocol.Encode(protocol.SessionStatus{ConnectionID: stream.connectionID,
+				MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID, SessionID: s.id, BindingID: payload.BindingID, Status: "closed"})
+			stream.held(enginetest.CaseClosed, close, closed)
 			report := func() overlapResult {
-				response, err := stream.cli.Post(f.ctx, "/v1/client/session-status", protocol.Encode(protocol.SessionStatus{ConnectionID: stream.connectionID,
-					MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID, SessionID: s.id, BindingID: payload.BindingID, Status: "closed"}))
+				response, err := stream.cli.Post(f.ctx, "/v1/client/session-status", closed)
 				return overlapResult{response: response, err: err}
 			}
 			heartbeat := func() overlapResult {

@@ -14,7 +14,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 func TestSessionDeleteCleanupDrainsUnadoptedOutputCaptureBeforeRemovingReceipt(t *testing.T) {
@@ -433,12 +432,11 @@ func TestPostgreSQLSessionDeleteRevokesPausedRuntimeWorkerBeforeDurableEffects(t
 		t.Fatalf("Session at paused-worker cut = %s/%v; want idle", sessionStatus, err)
 	}
 
+	// The deletion's Sandbox release belongs to the Sandbox service; a hook that
+	// records nothing stands in for it.
 	sessionStore := session.NewPostgreSQLSessionStore(
 		dbconnect.NewClientForTesting(runtimeDB),
-		session.WithSessionDeleteSandboxRelease(func(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, id string, now time.Time) error {
-			_, _, err := tetralsandbox.EnsureSandboxReleaseTx(ctx, tx, string(ws), id, tetralsandbox.SandboxReleaseSessionDelete, "", now)
-			return err
-		}),
+		session.WithSessionDeleteSandboxRelease(func(context.Context, *dbconnect.Tx, workspace.ID, string, time.Time) error { return nil }),
 	)
 	if err := sessionStore.WithRuntimeMutationTx(context.Background(), workspace.DefaultID, sessionID, func(tx session.Transaction) error {
 		return tx.DeleteSession(context.Background(), sessionID)

@@ -1,0 +1,26 @@
+[
+  {
+    "path": "testdata/task-notifications/cancelled-safe-maximum.json",
+    "test": "TestCanonicalTaskNotificationPayloadVectors"
+  },
+  {
+    "path": "testdata/task-notifications/completed-empty.json",
+    "test": "TestCanonicalTaskNotificationPayloadVectors"
+  },
+  {
+    "path": "testdata/task-notifications/expired-safe-metadata.json",
+    "test": "TestCanonicalTaskNotificationPayloadVectors"
+  },
+  {
+    "path": "testdata/task-notifications/failed-escaped-unicode.json",
+    "test": "TestCanonicalTaskNotificationPayloadVectors"
+  },
+  {
+    "path": "testdata/task-notifications/large-output-fitted.json",
+    "test": "TestCanonicalTaskNotificationPayloadVectors"
+  },
+  {
+    "path": "testdata/task-notifications/unknown-outcome-lowered.json",
+    "test": "TestCanonicalTaskNotificationPayloadVectors"
+  }
+]

@@ -119,16 +119,9 @@ func TestDecodeVaultUpdatePatchMergesMetadataAndValidatesDisplayName(t *testing.
 		t.Fatalf("empty metadata value = %q; want stored empty string", updated.Metadata["empty"])
 	}
 
-	nullNamePatch, err := DecodeUpdateVaultRequest([]byte(`{"display_name":null}`))
-	if err != nil {
-		t.Fatalf("DecodeUpdateVaultRequest null display_name: %v", err)
-	}
-	nullNameUpdated, err := nullNamePatch.Materialize(current)
-	if err != nil {
-		t.Fatalf("Materialize null display_name: %v", err)
-	}
-	if nullNameUpdated.DisplayName != "" {
-		t.Fatalf("null display_name must clear display name, got %q", nullNameUpdated.DisplayName)
+	var validation *ValidationError
+	if _, err := DecodeUpdateVaultRequest([]byte(`{"display_name":null}`)); !errors.As(err, &validation) {
+		t.Fatalf("DecodeUpdateVaultRequest null display_name error = %v; want a validation error", err)
 	}
 }
 

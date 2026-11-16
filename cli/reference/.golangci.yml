@@ -1,0 +1,47 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck
+    - gosec
+    - govet
+    - revive
+    - staticcheck
+    - unused
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+        text: "G101|G122|G204|G301|G302|G304|G306|G702"
+  settings:
+    gosec:
+      excludes:
+        - G115
+        - G706
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: if-return
+        - name: indent-error-flow
+        - name: var-naming
+
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/tetral-ai/tetral
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

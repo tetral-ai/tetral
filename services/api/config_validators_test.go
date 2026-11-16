@@ -81,26 +81,18 @@ func TestEnsureDataDirFailureDoesNotNameThePath(t *testing.T) {
 // TestLoadPositiveIntRejectionsAreConfigErrors proves the positive-integer
 // loaders fail config validation with a ConfigError naming the offending env key.
 func TestLoadPositiveIntRejectionsAreConfigErrors(t *testing.T) {
-	env := envMapValidators{"TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "-1"}
+	// The message names the key and never the value, which may be anything.
+	const value = "-1 credential-startup-sentinel"
+	env := envMapValidators{"TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": value}
 	_, err := loadPositiveInt(env, "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST", 32)
-	if err == nil {
-		t.Fatal("loadPositiveInt accepted a negative value")
-	}
-	configErr, ok := workload.AsConfigError(err)
-	if !ok {
-		t.Fatalf("loadPositiveInt returned %T; want a workload.ConfigError", err)
-	}
-	if !strings.Contains(configErr.Error(), "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST") {
-		t.Fatalf("config error %q does not name the env key", configErr.Error())
+	if configErr, ok := workload.AsConfigError(err); !ok || configErr.Error() != "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST must be a positive integer" {
+		t.Fatalf("loadPositiveInt(%q) = %v; want the ConfigError naming the key only", value, err)
 	}
 
-	env64 := envMapValidators{"TETRAL_SESSION_EVENT_BODY_BYTE_CAP": "0"}
+	env64 := envMapValidators{"TETRAL_SESSION_EVENT_BODY_BYTE_CAP": value}
 	_, err = loadPositiveInt64(env64, "TETRAL_SESSION_EVENT_BODY_BYTE_CAP", 1<<20)
-	if err == nil {
-		t.Fatal("loadPositiveInt64 accepted a zero value")
-	}
-	if _, ok := workload.AsConfigError(err); !ok {
-		t.Fatalf("loadPositiveInt64 returned %T; want a workload.ConfigError", err)
+	if configErr, ok := workload.AsConfigError(err); !ok || configErr.Error() != "TETRAL_SESSION_EVENT_BODY_BYTE_CAP must be a positive integer" {
+		t.Fatalf("loadPositiveInt64(%q) = %v; want the ConfigError naming the key only", value, err)
 	}
 }
 

@@ -237,6 +237,60 @@ spec:
         jsonPath: "$..http_filters[?(@.name == 'envoy.filters.http.ext_authz/securitypolicy/tetral-system/tetral-public-api')].typed_config"
         path: /validate_mutations
         value: true
+    # The edge's own answers are ErrorResponses. local_reply_config changes
+    # only answers Envoy makes itself, never a service's; the first mapper
+    # whose filter matches is applied. Auth's Check never denies with 503, so
+    # a 503 is the edge's. Every other answer of Check (flag UAEX) is kept as
+    # Auth wrote it. Any other 400 is a request Envoy refused before it had a
+    # request ID; a caller's own X-Request-Id is still on it then, so the
+    # edge makes the ID.
+    - type: type.googleapis.com/envoy.config.listener.v3.Listener
+      name: tetral-system/tetral-public-edge/api-https
+      operation:
+        op: add
+        jsonPath: "$..filters[?(@.name == 'envoy.filters.network.http_connection_manager')].typed_config"
+        path: /local_reply_config
+        value:
+          mappers:
+            - filter:
+                status_code_filter:
+                  comparison:
+                    op: EQ
+                    value:
+                      default_value: 503
+                      runtime_key: tetral.edge.unreachable_status
+              headers_to_add:
+                - header:
+                    key: request-id
+                    value: "%REQ(X-REQUEST-ID)%"
+              body_format_override:
+                json_format:
+                  type: error
+                  error:
+                    type: api_error
+                    message: "a service behind the edge could not be reached"
+                  request_id: "%REQ(X-REQUEST-ID)%"
+            - filter:
+                response_flag_filter:
+                  flags: [UAEX]
+            - filter:
+                status_code_filter:
+                  comparison:
+                    op: EQ
+                    value:
+                      default_value: 400
+                      runtime_key: tetral.edge.refused_status
+              headers_to_add:
+                - header:
+                    key: request-id
+                    value: "edge-%CONNECTION_ID%-%START_TIME(%s%6f)%"
+              body_format_override:
+                json_format:
+                  type: error
+                  error:
+                    type: invalid_request_error
+                    message: "the request or its path is not valid"
+                  request_id: "edge-%CONNECTION_ID%-%START_TIME(%s%6f)%"
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy

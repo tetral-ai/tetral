@@ -2,13 +2,17 @@ package testinfra
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -20,11 +24,14 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 	tests := []struct {
 		name    string
 		profile Profile
+		shards  int
 		pkg     string
 		timeout string
 	}{
 		{name: "full integration", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
 		{name: "affected integration", profile: ProfileAffected, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
+		{name: "integration slice of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=15m"},
+		{name: "other package of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
 		{name: "unrelated package", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
 		{name: "integration subpackage", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration/static", timeout: "-timeout=20m"},
 		{name: "fast integration", profile: ProfileFast, pkg: "github.com/tetral-ai/tetral/integration"},
@@ -36,14 +43,18 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 			if test.timeout != "" {
 				want = append(want, "-race", test.timeout)
 			}
-			serial, err := commandsForSelection(Plan{Profile: test.profile}, selection, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+			plan := Plan{Profile: test.profile}
+			if test.shards > 0 {
+				plan.GoSelection = &GoShardIdentity{ShardCount: test.shards}
+			}
+			serial, err := commandsForSelection(plan, selection, t.TempDir(), t.TempDir(), DependencyAuditChanged)
 			if err != nil || len(serial) != 1 {
 				t.Fatalf("serial commands = %v/%v; want one command", serial, err)
 			}
 			if !slices.Equal(serial[0].Arguments, append(slices.Clone(want), test.pkg)) {
 				t.Fatalf("serial command = %v; want %v", serial[0].Arguments, append(slices.Clone(want), test.pkg))
 			}
-			worker, err := executeGoSelections(context.Background(), test.profile, []Selection{selection}, RunOptions{
+			worker, err := executeGoSelections(context.Background(), plan, []Selection{selection}, RunOptions{
 				Root: t.TempDir(), OutputDir: t.TempDir(), MaxWorkers: 1,
 			}, &dependencyManager{})
 			if err == nil || len(worker) != 1 || worker[0].Status != "apparatus-failed" {
@@ -67,27 +78,6 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 			t.Fatalf("serial multi-package command = %v; want %v", commands[0].Arguments, want)
 		}
 	})
-}
-
-func TestCLISelectionBuildsThenTestsTheCargoWorkspace(t *testing.T) {
-	outputDir := t.TempDir()
-	commands, err := commandsForSelection(Plan{Profile: ProfileAffected}, Selection{Group: "cli"}, t.TempDir(), outputDir, DependencyAuditChanged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := [][]string{{"cargo", "build", "--locked"}, {"cargo", "test", "--locked"}}
-	wantEnvironment := [][]string{nil, {"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}}
-	if len(commands) != len(want) {
-		t.Fatalf("cli commands = %v; want %v", commands, want)
-	}
-	for index, command := range commands {
-		if !slices.Equal(command.Arguments, want[index]) || command.WorkingDir != "cli" {
-			t.Fatalf("cli command %d = %v in %q; want %v in cli", index, command.Arguments, command.WorkingDir, want[index])
-		}
-		if !slices.Equal(command.Environment, wantEnvironment[index]) {
-			t.Errorf("cli command %d environment = %v; want %v", index, command.Environment, wantEnvironment[index])
-		}
-	}
 }
 
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
@@ -373,6 +363,109 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Whatever kind of step the run's limit or a signal ends, its failure is what
+// ended it, not the result file the killed command never wrote.
+func TestAStepEndedByTheRunSaysWhatEndedIt(t *testing.T) {
+	limit := errors.New("stopped by the run's limit of 200ms")
+	ends := []struct {
+		name string
+		end  func(t *testing.T) (context.Context, context.CancelFunc)
+		want string
+	}{
+		{name: "a signal", end: func(t *testing.T) (context.Context, context.CancelFunc) {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			timer := time.AfterFunc(200*time.Millisecond, func() {
+				if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+					t.Error(err)
+				}
+			})
+			return ctx, func() { timer.Stop(); stop() }
+		}, want: "interrupt signal received"},
+		{name: "the run's limit", end: func(*testing.T) (context.Context, context.CancelFunc) {
+			return context.WithTimeoutCause(context.Background(), 200*time.Millisecond, limit)
+		}, want: limit.Error()},
+	}
+	// The kinds of step the runner runs: a command judged by its exit, a Go
+	// suite judged by its JSON events, a Bun suite judged by its JUnit file,
+	// and the start of the run's dependencies.
+	steps := []struct {
+		name string
+		run  func(ctx context.Context, t *testing.T) (string, error)
+	}{
+		{name: "command", run: func(ctx context.Context, t *testing.T) (string, error) {
+			return endedStep(ctx, t, commandSpec{Arguments: []string{"sleep", "30"}})
+		}},
+		{name: "Go suite", run: func(ctx context.Context, t *testing.T) (string, error) {
+			return endedStep(ctx, t, commandSpec{Arguments: []string{"sleep", "30"}, Artifact: "go.jsonl", Kind: "go-json", RejectSkip: true, ExpectedPackages: []string{"example.com/ended"}})
+		}},
+		{name: "Bun suite", run: func(ctx context.Context, t *testing.T) (string, error) {
+			return endedStep(ctx, t, commandSpec{Arguments: []string{"sleep", "30"}, Artifact: "gateway-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: []string{"packages/ended.test.ts"}})
+		}},
+		{name: "dependency start", run: func(ctx context.Context, t *testing.T) (string, error) {
+			_, err := startDependenciesWith(ctx, []string{"nats"}, os.Environ(), dependencyStarters{nats: func(ctx context.Context, _ *dependencyManager) error {
+				<-ctx.Done()
+				return ctx.Err()
+			}})
+			if err == nil {
+				return "", nil
+			}
+			return err.Error(), err
+		}},
+		{name: "planning", run: func(ctx context.Context, t *testing.T) (string, error) {
+			// A go list that stalls, as on a module download with no network.
+			stub := t.TempDir()
+			if err := os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil { //nolint:gosec // The stub must be executable.
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+			root, err := filepath.Abs(testRepositoryRoot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A listing an earlier test kept would spare the plan its go list.
+			goPackageListings.Lock()
+			delete(goPackageListings.byRoot, root)
+			goPackageListings.Unlock()
+			started := time.Now()
+			_, err = BuildPlan(ctx, root, ProfileFast, "")
+			if err == nil {
+				t.Fatal("planning with a stalled go list succeeded")
+			}
+			output := t.TempDir()
+			result, err := PlanFailed(ctx, ProfileFast, RunOptions{Root: root, OutputDir: output}, started, err)
+			var written Result
+			if body, readErr := os.ReadFile(filepath.Join(output, "result.json")); readErr != nil || json.Unmarshal(body, &written) != nil || !reflect.DeepEqual(written.Steps, result.Steps) {
+				t.Errorf("result.json does not hold the stopped plan step: %v", readErr)
+			}
+			if result.Status != "fail" {
+				t.Errorf("result status = %s; want fail", result.Status)
+			}
+			return result.Steps[0].FirstFailure, err
+		}},
+	}
+	for _, end := range ends {
+		for _, step := range steps {
+			t.Run(end.name+"/"+step.name, func(t *testing.T) {
+				ctx, cancel := end.end(t)
+				defer cancel()
+				started := time.Now()
+				firstFailure, err := step.run(ctx, t)
+				if elapsed := time.Since(started); elapsed > 10*time.Second || err == nil || !strings.Contains(firstFailure, end.want) || !strings.Contains(err.Error(), end.want) {
+					t.Fatalf("after %s: first failure %q, error %v; want both to name %q", elapsed, firstFailure, err, end.want)
+				}
+			})
+		}
+	}
+}
+
+func endedStep(ctx context.Context, t *testing.T, spec commandSpec) (string, error) {
+	step, err := runStep(ctx, t.TempDir(), "gateway", spec, &dependencyManager{environment: os.Environ()}, t.TempDir())
+	if step.Status != "fail" {
+		t.Errorf("step status = %s; want fail", step.Status)
+	}
+	return step.FirstFailure, err
 }
 
 func TestEvidenceRecordsStepIntervalAndRunnerHost(t *testing.T) {

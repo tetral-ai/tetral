@@ -263,6 +263,7 @@ impl Owner {
                 reply,
             },
         );
+        state::seams::count("drive.final_upload");
         if request.session_close {
             self.release_sync_waits(&request.drives).await;
         }

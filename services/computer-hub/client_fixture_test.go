@@ -97,11 +97,14 @@ func (c *manualClock) waitTimers(t *testing.T, n int) {
 // carry a minted connection key principal, as the edge forwards them.
 func (f *hubFixture) cli(instanceID, credentialID string) *enginetest.CLI {
 	principal := auth.ConnectionKeyPrincipal(workspace.Workspace{ID: f.ws}, instanceID, credentialID)
-	return &enginetest.CLI{BaseURL: f.url, InstanceID: instanceID, CredentialID: credentialID, Authorize: func(r *http.Request) error {
+	cli := enginetest.NewCLI(f.t)
+	cli.BaseURL, cli.InstanceID, cli.CredentialID = f.url, instanceID, credentialID
+	cli.Authorize = func(r *http.Request) error {
 		token, err := f.signer.Mint(principal, r.Method, r.URL.Path, "req_hub_cli", time.Minute)
 		r.Header.Set("X-Tetral-Internal-Principal", token)
 		return err
-	}}
+	}
+	return cli
 }
 
 // userInstance creates a user instance whose first credential expires at

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/tetral-ai/tetral/api"
 )
 
 type GateExpectation struct {
@@ -22,8 +24,10 @@ type GateExpectation struct {
 	Workflow          string
 	RunID             string
 	RunAttempt        string
-	Producers         []string
-	ProducerJobs      map[string]string
+	// Producers is empty when the deciding job selected none of Engine's
+	// jobs; no result may exist then.
+	Producers    []string
+	ProducerJobs map[string]string
 	// GoShards lists the producers whose results are the Go selection's
 	// shards; their results must partition that selection exactly once.
 	GoShards []string
@@ -51,11 +55,17 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 	}
 	currentAttempt, _ := strconv.ParseUint(expectation.RunAttempt, 10, 32)
 	type attemptedResult struct {
-		attempt uint64
-		result  Result
+		attempt   uint64
+		result    Result
+		directory string
 	}
 	results := map[string]attemptedResult{}
 	seenAttempts := map[string]map[uint64]bool{}
+	// A run whose jobs were all skipped uploaded nothing, and the download
+	// then creates no directory.
+	if _, err := os.Stat(root); os.IsNotExist(err) && len(expectation.Producers) == 0 {
+		return GateVerdict{Status: "pass"}, nil
+	}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -92,7 +102,7 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 		}
 		seenAttempts[producer][attempt] = true
 		if existing, exists := results[producer]; !exists || attempt > existing.attempt {
-			results[producer] = attemptedResult{attempt: attempt, result: result}
+			results[producer] = attemptedResult{attempt: attempt, result: result, directory: filepath.Dir(path)}
 		}
 		return nil
 	})
@@ -100,6 +110,9 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 		return GateVerdict{Status: "fail", Failures: []string{err.Error()}}, err
 	}
 	verdict := GateVerdict{Status: "pass"}
+	if len(expectation.Producers) == 0 {
+		return verdict, nil
+	}
 	for _, producer := range expectation.Producers {
 		attempted, exists := results[producer]
 		if !exists {
@@ -112,13 +125,20 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 		}
 	}
 	shards := map[string]Result{}
+	var shardDirectories []string
 	for _, producer := range expectation.GoShards {
 		if attempted, exists := results[producer]; exists {
 			shards[producer] = attempted.result
+			shardDirectories = append(shardDirectories, attempted.directory)
 		}
 	}
 	if len(shards) == len(expectation.GoShards) {
 		verdict.Failures = append(verdict.Failures, goShardPartitionFailures(expectation.GoShards, shards)...)
+	}
+	// What the whole Go selection left unchecked is known only when every
+	// shard ran to the end.
+	if len(verdict.Failures) == 0 {
+		verdict.Failures = append(verdict.Failures, apiCoverageFailures(shardDirectories)...)
 	}
 	sort.Strings(verdict.Producers)
 	if len(verdict.Failures) > 0 {
@@ -145,10 +165,7 @@ func validateGateExpectation(value GateExpectation) error {
 	if attempt, err := strconv.ParseUint(value.RunAttempt, 10, 32); err != nil || attempt == 0 {
 		return fmt.Errorf("gate run attempt is malformed")
 	}
-	if len(value.Producers) == 0 {
-		return fmt.Errorf("gate has no expected producers")
-	}
-	if len(value.GoShards) == 0 {
+	if len(value.Producers) > 0 && len(value.GoShards) == 0 {
 		return fmt.Errorf("gate has no Go shards")
 	}
 	seen := map[string]bool{}
@@ -288,4 +305,36 @@ func hasDeclaredNotApplicable(exclusions []Exclusion) bool {
 		}
 	}
 	return false
+}
+
+// apiCoverageFailures lists what Engine's OpenAPI file declares and the Go
+// tests of the shard results in directories did not check (api.Unreached).
+func apiCoverageFailures(directories []string) []string {
+	var checked []api.Checked
+	for _, directory := range directories {
+		// Gate artifacts are downloaded beneath a runner-owned directory.
+		//nolint:gosec
+		body, err := os.ReadFile(filepath.Join(directory, apiCoverageFile))
+		if err != nil && !os.IsNotExist(err) {
+			return []string{"api coverage: " + err.Error()}
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			var entry api.Checked
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				return []string{"api coverage: malformed record in " + filepath.Base(directory)}
+			}
+			checked = append(checked, entry)
+		}
+	}
+	lines, err := api.Unreached(checked)
+	if err != nil {
+		return []string{"api coverage: " + err.Error()}
+	}
+	for index, line := range lines {
+		lines[index] = "api coverage: " + line
+	}
+	return lines
 }

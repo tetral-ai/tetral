@@ -139,9 +139,11 @@ func TestDeregisteringACloudInstanceReplacesItsComputer(t *testing.T) {
 			t.Fatalf("errors = %v; want none", errs)
 		}
 	}
-	row := f.row(`SELECT payload_json::jsonb->'row'->>'computerId' AS computer FROM session_machine_messages WHERE session_id=$1 AND change='replaced'`, s.id)
-	if row["computer"] != computerID {
-		t.Fatalf("replaced machine message = %v", row)
+	row := f.row(`SELECT m.payload_json::jsonb->'row'->>'computerId' AS computer, m.xmin::text=e.xmin::text AS together
+		FROM session_machine_messages m JOIN session_events e ON e.session_id=m.session_id AND e.type='session.computer_replaced'
+		WHERE m.session_id=$1 AND m.change='replaced'`, s.id)
+	if row["computer"] != computerID || row["together"] != true {
+		t.Fatalf("replaced machine message = %v; want the computer's, written with its notice", row)
 	}
 	f.ownerTx(func(tx *dbconnect.Tx) error {
 		request, _, err := computer.EnsureRequest(f.ctx, tx, f.ws, s.id, computerID)

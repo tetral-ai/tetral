@@ -158,6 +158,7 @@ func TestWriteRequestEndReturnsOnlyDirectDurableFacts(t *testing.T) {
 		first.GetCommitted().GetOrdinary().GetSealedMessageSequence() != message.GetCommitted().GetAssignedMessageSequence() {
 		t.Fatalf("committed request end = %#v", first)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, "span.model_request_start", "agent.message", "span.model_request_end")
 	second, err := store.WriteRequestEnd(context.Background(), request)
 	if err != nil {
 		t.Fatalf("duplicate WriteRequestEnd: %v", err)
@@ -233,6 +234,7 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 	if err != nil || ended.GetCommitted().GetRescheduled() == nil {
 		t.Fatalf("write rescheduled request end: response=%#v err=%v", ended, err)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, "session.status_rescheduled")
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("load rescheduled request context: %v", err)

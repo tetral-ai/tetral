@@ -213,7 +213,7 @@ func TestStreamWritesWaitForSlowReadersButNotForStoppedOnes(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.Header.Set("X-Tetral-Internal-Principal", token)
-		response, err := http.DefaultClient.Do(request)
+		response, err := f.http.Do(request)
 		if err != nil {
 			t.Fatalf("the revocation did not commit within 3 seconds of a write in progress: %v", err)
 		}

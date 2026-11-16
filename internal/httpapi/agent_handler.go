@@ -132,7 +132,7 @@ func (h *AgentHandler) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *AgentHandler) getAgent(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +162,7 @@ func (h *AgentHandler) getAgent(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "agent", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *AgentHandler) listAgents(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func (h *AgentHandler) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 // updateAgent decodes a flat patch body into agent.AgentPatch
@@ -251,7 +251,7 @@ func (h *AgentHandler) updateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *AgentHandler) archiveAgent(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +269,7 @@ func (h *AgentHandler) archiveAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *AgentHandler) listAgentVersions(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +291,7 @@ func (h *AgentHandler) listAgentVersions(w http.ResponseWriter, r *http.Request)
 	if !authorizeReadResource(w, r, ws, "agent", chi.URLParam(r, "agent_id")) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func parseAgentGetVersion(r *http.Request) (int, bool, error) {

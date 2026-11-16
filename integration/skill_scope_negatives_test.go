@@ -10,7 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/httpapi"
 )
 
-// TestPublicSkillContentRouteIsSolePackageDownloadSurface pins the one SDK download route.
+// TestPublicSkillContentRouteIsSolePackageDownloadSurface pins the one download route.
 func TestPublicSkillContentRouteIsSolePackageDownloadSurface(t *testing.T) {
 	allowed := map[string]struct{}{
 		"POST /v1/skills":                                      {},

@@ -3,10 +3,6 @@
 // Job Runner and cross-service integration tests. Helpers write synthetic rows
 // through the caller's database handle and fail the test on error; this
 // package is imported only by tests.
-//
-// Fixtures that add session_events rows stay in each test package's _test.go
-// files, because the repository checks every non-test source that adds
-// session_events rows as a public event producer that must stamp processed_at.
 package sessionfixture
 
 import (
@@ -285,7 +281,7 @@ func SeedBridgeAPISession(t testing.TB, db *sql.DB, workspaceID string, sessionI
 	}{
 		{`INSERT INTO workspaces (id, type, name, created_at) VALUES ($1, 'workspace', $1, $2) ON CONFLICT (id) DO NOTHING`, []any{workspaceID, now}},
 		{`INSERT INTO agents (workspace_id, id, name, version, created_at, updated_at) VALUES ($1, $2, $2, 1, $3, $3)`, []any{workspaceID, agentID, now}},
-		{`INSERT INTO agent_versions (workspace_id, id, agent_id, version, config_json, config_hash, created_at) VALUES ($1, $2, $3, 1, '{"tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', $4, $5)`, []any{workspaceID, agentVersionID, agentID, "hash_" + sessionID, now}},
+		{`INSERT INTO agent_versions (workspace_id, id, agent_id, version, config_json, config_hash, created_at) VALUES ($1, $2, $3, 1, '{"name":"agent","model":"openai/gpt-5.5","tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', $4, $5)`, []any{workspaceID, agentVersionID, agentID, "hash_" + sessionID, now}},
 		{`INSERT INTO environments (workspace_id, id, name, config_json, created_at, updated_at) VALUES ($1, $2, $2, '{}', $3, $3)`, []any{workspaceID, environmentID, now}},
 		{`INSERT INTO sessions (workspace_id, id, main_thread_id, type, status, lifecycle_state, agent_id, agent_version, environment_id, installed_tools_json, created_at, updated_at) VALUES ($1, $2, $3, 'session', 'idle', 'active', $4, 1, $5, '{"tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', $6, $6)`, []any{workspaceID, sessionID, threadID, agentID, environmentID, now}},
 		{`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at) VALUES ($1, $2, $3, 'main', 'public', 'idle', $4, $4, $4)`, []any{workspaceID, threadID, sessionID, now}},
@@ -514,6 +510,28 @@ func NextBridgeAPIEventSequenceForTest(t testing.TB, db *sql.DB, sessionID strin
 		t.Fatalf("allocate event fixture sequence: %v", err)
 	}
 	return sequence
+}
+
+// RequireEventsProcessedForTest fails unless the Session holds events of each
+// type and every one of them is processed (processed_at set) when processed
+// is true, or none is when it is false: a producer stamps an event processed
+// as it writes it, except an admitted input, which stays unprocessed until
+// Runtime commits it.
+func RequireEventsProcessedForTest(t testing.TB, db *sql.DB, sessionID string, processed bool, eventTypes ...string) {
+	t.Helper()
+	for _, eventType := range eventTypes {
+		var written, stamped int
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT count(*), count(processed_at) FROM session_events
+			  WHERE workspace_id = 'default' AND session_id = $1 AND type = $2`,
+			sessionID, eventType,
+		).Scan(&written, &stamped); err != nil {
+			t.Fatalf("read %s processed_at: %v", eventType, err)
+		}
+		if want := map[bool]int{true: written, false: 0}[processed]; written == 0 || stamped != want {
+			t.Fatalf("%s events of Session %s: %d written, %d processed; want at least one, processed %t", eventType, sessionID, written, stamped, processed)
+		}
+	}
 }
 
 // SeedBridgeAPIStreamChange inserts a stream change for eventID, points the

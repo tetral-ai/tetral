@@ -9,6 +9,8 @@ on:
       - 'cli/Cargo.toml'
       - 'cli/Cargo.lock'
       - 'cli/deny.toml'
+      - 'cli/reference/go.mod'
+      - 'cli/reference/go.sum'
       - '.github/workflows/cli-dependency-check.yml'
   schedule:
     - cron: '41 6 * * *'
@@ -41,3 +43,25 @@ jobs:
       - name: Check advisories, licences and sources
         working-directory: cli
         run: cargo deny check advisories licenses sources
+
+  # The reference control server is a Go module of its own, which no scan of
+  # Engine's module reads.
+  govulncheck:
+    name: govulncheck (cli/reference)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Scan the module and the symbols it reaches
+        working-directory: cli/reference
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

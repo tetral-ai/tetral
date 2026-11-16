@@ -9,7 +9,7 @@ import (
 )
 
 func TestSelectPlanReconcilesGoShardsExactlyOnce(t *testing.T) {
-	selections, exclusions, err := fullGoSelections(testRepositoryRoot(t), "exactly-once shard contract")
+	selections, exclusions, err := fullGoSelections(t.Context(), testRepositoryRoot(t), "exactly-once shard contract")
 	if err != nil {
 		t.Fatal(err)
 	}

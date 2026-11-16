@@ -71,6 +71,8 @@ type issuedInstruction struct {
 	// connection only once the prepare is issued, so a queued prepare grants
 	// no Git ticket.
 	prepares *binding
+	// drives is the drive set a session.drives carries.
+	drives []wire.DriveBinding
 }
 
 // binding is a binding that a session.prepare issued on a connection names.
@@ -80,6 +82,13 @@ type binding struct {
 	// cloudWithRepositories is set for a cloud computer with repositories,
 	// the only preparation that may fetch a git ticket.
 	cloudWithRepositories bool
+	// prepared and closed are set once the binding's prepared and closed
+	// reports are stored.
+	prepared, closed bool
+	// sets are the drive sets in force, oldest first: the one last sent, and
+	// before it those that a session.drives without a stored applied report
+	// replaced.
+	sets []driveSet
 }
 
 // instructionSpec is a Session instruction a control asks for.
@@ -91,20 +100,31 @@ type instructionSpec struct {
 	// Extra holds envelope members the instruction carries besides its
 	// own, such as an unknown one that makes its metadata too large.
 	Extra map[string]json.RawMessage `json:"extra"`
+	// OutsideContract marks an instruction that a test makes invalid on
+	// purpose; any other instruction must pass package wire's decoder.
+	OutsideContract bool `json:"outside_contract"`
 }
 
+// sessionInstructionTypes are the Session instructions a control issues.
+var sessionInstructionTypes = []string{"session.prepare", "session.close", "session.drives"}
+
 // issue issues a Session instruction on conn. The payload is sent as the
-// compact JSON of what is given, so a test can issue one that fails its
-// schema; its identities are read only to accept the reports that answer
-// it. Unless bypass is set the instruction is queued while the connection's
-// ready is not accepted, and beyond the staging limit until the first
-// Session report is stored.
+// compact JSON of what is given and must pass package wire's decoder for its
+// type, unless the spec marks it as outside the contract; its identities and
+// drives are read to accept the reports that answer it and to authorize the
+// binding's drive transfer. Unless bypass is set the instruction is queued
+// while the connection's ready is not accepted, and beyond the staging limit
+// until the first Session report is stored.
 func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool) (*issuedInstruction, error) {
-	if spec.Type != "session.prepare" && spec.Type != "session.close" && !slices.Contains(toolInstructionTypes, spec.Type) {
+	if !slices.Contains(sessionInstructionTypes, spec.Type) && !slices.Contains(toolInstructionTypes, spec.Type) {
 		return nil, errUnsupported(spec.Type)
 	}
-	var payload bytes.Buffer
-	if err := json.Compact(&payload, spec.Payload); err != nil {
+	messageID := spec.MessageID
+	if messageID == "" {
+		messageID = server.newID("msg")
+	}
+	encoded, payload, err := instructionEnvelope(conn.id, messageID, spec)
+	if err != nil {
 		return nil, err
 	}
 	var fields struct {
@@ -116,28 +136,11 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 		CreateCwd      any   `json:"create_cwd"`
 		Repositories   []any `json:"repositories"`
 	}
-	_ = json.Unmarshal(payload.Bytes(), &fields)
-	messageID := spec.MessageID
-	if messageID == "" {
-		messageID = server.newID("msg")
+	_ = json.Unmarshal(payload, &fields)
+	var drives struct {
+		Drives []wire.DriveBinding `json:"drives"`
 	}
-	encoded, err := marshalAsGiven(envelope{
-		ProtocolVersion: wire.ProtocolVersion, MessageID: messageID, ConnectionID: conn.id,
-		Type: spec.Type, Payload: payload.Bytes(), Traceparent: spec.Traceparent,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(spec.Extra) > 0 {
-		var members map[string]json.RawMessage
-		_ = json.Unmarshal(encoded, &members)
-		for name, value := range spec.Extra {
-			members[name] = value
-		}
-		if encoded, err = marshalAsGiven(members); err != nil {
-			return nil, err
-		}
-	}
+	_ = json.Unmarshal(payload, &drives)
 	sessionID, _ := fields.SessionID.(string)
 	bindingID, _ := fields.BindingID.(string)
 	toolUseEventID, _ := fields.ToolUseEventID.(string)
@@ -149,13 +152,14 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	}
 	instruction := &issuedInstruction{
 		messageID: messageID, kind: spec.Type, sessionID: sessionID, bindingID: bindingID,
-		toolUseEventID: toolUseEventID, taskID: taskID, tool: tool, envelope: encoded,
+		toolUseEventID: toolUseEventID, taskID: taskID, tool: tool, envelope: encoded, drives: drives.Drives,
 	}
 	if spec.Type == "session.prepare" {
 		createCwd, _ := fields.CreateCwd.(bool)
 		instruction.prepares = &binding{
 			sessionID: sessionID, prepareMessageID: messageID,
 			cloudWithRepositories: createCwd && len(fields.Repositories) > 0,
+			sets:                  []driveSet{{messageID: messageID, drives: drives.Drives}},
 		}
 	}
 	held := !conn.readyAccepted || (!conn.firstReportStored && conn.sessionIssued >= StagingLimit)
@@ -165,6 +169,39 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	}
 	server.dispatch(conn, instruction)
 	return instruction, nil
+}
+
+// instructionEnvelope is the event that carries spec on a connection, and its
+// payload as compact JSON. Unless the spec marks it as outside the contract,
+// the event must pass package wire's decoder.
+func instructionEnvelope(connectionID, messageID string, spec instructionSpec) (encoded, payload []byte, err error) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, spec.Payload); err != nil {
+		return nil, nil, err
+	}
+	encoded, err = marshalAsGiven(envelope{
+		ProtocolVersion: wire.ProtocolVersion, MessageID: messageID, ConnectionID: connectionID,
+		Type: spec.Type, Payload: compact.Bytes(), Traceparent: spec.Traceparent,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(spec.Extra) > 0 {
+		var members map[string]json.RawMessage
+		_ = json.Unmarshal(encoded, &members)
+		for name, value := range spec.Extra {
+			members[name] = value
+		}
+		if encoded, err = marshalAsGiven(members); err != nil {
+			return nil, nil, err
+		}
+	}
+	if !spec.OutsideContract {
+		if _, err := wire.Decode[wire.Downstream](encoded); err != nil {
+			return nil, nil, err
+		}
+	}
+	return encoded, compact.Bytes(), nil
 }
 
 // marshalAsGiven is json.Marshal without its escaping of `<`, `>` and `&`,
@@ -196,6 +233,9 @@ func (server *Server) dispatch(conn *connection, instruction *issuedInstruction)
 	conn.order = append(conn.order, instruction.messageID)
 	if instruction.prepares != nil {
 		conn.bindings[instruction.bindingID] = instruction.prepares
+	}
+	if bound := conn.bindings[instruction.bindingID]; instruction.kind == "session.drives" && bound != nil {
+		bound.sets = append(bound.sets, driveSet{messageID: instruction.messageID, drives: instruction.drives})
 	}
 	if !conn.firstReportStored {
 		conn.sessionIssued++

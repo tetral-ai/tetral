@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
@@ -46,12 +47,13 @@ import (
 )
 
 // The existing public-streaming fixture owns legal Bridge transactions and the
-// pinned SDK parser. This composition replaces only its edge and transport,
+// developer client. This composition replaces only its edge and transport,
 // retaining real role-separated services and durable stores behind Envoy.
 type translatedPublicEdge struct {
 	ctx                                  context.Context
 	lifecycle                            *edgeTLSLifecycle
 	client                               *http.Client
+	transport                            *http.Transport
 	baseURL, key, dataDirectory          string
 	objects                              blob.BlobStore
 	fixture                              *envoyGatewayTranslation
@@ -77,13 +79,13 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 	return func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventFactory func(*internalevents.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
 		t.Helper()
 		// testing.T.Context is canceled before registered cleanup runs. Keep
-		// this fixture owner alive until its later-registered SDK, listeners
+		// this fixture owner alive until its later-registered developers, listeners
 		// and credentials have explicitly joined, then cancel last.
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		edge.ctx = ctx
 		ports, releasePorts := reserveEnvoyGatewayFixturePorts(t)
-		// api.localhost is an explicit concrete API hostname. The SDK
+		// api.localhost is an explicit concrete API hostname. The developer
 		// uses normal DNS and full CA/hostname verification without URL rewriting.
 		fixture := translateProductionEnvoyGatewayHosts(t, profile, ports, "api.localhost", "git.localhost")
 		fixture.ReleasePorts = releasePorts
@@ -128,7 +130,7 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		edge.objects = objects
 		apiLog := workload.NewProcessLogger(&edge.apiRecords, "api", "test", "edge", workload.DefaultDiagnosticConfig())
 		t.Cleanup(apiLog.CloseWithBudget)
-		apiHandler := transporttest.Must(api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiDB), RawDatabase: apiDB, VaultKey: sdkIntegrationVaultKey, DataDir: data, Logger: apiLog.Logger, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_edge_public"}, BlobStore: objects, PrincipalVerifier: verifier}))
+		apiHandler := transporttest.Must(api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiDB), RawDatabase: apiDB, VaultKey: publicEdgeVaultKey, DataDir: data, Logger: apiLog.Logger, Env: publicEdgeEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_edge_public"}, BlobStore: objects, PrincipalVerifier: verifier}))
 		if owner, ok := apiHandler.(io.Closer); ok {
 			t.Cleanup(func() {
 				if err := owner.Close(); err != nil {
@@ -147,7 +149,7 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 			})
 		}
 		edge.startHTTP(ctx, t, fixture, profile, "api", "127.0.0.3:8080", guard(apiHandler, &edge.apiRequests))
-		reader := internalevents.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internalevents.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)))
+		reader := internalevents.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internalevents.WithPageTokenSecret([]byte(publicEdgeVaultKey)))
 		edge.startHTTP(ctx, t, fixture, profile, "event-stream", "127.0.0.4:8080", guard(eventFactory(reader, verifier, signer.PublicKeyBase64()), &edge.eventRequests))
 		gitDB := dbconnect.NewClientForTesting(pools.OpenWorkload(t, "git_proxy", nil))
 		publicGit := transporttest.Must(url.Parse(fmt.Sprintf("https://git.localhost:%d", ports.HTTPS)))
@@ -156,18 +158,19 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 				return *current
 			}
 			return time.Now()
-		}}, gitproxy.NewRepositoryPolicyAuthorizer(gitproxy.NewPostgreSQLRepositoryTokenResolver(gitDB, transporttest.Must(vault.NewEncryptor(sdkIntegrationVaultKey)))), gitproxy.HandlerOptions{PublicBaseURL: publicGit, Transport: edgeGitTransport{calls: &edge.gitCalls, expectedAuthorization: &edge.gitAuthorization, gate: &edge.gitGate}})
+		}}, gitproxy.NewRepositoryPolicyAuthorizer(gitproxy.NewPostgreSQLRepositoryTokenResolver(gitDB, transporttest.Must(vault.NewEncryptor(publicEdgeVaultKey)))), gitproxy.HandlerOptions{PublicBaseURL: publicGit, Transport: edgeGitTransport{calls: &edge.gitCalls, expectedAuthorization: &edge.gitAuthorization, gate: &edge.gitGate}})
 		edge.startHTTP(ctx, t, fixture, profile, "git-proxy", "127.0.0.5:8080", gitHandler)
 		startEnvoyGatewayProxy(ctx, t, fixture)
 		edgeAwaitReady(ctx, t, fixture)
 		roots := x509.NewCertPool()
 		roots.AppendCertsFromPEM(fixture.Authority.PEM)
-		edge.client = &http.Client{Transport: &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		edge.transport = &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, fmt.Sprintf("127.0.0.1:%d", ports.HTTPS))
-		}}, Timeout: 60 * time.Second}
-		t.Cleanup(edge.client.CloseIdleConnections)
+		}}
+		edge.client = publicClient(t, &http.Client{Transport: edge.transport, Timeout: 60 * time.Second})
+		t.Cleanup(edge.transport.CloseIdleConnections)
 		edge.baseURL = fmt.Sprintf("https://api.localhost:%d", ports.HTTPS)
-		request := transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/api_keys", bytes.NewBufferString(`{"name":"actual Envoy SDK"}`)))
+		request := transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/api_keys", bytes.NewBufferString(`{"name":"actual Envoy developer"}`)))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-Api-Key", bootstrapKey)
 		response, err := edge.client.Do(request)
@@ -246,7 +249,7 @@ func TestPostgreSQLEnvoyGatewayPublicParity(t *testing.T) {
 				f.publish(t, f.frame(request, "request_open", "", "", 0, ""), f.frame(request, "event_start", message, "agent.message", 0, ""), f.frame(request, "event_delta", message, "agent.message", 1, "before EOF "))
 				preview := f.waitEvent(t, "preview", "event_delta", 1)
 				if preview.Ended || publicPreviewText(preview, message) != "before EOF " {
-					t.Fatal("translated edge aggregated SDK preview until stream EOF")
+					t.Fatal("translated edge aggregated the preview until stream EOF")
 				}
 				historicalEnd := f.end(t, request)
 				var originalMessage, originalEnd map[string]any
@@ -265,16 +268,16 @@ func TestPostgreSQLEnvoyGatewayPublicParity(t *testing.T) {
 					}
 				}
 				if originalMessage == nil || originalEnd == nil {
-					t.Fatal("original SDK stream omitted the committed message or exact End")
+					t.Fatal("original stream omitted the committed message or exact End")
 				}
 				if edge.eventRequests.Load() != 3 || edge.apiRequests.Load() == 0 {
-					t.Fatal("actual SDK streams and CRUD did not reach their owning handlers")
+					t.Fatal("the developer's streams and CRUD did not reach their owning handlers")
 				}
 				// A fresh stream starts at the current high-water. Recover durable
-				// history through the SDK list API without replaying it into SSE.
-				closed := decodePublicSnapshot(t, f.client.control(t, "close_viewer", map[string]any{"viewer": "preview"}))
-				if !closed.Ended || closed.Error != nil {
-					t.Fatal("SDK stream cancellation failed to join")
+				// history through the list API without replaying it into SSE.
+				closed := f.client.closeViewer(t, "preview")
+				if !closed.Ended {
+					t.Fatal("stream cancellation failed to join")
 				}
 				f.open(t, "reconnected", []string{"agent.message"}, "")
 				foundMessage, foundEnd, complete := false, false, false
@@ -294,19 +297,19 @@ func TestPostgreSQLEnvoyGatewayPublicParity(t *testing.T) {
 						break
 					}
 					if *history.Next == "" || *history.Next == page {
-						t.Fatal("SDK durable-history cursor did not advance")
+						t.Fatal("durable-history cursor did not advance")
 					}
 					page = *history.Next
 				}
 				if !complete || !foundMessage || !foundEnd {
-					t.Fatal("real SDK list did not recover the exact original message and End content")
+					t.Fatal("the developer's list did not recover the exact original message and End content")
 				}
 				edge.assertChildVisibility(t, f, message, historicalEnd)
 				edge.assertStreamingUpload(t, f)
 				edge.assertCancelledUpload(t, f)
 				edge.assertGitBusiness(t, f)
 				edge.assertCachedKeycloak(t, f)
-				t.Logf("envoy_gateway_business_assertion=actual_sdk_services profile=%s passed=true", profile)
+				t.Logf("envoy_gateway_business_assertion=actual_services profile=%s passed=true", profile)
 			})
 		}
 	})
@@ -355,7 +358,7 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 		producerJoined <- err
 		close(producerJoined)
 	}()
-	request := transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader))
+	request := enginetest.StreamedRequest(transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader)))
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	request.Header.Set("X-Api-Key", edge.key)
 	responses := make(chan *http.Response, 1)
@@ -498,7 +501,7 @@ func (edge *translatedPublicEdge) assertOverLimitUpload(t *testing.T, size int64
 		joined <- err
 		close(joined)
 	}()
-	request := transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader))
+	request := enginetest.StreamedRequest(transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader)))
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	request.Header.Set("X-Api-Key", edge.key)
 	response, err := edge.client.Do(request)
@@ -561,7 +564,7 @@ func (edge *translatedPublicEdge) assertGitBusiness(t *testing.T, f *publicProje
 	// Git resolver. Its injected external credential is distinct from the public
 	// caller's forged Authorization, which the edge must remove.
 	credential := "fixture-mounted-git-credential"
-	encrypted := transporttest.Must(transporttest.Must(vault.NewEncryptor(sdkIntegrationVaultKey)).Encrypt([]byte(credential)))
+	encrypted := transporttest.Must(transporttest.Must(vault.NewEncryptor(publicEdgeVaultKey)).Encrypt([]byte(credential)))
 	resourceID := id.New("rsrc_")
 	transaction := transporttest.Must(f.db.BeginTx(edge.callContext(t), nil))
 	defer func() { _ = transaction.Rollback() }()
@@ -638,7 +641,7 @@ func (edge *translatedPublicEdge) assertChildVisibility(t *testing.T, f *publicP
 	request := f.start(t, child, "")
 	message := f.text(t, request, "child formal text through Envoy", false)
 	// Deliberate ineligible preview input crosses the real broker; formal
-	// child admission remains a positive control through the SDK Thread URL.
+	// child admission remains a positive control through the Thread URL.
 	f.publish(t, f.frame(request, "request_open", "", "", 0, ""), f.frame(request, "event_start", message, "agent.message", 0, ""), f.frame(request, "event_delta", message, "agent.message", 1, "forbidden child preview"))
 	f.end(t, request)
 	childResult := f.waitEvent(t, "child", "span.model_request_end", 1)
@@ -655,11 +658,11 @@ func (edge *translatedPublicEdge) assertChildVisibility(t *testing.T, f *publicP
 			fenceSeen = true
 		}
 		if identity == message || identity == historicalMessage || identity == historicalEnd || publicEventType(event) == "event_start" || publicEventType(event) == "event_delta" {
-			t.Fatal("Session SDK replayed old formal/preview data or leaked child generated text")
+			t.Fatal("Session stream replayed old formal/preview data or leaked child generated text")
 		}
 	}
 	if !fenceSeen {
-		t.Fatal("reconnected SDK stream omitted the exact new primary fence End")
+		t.Fatal("reconnected stream omitted the exact new primary fence End")
 	}
 	ids := publicProjectionAllPages(t, f, "", "asc", false)
 	if publicProjectionContains(ids, message) {
@@ -689,7 +692,7 @@ func (edge *translatedPublicEdge) assertCachedKeycloak(t *testing.T, f *publicPr
 	})
 	ca := transporttest.Must(os.ReadFile(realm.CAPath))
 	issuer := transporttest.Must(url.Parse(realm.Issuer))
-	rule := auth.FederationRule{ID: "fdrl_envoy_sdk", OrganizationID: "org_envoy_sdk", Issuer: realm.Issuer, Audience: realm.Audience, JWKSURL: realm.JWKSURL, AllowedOrigins: []string{issuer.Scheme + "://" + issuer.Host}, AllowedCIDRs: realm.AllowedCIDRs, TrustedCAPEM: string(ca), Algorithm: "RS256", Enabled: true}
+	rule := auth.FederationRule{ID: "fdrl_envoy", OrganizationID: "org_envoy", Issuer: realm.Issuer, Audience: realm.Audience, JWKSURL: realm.JWKSURL, AllowedOrigins: []string{issuer.Scheme + "://" + issuer.Host}, AllowedCIDRs: realm.AllowedCIDRs, TrustedCAPEM: string(ca), Algorithm: "RS256", Enabled: true}
 	for _, actor := range []struct {
 		name, subject, kind, selector string
 		assertion                     func(context.Context) (string, error)
@@ -708,23 +711,16 @@ func (edge *translatedPublicEdge) assertCachedKeycloak(t *testing.T, f *publicPr
 			t.Fatal("write private issuer assertion")
 		}
 		before := edge.authExchanges.Load()
-		child := startOIDCSDKChild(edge.ctx, t, map[string]string{"identityID": identity, "baseURL": edge.baseURL, "caPath": filepath.Join(edge.fixture.Directory, "public-ca.crt"), "assertionPath": path, "ruleID": rule.ID, "organizationID": rule.OrganizationID, "workspaceID": "default", "serviceAccountID": actor.selector, "fixtureName": "oidc-sdk-" + actor.name})
-		store := oidcDecodeSDKResult(t, child.control(t, "store", nil))
-		created := oidcDecodeSDKResult(t, child.control(t, "create", map[string]any{"storeID": store.StoreID, "path": "/envoy.md", "content": "actual cached bearer"}))
+		developer := newOIDCDeveloper(t, edge.baseURL, path, map[string]string{"federation_rule_id": rule.ID, "organization_id": rule.OrganizationID,
+			"workspace_id": "default", "service_account_id": actor.selector}, filepath.Join(edge.fixture.Directory, "public-ca.crt"))
+		developer.exchange(t)
+		store := developer.store(t, "envoy-"+actor.name)
+		created := developer.create(t, store, "/envoy.md", "one exchanged bearer")
 		oidcAssertMemoryActor(edge.callContext(t), t, f.db, created.VersionID, actor.kind, identity, false)
 		oidcAssertWireActor(t, created.Version.CreatedBy, actor.kind, identity)
+		developer.read(t, store, created.MemoryID)
 		if edge.authExchanges.Load() != before+1 {
-			t.Fatal("real SDK issuer login did not perform exactly one actual exchange")
-		}
-		// Removing the source assertion makes another exchange impossible. The
-		// same persistent SDK process must admit cached bearer reads instead.
-		if os.Remove(path) != nil {
-			t.Fatal("remove private assertion after exchange")
-		}
-		cached := edge.authExchanges.Load()
-		child.control(t, "read", map[string]any{"storeID": store.StoreID, "memoryID": created.MemoryID})
-		if edge.authExchanges.Load() != cached {
-			t.Fatal("cached SDK bearer attempted another exchange")
+			t.Fatal("the edge did not pass exactly one exchange to Auth for the developer's writes and reads")
 		}
 	}
 }
@@ -769,7 +765,7 @@ func (edge *translatedPublicEdge) assertCancelledUpload(t *testing.T, f *publicP
 		}
 		_ = writer.CloseWithError(err)
 	}()
-	request := transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader))
+	request := enginetest.StreamedRequest(transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader)))
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	request.Header.Set("X-Api-Key", edge.key)
 	go func() {

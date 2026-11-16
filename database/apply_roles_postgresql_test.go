@@ -106,6 +106,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		assertProcessRegistryPrivileges(t, databaseName, admin, declarations)
 		assertBridgeLacksRunnerPlacementAndCleanupWrites(t, databaseName, declarations.Roles["bridge"])
 		assertMCPConnectorLacksProviderCredentialReads(t, databaseName, declarations.Roles["mcp_connector"])
+		assertEventStreamOnlyReadsEvents(t, databaseName, declarations.Roles["event_stream"])
 		assertGoServingReadinessAcceptsEveryWorkloadRole(t, databaseName, roleContract, declarations)
 		for _, workload := range []string{"provider_gateway", "mcp_connector"} {
 			assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles[workload])
@@ -523,15 +524,16 @@ func assertWorkloadDenied(t *testing.T, databaseName string, credential database
 
 // assertWorkloadPrivilegeDenied requires the privilege check itself to reject
 // the statement. PostgreSQL checks table and sequence privileges before
-// constraints and RLS, so a re-added grant cannot hide behind another error.
+// constraints and RLS, and answers a row that RLS refuses with the same
+// SQLSTATE, so the message tells a missing grant from a re-added one.
 func assertWorkloadPrivilegeDenied(t *testing.T, databaseName string, credential database.RoleCredential, statement string) {
 	t.Helper()
 	connection := openManagedRole(t, databaseName, credential)
 	defer func() { _ = connection.Close(context.Background()) }()
 	_, err := connection.Exec(context.Background(), statement)
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Fatalf("statement %q: want SQLSTATE 42501, got %v", statement, err)
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" || !strings.HasPrefix(pgErr.Message, "permission denied") {
+		t.Fatalf("statement %q: want SQLSTATE 42501 permission denied, got %v", statement, err)
 	}
 }
 
@@ -553,6 +555,23 @@ func assertBridgeLacksRunnerPlacementAndCleanupWrites(t *testing.T, databaseName
 	}
 	for _, statement := range statements {
 		assertWorkloadPrivilegeDenied(t, databaseName, bridge, statement)
+	}
+}
+
+// The event stream reads the ledger. Writing events, waking a Runtime,
+// queueing a job, reading API keys and changing the schema belong to others.
+func assertEventStreamOnlyReadsEvents(t *testing.T, databaseName string, eventStream database.RoleCredential) {
+	t.Helper()
+	for _, statement := range []string{
+		`INSERT INTO session_events DEFAULT VALUES`,
+		`UPDATE session_events SET session_id=session_id`,
+		`DELETE FROM session_events`,
+		`INSERT INTO session_runtime_inbox DEFAULT VALUES`,
+		`INSERT INTO queue_jobs DEFAULT VALUES`,
+		`SELECT 1 FROM api_keys LIMIT 1`,
+		`CREATE TABLE event_stream_table (id integer)`,
+	} {
+		assertWorkloadPrivilegeDenied(t, databaseName, eventStream, statement)
 	}
 }
 

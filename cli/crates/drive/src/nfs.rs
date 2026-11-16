@@ -12,7 +12,7 @@
 //!
 //! Each request's operation runs as a task on the App Server's runtime and
 //! is answered when it completes, so a read waiting for a download blocks
-//! no other request. A READ not completed within 3 seconds is answered
+//! no other request. A READ not completed within [`READ_WAIT`] is answered
 //! `NFS3ERR_JUKEBOX` while its download goes on, and the client's retry
 //! joins that download. Other requests retain their operation's wait and
 //! error behavior; the bounded READ retry does not apply to mutations.
@@ -65,8 +65,13 @@ const FILE_ID_MASK: u64 = (1 << FILE_ID_BITS) - 1;
 const HANDLE_BYTES: usize = 16;
 
 /// How long a READ waits for its operation, a download included, before it
-/// is answered `NFS3ERR_JUKEBOX`.
-const READ_WAIT: Duration = Duration::from_secs(3);
+/// is answered `NFS3ERR_JUKEBOX`. A Mac asks again only 4, 8, 16 and then
+/// every 30 seconds after that answer, and a download that ends between two
+/// of its requests is read only at the next one: the longer wait leaves
+/// fewer such gaps, none in a download's first 15 seconds. macOS shows its
+/// dialog of unresponsive servers for a request unanswered for about 25
+/// seconds.
+const READ_WAIT: Duration = Duration::from_secs(15);
 
 /// The NFS server of an App Server.
 #[derive(Clone)]

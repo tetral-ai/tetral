@@ -136,6 +136,7 @@ impl Tetral {
     }
 
     pub fn home(mut self, root: &Path) -> Tetral {
+        crate::machine::list_task_parent(root);
         self.command.env("TETRAL_HOME", root);
         self
     }
@@ -185,6 +186,31 @@ impl Tetral {
     /// [`OUTPUT_LIMIT`], for a run whose whole log a test reads.
     pub fn output_limit(mut self, bytes: usize) -> Self {
         self.output_limit = bytes;
+        self
+    }
+
+    /// Gives the child a soft limit of `soft` open descriptors, which it
+    /// sets and reads back before it becomes the program; the start fails
+    /// when the limit is not in effect then.
+    pub fn soft_descriptor_limit(mut self, soft: u64) -> Tetral {
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        let limited = move || {
+            let hard = getrlimit(Resource::Nofile).maximum;
+            setrlimit(
+                Resource::Nofile,
+                Rlimit {
+                    current: Some(soft),
+                    maximum: hard,
+                },
+            )?;
+            if getrlimit(Resource::Nofile).current != Some(soft) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            Ok(())
+        };
+        // SAFETY: between fork and exec the closure calls only getrlimit
+        // and setrlimit, which are async-signal-safe, and allocates nothing.
+        unsafe { self.command.pre_exec(limited) };
         self
     }
 

@@ -2,160 +2,63 @@ package static
 
 import (
 	"encoding/json"
-	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
 	"testing"
+
+	"github.com/tetral-ai/tetral/internal/sessionrpc"
+	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 )
 
-func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	goBody, err := os.ReadFile(filepath.Join(root, "internal", "sessionrpc", "bounds.go")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Go transport bounds: %v", err)
+// Each side of a channel bounds what it sends and what it accepts. The Go
+// services, the Runtime Pod and the Gateway declare those bounds apart, and a
+// message one side sends must fit what the other accepts. All are compared as
+// their code evaluates them.
+func TestTransportBoundsMatchAcrossServices(t *testing.T) {
+	pod := evaluatedBounds(t, "agent-runtime", `
+import * as pod from "./packages/runtime-pod/src/bounds.ts";
+import { MailFetchMaxEnvelopes } from "./packages/protocol/src/bounds.ts";
+console.log(JSON.stringify({
+  commandInbound: pod.MaxGrpcInboundMessageBytes, commandOutbound: pod.MaxGrpcOutboundMessageBytes,
+  attachment: pod.MaxAttachmentGrpcMessageBytes, bridge: pod.MaxBridgeDurableContextGrpcMessageBytes,
+  mailEnvelopes: MailFetchMaxEnvelopes,
+  gatewayRequest: pod.gatewayGrpcChannelOptions()["grpc.max_send_message_length"],
+  gatewayEvent: pod.gatewayGrpcChannelOptions()["grpc.max_receive_message_length"],
+}));`)
+	gateway := evaluatedBounds(t, "gateway", `
+import { grpcServerOptions } from "./packages/provider-gateway/src/bounds.ts";
+console.log(JSON.stringify({
+  gatewayRequest: grpcServerOptions()["grpc.max_receive_message_length"],
+  gatewayEvent: grpcServerOptions()["grpc.max_send_message_length"],
+}));`)
+	for name, bound := range map[string]int{
+		"commandInbound":  sessionrpc.MaxRuntimeCommandGRPCMessageBytes,
+		"commandOutbound": sessionrpc.MaxRuntimeCommandGRPCMessageBytes,
+		"attachment":      sessionrpc.MaxAttachmentGRPCMessageBytes,
+		"bridge":          sessionrpc.MaxBridgeAPIGRPCMessageBytes,
+		"mailEnvelopes":   agentruntimebridge.MailFetchMaxEnvelopes,
+		"gatewayRequest":  gateway["gatewayRequest"],
+		"gatewayEvent":    gateway["gatewayEvent"],
+	} {
+		if bound == 0 || pod[name] != bound {
+			t.Errorf("%s: the Runtime Pod uses %d and its peer %d", name, pod[name], bound)
+		}
 	}
-	tsBody, err := os.ReadFile(filepath.Join(root, "services", "agent-runtime", "packages", "runtime-pod", "src", "bounds.ts")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read TypeScript transport bounds: %v", err)
-	}
-	protocolBody, err := os.ReadFile(filepath.Join(root, "services", "agent-runtime", "packages", "protocol", "src", "bounds.ts")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read TypeScript protocol bounds: %v", err)
-	}
-	completionMailBody, err := os.ReadFile(filepath.Join(root, "services", "bridge", "completion_mail.go")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Go completion-mail bounds: %v", err)
-	}
-	bridgeMainBody, err := os.ReadFile(filepath.Join(root, "services", "bridge", "cmd", "bridge-api", "main.go")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Bridge API composition: %v", err)
-	}
-	gatewayBody, err := os.ReadFile(filepath.Join(root, "services", "gateway", "packages", "provider-gateway", "src", "bounds.ts")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Gateway transport bounds: %v", err)
-	}
-	gatewayProtocolBody, err := os.ReadFile(filepath.Join(root, "services", "gateway", "packages", "protocol", "src", "bounds.ts")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Gateway protocol bounds: %v", err)
-	}
-	webConnectorBody, err := os.ReadFile(filepath.Join(root, "services", "web-connector", "types.go")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Web connector bounds: %v", err)
-	}
-	toolRunnerBody, err := os.ReadFile(filepath.Join(root, "services", "agent-runtime", "packages", "runtime-pod", "src", "tool-runner.ts")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read Runtime Web bounds: %v", err)
-	}
+}
 
-	for _, required := range []string{
-		`MaxInboundGRPCMessageBytes\s*=\s*64\s*\*\s*1024`,
-		`MaxOutboundGRPCMessageBytes\s*=\s*64\s*\*\s*1024`,
-		`MaxRuntimeCommandGRPCMessageBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024`,
-		`MaxAttachmentGRPCMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024`,
-		`MaxBridgeAPIGRPCMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024`,
-	} {
-		if !regexp.MustCompile(required).Match(goBody) {
-			t.Fatalf("Go transport bounds missing %q", required)
-		}
-	}
-	for _, required := range []string{
-		`grpc\.MaxRecvMsgSize\(sessionrpc\.MaxBridgeAPIGRPCMessageBytes\)`,
-		`grpc\.MaxSendMsgSize\(sessionrpc\.MaxBridgeAPIGRPCMessageBytes\)`,
-	} {
-		if !regexp.MustCompile(required).Match(bridgeMainBody) {
-			t.Fatalf("Bridge API transport composition missing %q", required)
-		}
-	}
-	for _, required := range []string{
-		`export const MaxGrpcInboundMessageBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxGrpcOutboundMessageBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxAttachmentGrpcMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxBridgeDurableContextGrpcMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxGatewayRequestGrpcMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxGatewayStreamEventGrpcMessageBytes\s*=\s*MaxProviderResponseFrameBytes;`,
-	} {
-		if !regexp.MustCompile(required).Match(tsBody) {
-			t.Fatalf("TypeScript transport bounds missing %q", required)
-		}
-	}
-	if required := `export const MaxRuntimeIngressContentBytes\s*=\s*2\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(protocolBody) {
-		t.Fatalf("TypeScript protocol bounds missing %q", required)
-	}
-	for _, required := range []string{
-		`export const MailFetchMaxEnvelopes\s*=\s*4;`,
-	} {
-		if !regexp.MustCompile(required).Match(protocolBody) {
-			t.Fatalf("TypeScript completion-mail bounds missing %q", required)
-		}
-	}
-	for _, required := range []string{
-		`MailFetchMaxEnvelopes\s*=\s*4`,
-	} {
-		if !regexp.MustCompile(required).Match(completionMailBody) {
-			t.Fatalf("Go completion-mail bounds missing %q", required)
-		}
-	}
-	if required := `MaxGrpcInboundMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024`; !regexp.MustCompile(required).Match(gatewayBody) {
-		t.Fatalf("Gateway transport bounds missing %q", required)
-	}
-	if required := `export const MaxProviderContextTextJsonBytes\s*=\s*ContentLimits\.MaxProviderContextTextJsonBytes;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
-		t.Fatalf("Gateway protocol bounds missing %q", required)
-	}
-	if required := `export const MaxProviderRequestToolOutputJsonBytes\s*=\s*ContentLimits\.MaxProviderRequestToolOutputJsonBytes;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
-		t.Fatalf("Gateway protocol bounds missing %q", required)
-	}
-	// Complete events use one shared encoded-frame fuse at both transport ends.
-	// Check the owning data and reference chain; inline numeric duplication would
-	// allow the sender and receiver to drift when the shared contract changes.
-	limitsBody, err := os.ReadFile(filepath.Join(root, "services", "gateway", "packages", "protocol", "src", "content-limits.json")) //nolint:gosec // repository-local source path.
+// evaluatedBounds runs a script in a TypeScript service and decodes the
+// object of bounds it prints.
+func evaluatedBounds(t *testing.T, service string, script string) map[string]int {
+	t.Helper()
+	command := exec.Command("bun", "-e", script) //nolint:gosec // A fixed script of this test.
+	command.Dir = filepath.Join(finalArchitectureEngineRoot(t), "services", service)
+	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("read shared content limits: %v", err)
+		t.Fatalf("evaluate the bounds of %s: %v", service, err)
 	}
-	var limits map[string]int
-	if err := json.Unmarshal(limitsBody, &limits); err != nil {
-		t.Fatalf("decode shared content limits: %v", err)
+	var bounds map[string]int
+	if err := json.Unmarshal(output, &bounds); err != nil {
+		t.Fatalf("decode the bounds of %s %q: %v", service, output, err)
 	}
-	for name, expected := range map[string]int{
-		"MaxProviderResponseFrameBytes":         32 * 1024 * 1024,
-		"MaxProviderContextTextJsonBytes":       16 * 1024 * 1024,
-		"MaxProviderRequestToolOutputJsonBytes": 512 * 1024,
-	} {
-		if limits[name] != expected {
-			t.Errorf("shared %s = %d; want %d", name, limits[name], expected)
-		}
-	}
-	for _, required := range []string{
-		`import ContentLimits from "\./content-limits\.json";`,
-		`export const MaxProviderResponseFrameBytes\s*=\s*ContentLimits\.MaxProviderResponseFrameBytes;`,
-	} {
-		if !regexp.MustCompile(required).Match(gatewayProtocolBody) {
-			t.Fatalf("Gateway protocol shared bounds missing %q", required)
-		}
-	}
-	for name, body := range map[string][]byte{"Runtime": tsBody, "Gateway": gatewayBody} {
-		if required := `import\s*\{\s*MaxProviderResponseFrameBytes\s*\}\s*from "@tetral/gateway-protocol/src/bounds\.js";`; !regexp.MustCompile(required).Match(body) {
-			t.Fatalf("%s transport does not import the shared provider response fuse", name)
-		}
-	}
-	if required := `const MaxGrpcOutboundMessageBytes\s*=\s*MaxProviderResponseFrameBytes;`; !regexp.MustCompile(required).Match(gatewayBody) {
-		t.Fatalf("Gateway send fuse does not use the shared provider response bound")
-	}
-	for _, pair := range []struct {
-		goPattern string
-		tsPattern string
-	}{
-		{`maxRunWebRequestGRPCMessageBytes\s*=\s*1024\s*\*\s*1024`, `export const MaxWebRequestGrpcMessageBytes\s*=\s*1024\s*\*\s*1024;`},
-		{`maxRunWebResponseGRPCMessageBytes\s*=\s*512\s*\*\s*1024`, `export const MaxWebResponseGrpcMessageBytes\s*=\s*512\s*\*\s*1024;`},
-		{`maxOperations\s*=\s*8`, `const WEB_OPERATIONS_MAX\s*=\s*8;`},
-		{`maxSearchDomains\s*=\s*4`, `const WEB_SEARCH_DOMAINS_MAX\s*=\s*4;`},
-		{`maxRequestTextBytes\s*=\s*64\s*\*\s*1024`, `MaxTextBytes`},
-		{`maxDomainBytes\s*=\s*253`, `const WEB_DOMAIN_MAX_BYTES\s*=\s*253;`},
-	} {
-		if !regexp.MustCompile(pair.goPattern).Match(webConnectorBody) {
-			t.Fatalf("Go Web bound missing %q", pair.goPattern)
-		}
-		if !regexp.MustCompile(pair.tsPattern).Match(append(tsBody, toolRunnerBody...)) {
-			t.Fatalf("TypeScript Web bound missing %q", pair.tsPattern)
-		}
-	}
+	return bounds
 }

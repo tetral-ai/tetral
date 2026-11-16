@@ -25,6 +25,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }
 
 [dev-dependencies]
+drive = { workspace = true, features = ["test-seams"] }
 tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

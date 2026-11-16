@@ -146,7 +146,7 @@ func collectCompletedJobHealth(report *CIHealthReport, jobs []workflowJob) {
 		duration := job.CompletedAt.Sub(job.StartedAt)
 		report.JobConclusions[job.Conclusion]++
 		report.RunnerMinutes += duration.Minutes()
-		if strings.HasPrefix(job.Name, "Go Race (shard ") {
+		if strings.HasPrefix(job.Name, goRaceShardJobPrefix) {
 			report.GoShardMinutes[job.Name] = duration.Minutes()
 		}
 	}

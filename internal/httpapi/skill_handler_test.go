@@ -307,7 +307,7 @@ func TestSkillHandlerCreateSkillUsesFilesAndDisplayNameShape(t *testing.T) {
 	}
 	parts[0].name = "display_title"
 	body, contentType = buildMultipartBody(t, parts)
-	rejected := performMultipartRequest(t, router, http.MethodPost, "/v1/skills", contentType, body)
+	rejected := performMultipartRequest(t, outside(router), http.MethodPost, "/v1/skills", contentType, body)
 	message := assertSkillUploadError(t, rejected, http.StatusBadRequest, "invalid_request_error")
 	if !strings.Contains(message, "display_title") {
 		t.Fatalf("wrong rejection reason: %s", message)
@@ -341,7 +341,7 @@ func TestSkillHandlerCreateVersionShapeAndRejectsDisplayName(t *testing.T) {
 	parent := createSkillViaHTTP(t, router, "versioned-skill")
 
 	rejectedBody, rejectedType := buildMultipartBody(t, append([]uploadPart{{name: "display_name", body: []byte("Nope")}}, individualSkillParts("versioned-skill", "v2")...))
-	rejected := performMultipartRequest(t, router, http.MethodPost, "/v1/skills/"+parent.ID+"/versions", rejectedType, rejectedBody)
+	rejected := performMultipartRequest(t, outside(router), http.MethodPost, "/v1/skills/"+parent.ID+"/versions", rejectedType, rejectedBody)
 	assertSkillUploadError(t, rejected, http.StatusBadRequest, "invalid_request_error")
 
 	version := createVersionViaHTTP(t, router, parent.ID, "versioned-skill", "Second version.")
@@ -382,7 +382,7 @@ func TestSkillHandlerMultipartValidationRejectsInvalidFields(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			body, contentType := buildMultipartBody(t, tc.parts)
-			rec := performMultipartRequest(t, router, tc.method, tc.path, contentType, body)
+			rec := performMultipartRequest(t, outside(router), tc.method, tc.path, contentType, body)
 			msg := assertSkillUploadError(t, rec, http.StatusBadRequest, "invalid_request_error")
 			if strings.Contains(msg, "secret") || strings.Contains(msg, longTitle) {
 				t.Fatalf("error message echoed submitted display_name: %q", msg)
@@ -443,16 +443,16 @@ func TestSkillHandlerListQueryAndPageTokens(t *testing.T) {
 	if custom.Code != http.StatusOK {
 		t.Fatalf("source=custom status = %d (body=%q); want 200", custom.Code, custom.Body.String())
 	}
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?source=anthropic"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills?source=anthropic"), http.StatusBadRequest, "invalid_request_error")
 	if boundary := performRequest(t, router, http.MethodGet, "/v1/skills?limit=100"); boundary.Code != http.StatusOK {
 		t.Fatalf("limit=100 status = %d (body=%q); want 200", boundary.Code, boundary.Body.String())
 	}
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?limit=0"), http.StatusBadRequest, "invalid_request_error")
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?limit=not-a-number"), http.StatusBadRequest, "invalid_request_error")
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?limit=101"), http.StatusBadRequest, "invalid_request_error")
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?limit=1001"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills?limit=0"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills?limit=not-a-number"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills?limit=101"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills?limit=1001"), http.StatusBadRequest, "invalid_request_error")
 	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?limit=1&limit=2"), http.StatusBadRequest, "invalid_request_error")
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?after_id=skl_old"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills?after_id=skl_old"), http.StatusBadRequest, "invalid_request_error")
 	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?page="+*firstList.NextPage+"x"), http.StatusBadRequest, "invalid_request_error")
 }
 
@@ -477,9 +477,9 @@ func TestSkillHandlerVersionListPageTokenScope(t *testing.T) {
 	if boundary := performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions?limit=1000"); boundary.Code != http.StatusOK {
 		t.Fatalf("version limit=1000 status = %d (body=%q); want 200", boundary.Code, boundary.Body.String())
 	}
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions?limit=1001"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills/"+parent.ID+"/versions?limit=1001"), http.StatusBadRequest, "invalid_request_error")
 	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills?page="+*versionList.NextPage), http.StatusBadRequest, "invalid_request_error")
-	assertSkillUploadError(t, performRequest(t, router, http.MethodGet, "/v1/skills/"+parent.ID+"/versions?before_id=old"), http.StatusBadRequest, "invalid_request_error")
+	assertSkillUploadError(t, performRequest(t, outside(router), http.MethodGet, "/v1/skills/"+parent.ID+"/versions?before_id=old"), http.StatusBadRequest, "invalid_request_error")
 }
 
 func TestSkillHandlerMalformedMultipartAndRouteCapErrors(t *testing.T) {
@@ -487,7 +487,7 @@ func TestSkillHandlerMalformedMultipartAndRouteCapErrors(t *testing.T) {
 	router := env.router(t)
 
 	malformed := strings.NewReader("--broken\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"finance/SKILL.md\"\r\n\r\n---\nname: broken\ndescription: Broken.\n---\n")
-	malformedRec := performMultipartRequest(t, router, http.MethodPost, "/v1/skills", "multipart/form-data; boundary=broken", malformed)
+	malformedRec := performMultipartRequest(t, outside(router), http.MethodPost, "/v1/skills", "multipart/form-data; boundary=broken", malformed)
 	assertSkillUploadError(t, malformedRec, http.StatusBadRequest, "invalid_request_error")
 
 	parts := make([]uploadPart, 0, skill.MaxUploadFileParts)

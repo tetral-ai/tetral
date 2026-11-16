@@ -69,16 +69,23 @@ func (s *PostgreSQLAgentStore) loadCurrentAgent(ctx context.Context, tx Transact
 
 // Agent updates and archive never change referenced keys, so a no-key update
 // lock serializes them without blocking Session foreign-key checks on the Agent.
+// The lock is taken on the Agent row alone and the current version is read
+// after it: a locking read that joins agent_versions returns no row once it
+// has waited for an update, because PostgreSQL rechecks the join with the new
+// Agent row against the version row it read before the wait.
 func (s *PostgreSQLAgentStore) loadCurrentAgentForUpdate(ctx context.Context, tx Transaction, ws workspace.ID, agentID string) (*storedAgent, error) {
-	row := tx.QueryRowScanner(ctx,
-		`SELECT a.id, av.id, a.version, a.archived_at, a.created_at, a.updated_at, av.config_json, av.config_hash
-		   FROM agents a JOIN agent_versions av
-		        ON a.id = av.agent_id AND a.version = av.version
-		  WHERE a.id = $1 AND a.workspace_id = $2 AND av.workspace_id = $2
-		  FOR NO KEY UPDATE OF a`,
+	var lockedID string
+	err := tx.QueryRowScanner(ctx,
+		`SELECT id FROM agents WHERE id = $1 AND workspace_id = $2 FOR NO KEY UPDATE`,
 		agentID, string(ws),
-	)
-	return scanStoredAgentRow(row, "agent not found")
+	).Scan(&lockedID)
+	if err == sql.ErrNoRows {
+		return nil, &NotFoundError{Message: "agent not found"}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.loadCurrentAgent(ctx, tx, ws, agentID)
 }
 
 func (s *PostgreSQLAgentStore) updateAgentSnapshot(ctx context.Context, tx Transaction, ws workspace.ID, agentID string, expectedVersion int, cfg AgentConfig, canonicalBytes []byte, configHash string, updatedAt time.Time) (string, error) {

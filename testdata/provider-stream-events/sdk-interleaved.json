@@ -1,0 +1,71 @@
+{
+  "events": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED",
+      "frameSequence": 1,
+      "thinkingStarted": {
+        "providerPartId": "0",
+        "eventId": "evt_00000000000000000000000000000001"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE",
+      "frameSequence": 2,
+      "reasoningComplete": {
+        "providerPartId": "0",
+        "thinkingEventId": "evt_00000000000000000000000000000001",
+        "text": "private R1",
+        "providerMetadataJson": "{\"anthropic\":{\"signature\":\"fixture_signature\"}}"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE",
+      "frameSequence": 3,
+      "textComplete": {
+        "providerPartId": "1",
+        "eventId": "evt_00000000000000000000000000000002",
+        "text": "alpha"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE",
+      "frameSequence": 4,
+      "textComplete": {
+        "providerPartId": "2",
+        "eventId": "evt_00000000000000000000000000000003",
+        "text": "beta"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE",
+      "frameSequence": 5,
+      "toolCallComplete": {
+        "modelToolCallId": "call_fixture_1",
+        "name": "Read",
+        "inputJson": "{\"file_path\":\"/workspace/note.txt\"}",
+        "providerMetadataJson": "{}"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "frameSequence": 6,
+      "finish": {
+        "reason": "PROVIDER_FINISH_REASON_TOOL_CALLS",
+        "usage": {
+          "inputTotalTokens": 1,
+          "inputUncachedTokens": 1,
+          "inputCacheReadTokens": 0,
+          "inputCacheWriteTokens": 0,
+          "outputTotalTokens": 4,
+          "totalTokens": 5,
+          "providerUsageJson": "{\"inputTokens\":1,\"inputTokenDetails\":{\"noCacheTokens\":1,\"cacheReadTokens\":0,\"cacheWriteTokens\":0},\"outputTokens\":4,\"outputTokenDetails\":{},\"totalTokens\":5,\"raw\":\"[redacted]\",\"cachedInputTokens\":0}"
+        },
+        "metadataJson": "{\"credential_source\":\"session\",\"raw_finish_reason\":\"tool_use\"}",
+        "contextWindowTokens": 1000000,
+        "outputTokenLimit": 128000
+      }
+    }
+  ],
+  "code": 0,
+  "details": "OK"
+}

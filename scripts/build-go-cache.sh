@@ -30,7 +30,5 @@ go install github.com/bufbuild/buf/cmd/buf@v1.70.0
 # The repository runner every evidence job starts.
 go build -o /dev/null ./internal/testinfra/cmd/tetral-test
 
-# Process fixtures integration tests build (replica_web_connector_test.go,
-# transporttest/proxy.go).
+# The process fixture integration tests build (replica_web_connector_test.go).
 go build -race -o /dev/null ./services/web-connector/cmd/web-connector
-CGO_ENABLED=0 go build -trimpath -o /dev/null ./integration/transporttest/cmd/backend

@@ -91,7 +91,7 @@ func runPlatformKeyNativeClose(t *testing.T) {
 	defer stopKey()
 	command := exec.CommandContext(keyContext, "bun", "scripts/platform-key.ts", "insert", "--provider", "anthropic", "--key-id", "pfk_content_e2e", "--cache-scope", "content-e2e")
 	command.Dir = "../services/gateway"
-	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+childURL.String(), "ENGINE_VAULT_KEY="+sdkIntegrationVaultKey)
+	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+childURL.String(), "ENGINE_VAULT_KEY="+publicEdgeVaultKey)
 	command.Stdin = strings.NewReader("content-fixture-provider-key")
 	// Native error output can contain credentials. Stdio stays discarded; only
 	// the existing closed phase/time rail is inherited where ExtraFiles works.
@@ -145,7 +145,7 @@ func runPlatformKeyNativeClose(t *testing.T) {
 	if err := observer.QueryRowContext(ctx, `SELECT encrypted_key FROM platform_provider_keys WHERE key_id='pfk_content_e2e' AND provider_id='anthropic' AND status='active' AND cache_scope='content-e2e' AND updated_at >= $1`, mutationStart).Scan(&encrypted); err != nil {
 		t.Fatal("actual platform key durable row absent")
 	}
-	cipher, err := vault.NewEncryptor(sdkIntegrationVaultKey)
+	cipher, err := vault.NewEncryptor(publicEdgeVaultKey)
 	if err != nil {
 		t.Fatal("platform key credential oracle unavailable")
 	}

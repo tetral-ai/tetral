@@ -94,6 +94,8 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 		"|agent.thread_message_received " + mainScope.GetSessionThreadId() + " " + identity; identities != want {
 		t.Fatalf("agent mail identity columns = %q; want %q", identities, want)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, admin, completionTestSessionID(suffix), true, "agent.thread_message_sent", "session.thread_status_idle")
+	sessionfixture.RequireEventsProcessedForTest(t, admin, completionTestSessionID(suffix), false, "agent.thread_message_received")
 	store.RuntimeBindingTokenHMACKey = []byte("completion-mail-verbatim-test-key")
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: mainScope})
 	var mainContext bridgeLoadContextPayload

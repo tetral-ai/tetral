@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import {
 	MaxProviderErrorMessageBytes,
 	MaxProviderRequestToolOutputJsonBytes,
@@ -121,113 +122,6 @@ test("runtime provider errors preserve valid UTF-8 at the exact message byte bou
 	).not.toThrow();
 });
 
-type ForkSDKRetryStatus =
-	| { readonly type: "retrying" }
-	| { readonly type: "exhausted" }
-	| { readonly type: "terminal" };
-
-type ForkSDKTextBlock = {
-	readonly type: "text";
-	readonly text: string;
-};
-
-type ForkSDKAgentMCPToolUseEvent = {
-	readonly id: string;
-	readonly processed_at: string;
-	readonly type: "agent.mcp_tool_use";
-	readonly name: string;
-	readonly input: { readonly [key: string]: unknown };
-	readonly mcp_server_name: string;
-	readonly evaluated_permission?: "allow" | "ask" | "deny" | undefined;
-};
-
-type ForkSDKAgentMCPToolResultEvent = {
-	readonly id: string;
-	readonly processed_at: string;
-	readonly type: "agent.mcp_tool_result";
-	readonly mcp_tool_use_id: string;
-	readonly content?: readonly ForkSDKTextBlock[] | undefined;
-	readonly is_error?: boolean | null | undefined;
-};
-
-type ForkSDKMCPAuthenticationFailedError = {
-	readonly type: "mcp_authentication_failed_error";
-	readonly mcp_server_name: string;
-	readonly message: string;
-	readonly retry_status: ForkSDKRetryStatus;
-};
-
-type ForkSDKMCPConnectionFailedError = {
-	readonly type: "mcp_connection_failed_error";
-	readonly mcp_server_name: string;
-	readonly message: string;
-	readonly retry_status: ForkSDKRetryStatus;
-};
-
-type ForkSDKSessionMCPErrorEvent = {
-	readonly id: string;
-	readonly processed_at: string;
-	readonly type: "session.error";
-	readonly error:
-		| ForkSDKMCPAuthenticationFailedError
-		| ForkSDKMCPConnectionFailedError;
-};
-
-type AssertType<T extends true> = T;
-type RuntimeMCPToolUseSDKCompatibility = AssertType<
-	Extract<SessionEvent, { readonly type: "agent.mcp_tool_use" }> & {
-		readonly id: string;
-		readonly processed_at: string;
-	} extends ForkSDKAgentMCPToolUseEvent
-		? true
-		: false
->;
-type RuntimeMCPToolResultSDKCompatibility = AssertType<
-	Extract<SessionEvent, { readonly type: "agent.mcp_tool_result" }> & {
-		readonly id: string;
-		readonly processed_at: string;
-	} extends ForkSDKAgentMCPToolResultEvent
-		? true
-		: false
->;
-type RuntimeSessionErrorEvent = Extract<
-	SessionEvent,
-	{ readonly type: "session.error" }
->;
-type RuntimeMCPAuthErrorSDKCompatibility = AssertType<
-	{
-		readonly type: "session.error";
-		readonly error: Extract<
-			RuntimeSessionErrorEvent["error"],
-			{ readonly type: "mcp_authentication_failed_error" }
-		>;
-	} & {
-		readonly id: string;
-		readonly processed_at: string;
-	} extends ForkSDKSessionMCPErrorEvent
-		? true
-		: false
->;
-type RuntimeMCPConnectionErrorSDKCompatibility = AssertType<
-	{
-		readonly type: "session.error";
-		readonly error: Extract<
-			RuntimeSessionErrorEvent["error"],
-			{ readonly type: "mcp_connection_failed_error" }
-		>;
-	} & {
-		readonly id: string;
-		readonly processed_at: string;
-	} extends ForkSDKSessionMCPErrorEvent
-		? true
-		: false
->;
-
-void (undefined as unknown as RuntimeMCPToolUseSDKCompatibility);
-void (undefined as unknown as RuntimeMCPToolResultSDKCompatibility);
-void (undefined as unknown as RuntimeMCPAuthErrorSDKCompatibility);
-void (undefined as unknown as RuntimeMCPConnectionErrorSDKCompatibility);
-
 async function sleepUntilAborted(
 	_durationMs: number,
 	sleepSignal: AbortSignal,
@@ -249,20 +143,6 @@ function operationControls(
 		timeoutMs: 100,
 		sleep: sleepUntilAborted,
 		...overrides,
-	};
-}
-
-function parseExactSessionEvent<T extends SessionEvent>(event: T): T {
-	return SessionEventSchema.parse(event) as T;
-}
-
-function withSDKEventEnvelope<T extends SessionEvent>(
-	event: T,
-): T & { readonly id: string; readonly processed_at: string } {
-	return {
-		id: "sevt_sdk_shape_1",
-		processed_at: createdAt,
-		...event,
 	};
 }
 
@@ -759,26 +639,41 @@ describe("runtime boundary contracts", () => {
 		}
 	});
 
-	test("emits MCP runtime events compatible with fork SDK event types", () => {
-		const mcpToolUse = withSDKEventEnvelope(
-			parseExactSessionEvent({
-				type: "agent.mcp_tool_use",
-				name: "create_issue",
-				input: { title: "Bug" },
-				mcp_server_name: "github",
-				evaluated_permission: "ask",
-			}),
-		) satisfies ForkSDKAgentMCPToolUseEvent;
-		const mcpToolResult = withSDKEventEnvelope(
-			parseExactSessionEvent({
+	// The OpenAPI file is the contract of the events a developer reads. An MCP
+	// event the Runtime's own schema accepts is, once the ledger has given it
+	// an id and a processing time, an event of that file.
+	test("the MCP events and every session error the Runtime emits are events of the OpenAPI file", async () => {
+		const file = JSON.parse(
+			(await Bun.file(new URL("../../../../../../api/engine-v1.openapi.json", import.meta.url)).text()).replaceAll(
+				"#/components/schemas/",
+				"#/$defs/",
+			),
+		) as { readonly components: { readonly schemas: Record<string, object> } };
+		const publicEvent = z.fromJSONSchema({
+			$ref: "#/$defs/BetaManagedAgentsSessionEvent",
+			$defs: file.components.schemas,
+		} as Parameters<typeof z.fromJSONSchema>[0]);
+		const stored = (event: SessionEvent) => ({
+			...SessionEventSchema.parse(event),
+			id: "sevt_runtime_contract",
+			processed_at: "2026-06-10T00:00:00Z",
+		});
+		const toolUse = {
+			type: "agent.mcp_tool_use",
+			name: "create_issue",
+			input: { title: "Bug" },
+			mcp_server_name: "github",
+			evaluated_permission: "ask",
+		} as const;
+		for (const event of [
+			toolUse,
+			{
 				type: "agent.mcp_tool_result",
 				mcp_tool_use_id: "sevt_mcp_tool_use_1",
 				content: [{ type: "text", text: "created" }],
 				is_error: false,
-			}),
-		) satisfies ForkSDKAgentMCPToolResultEvent;
-		const authError = withSDKEventEnvelope(
-			parseExactSessionEvent({
+			},
+			{
 				type: "session.error",
 				error: {
 					type: "mcp_authentication_failed_error",
@@ -786,10 +681,8 @@ describe("runtime boundary contracts", () => {
 					message: "MCP authentication failed after refresh.",
 					retry_status: { type: "terminal" },
 				},
-			}),
-		) satisfies ForkSDKSessionMCPErrorEvent;
-		const connectionError = withSDKEventEnvelope(
-			parseExactSessionEvent({
+			},
+			{
 				type: "session.error",
 				error: {
 					type: "mcp_connection_failed_error",
@@ -797,29 +690,24 @@ describe("runtime boundary contracts", () => {
 					message: "MCP connection failed.",
 					retry_status: { type: "exhausted" },
 				},
-			}),
-		) satisfies ForkSDKSessionMCPErrorEvent;
-
-		expect([
-			mcpToolUse.type,
-			mcpToolResult.type,
-			authError.error.type,
-			connectionError.error.type,
-		]).toEqual([
-			"agent.mcp_tool_use",
-			"agent.mcp_tool_result",
-			"mcp_authentication_failed_error",
-			"mcp_connection_failed_error",
-		]);
-		expect(
-			SessionEventSchema.safeParse({
-				type: "agent.mcp_tool_use",
-				name: "create_issue",
-				input: "not-an-sdk-tool-input-object",
-				mcp_server_name: "github",
-				evaluated_permission: "ask",
-			}).success,
-		).toBe(false);
+			},
+		] as const satisfies readonly SessionEvent[]) {
+			const checked = publicEvent.safeParse(stored(event));
+			expect(checked.error?.issues, event.type).toBeUndefined();
+		}
+		const errors = sessionErrorTypes();
+		expect(errors.length).toBeGreaterThan(0);
+		for (const error of errors) {
+			const event = {
+				type: "session.error",
+				error: { type: error.type, message: "The error.", retry_status: { type: "terminal" }, ...(error.mcp ? { mcp_server_name: "github" } : {}) },
+			};
+			const checked = publicEvent.safeParse(stored(event as SessionEvent));
+			expect(checked.error?.issues, error.type).toBeUndefined();
+		}
+		// The file refuses what is no event of it, so the loop above can fail.
+		expect(publicEvent.safeParse({ ...stored(toolUse), mcp_server_name: undefined }).success).toBe(false);
+		expect(SessionEventSchema.safeParse({ ...toolUse, input: "not an object" }).success).toBe(false);
 	});
 
 	test("accepts the required Anthropic-shaped outbound event subset and rejects legacy events", () => {
@@ -1414,3 +1302,18 @@ describe("runtime boundary contracts", () => {
 		).toBe("commitInternalToolRepair");
 	});
 });
+
+// Each error of the Runtime's session.error event, read from its schema, with
+// whether it names an MCP server.
+function sessionErrorTypes(): ReadonlyArray<{ readonly type: string; readonly mcp: boolean }> {
+	const visit = (schema: unknown): ReadonlyArray<{ readonly type: string; readonly mcp: boolean }> => {
+		if (schema instanceof z.ZodUnion) return schema.options.flatMap(visit);
+		if (schema instanceof z.ZodObject && schema.shape.type instanceof z.ZodLiteral) {
+			const type = schema.shape.type.value;
+			return typeof type === "string" && type.endsWith("_error") ? [{ type, mcp: "mcp_server_name" in schema.shape }] : [];
+		}
+		return [];
+	};
+	const event = SessionEventSchema.options.find((option) => option.shape.type.value === "session.error");
+	return event !== undefined && "error" in event.shape ? visit(event.shape.error) : [];
+}

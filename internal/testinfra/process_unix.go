@@ -21,6 +21,6 @@ func startManagedCommand(ctx context.Context, command *exec.Cmd) error {
 	case <-ctx.Done():
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
-		return ctx.Err()
+		return stoppedBy(ctx)
 	}
 }
