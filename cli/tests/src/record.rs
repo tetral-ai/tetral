@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,6 +37,13 @@ macro_rules! record {
     };
 }
 
+static RECORD: OnceLock<Record> = OnceLock::new();
+
+/// The path of this process's record, once it has one.
+pub fn current() -> Option<&'static Path> {
+    RECORD.get().map(|record| record.path.as_path())
+}
+
 /// The record of one process of one test file.
 pub struct Record {
     path: PathBuf,
@@ -48,11 +55,11 @@ impl Record {
     /// The record of the test file `test`, created at its first use in the
     /// process.
     pub fn of(test: &'static str) -> &'static Record {
-        static RECORD: OnceLock<Record> = OnceLock::new();
         RECORD.get_or_init(|| Record::create(test))
     }
 
     fn create(test: &str) -> Record {
+        crate::timeline::start();
         let test = match std::env::var(NEXTEST_TEST_NAME) {
             Ok(one) => format!("{test}.{}", one.replace("::", ".")),
             Err(_) => test.to_owned(),

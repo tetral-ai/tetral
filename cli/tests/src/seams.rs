@@ -3,6 +3,11 @@
 //! `TETRAL_TEST_SEAMS=<socket>` reads its clock from here, in the file this
 //! side keeps beside the socket, waits at a held barrier until the test
 //! releases it, and counts named events here.
+//!
+//! Each step of the clock, each read of the clock through the socket (a
+//! process's first; it reads the file after), each barrier a process waits
+//! at and each count it reports goes on the test's timeline, and a failure's
+//! records get the clock, the barriers and the counters as they stand then.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -13,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::timeline;
 
 /// The variable that names the seam socket to the process under test.
 pub const SOCKET_VARIABLE: &str = "TETRAL_TEST_SEAMS";
@@ -27,6 +34,7 @@ pub const WAIT_LIMIT: Duration = Duration::from_secs(30);
 pub struct Seams {
     socket: PathBuf,
     shared: Arc<Shared>,
+    _at_failure: timeline::Registered,
 }
 
 struct Shared {
@@ -34,6 +42,9 @@ struct Shared {
     changed: Condvar,
     /// The file the process under test reads the clock from.
     clock: File,
+    /// The clock's name on the timeline.
+    label: String,
+    start: Duration,
 }
 
 #[derive(Default)]
@@ -63,8 +74,53 @@ impl Seams {
             changed: Condvar::new(),
             clock: File::create(&clock)
                 .unwrap_or_else(|error| panic!("create {}: {error}", clock.display())),
+            label: timeline::label("seams"),
+            start,
         });
         shared.set_clock(&mut shared.lock(), start);
+        timeline::note(
+            &shared.label,
+            format!("the clock starts at {}", shared.time(start)),
+        );
+        let standing = Arc::downgrade(&shared);
+        let at_failure = timeline::at_failure(&shared.label, move || {
+            let Some(shared) = standing.upgrade() else {
+                return timeline::AtFailure::default();
+            };
+            let state = shared.lock();
+            let sorted = |map: &HashMap<String, u64>| {
+                map.iter()
+                    .filter(|(_, count)| **count > 0)
+                    .map(|(name, count)| format!("{name}={count}"))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let waiting: HashMap<String, u64> = state
+                .waiting
+                .iter()
+                .map(|(name, count)| (name.clone(), *count as u64))
+                .collect();
+            let mut held: Vec<&String> = state.held.iter().collect();
+            held.sort();
+            timeline::AtFailure {
+                lines: vec![(
+                    timeline::now(),
+                    format!(
+                        "stands at {}; held barriers [{}]; waiting [{}]; counters [{}]",
+                        shared.time(state.clock),
+                        held.iter()
+                            .map(|name| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        sorted(&waiting),
+                        sorted(&state.counters)
+                    ),
+                )],
+                files: Vec::new(),
+            }
+        });
         let serving = shared.clone();
         thread::spawn(move || {
             for connection in listener.incoming() {
@@ -76,7 +132,11 @@ impl Seams {
                 thread::spawn(move || serving.answer(connection));
             }
         });
-        Seams { socket, shared }
+        Seams {
+            socket,
+            shared,
+            _at_failure: at_failure,
+        }
     }
 
     /// The socket to pass in [`SOCKET_VARIABLE`].
@@ -96,6 +156,13 @@ impl Seams {
         self.shared.set_clock(&mut state, moved);
         state.advanced += step;
         drop(state);
+        timeline::note(
+            &self.shared.label,
+            format!(
+                "the test moves the clock by {step:?} to {}",
+                self.shared.time(moved)
+            ),
+        );
         self.shared.changed.notify_all();
     }
 
@@ -107,6 +174,7 @@ impl Seams {
     /// Makes every process that reaches the barrier `name` wait there.
     pub fn hold(&self, name: &str) {
         self.shared.lock().held.insert(name.to_owned());
+        timeline::note(&self.shared.label, format!("the test holds barrier {name}"));
     }
 
     /// Lets every waiting and later process pass the barrier `name`.
@@ -115,6 +183,10 @@ impl Seams {
         state.held.remove(name);
         state.passes.remove(name);
         drop(state);
+        timeline::note(
+            &self.shared.label,
+            format!("the test releases barrier {name}"),
+        );
         self.shared.changed.notify_all();
     }
 
@@ -127,6 +199,10 @@ impl Seams {
             .passes
             .entry(name.to_owned())
             .or_default() += 1;
+        timeline::note(
+            &self.shared.label,
+            format!("the test lets one process pass barrier {name}"),
+        );
         self.shared.changed.notify_all();
     }
 
@@ -169,7 +245,11 @@ impl Seams {
         let mut state = self.shared.lock();
         while !condition(&state) {
             let left = deadline.saturating_duration_since(Instant::now());
-            assert!(!left.is_zero(), "the process under test never got there");
+            if left.is_zero() {
+                // Unlocked first: the failure's records read the state.
+                drop(state);
+                panic!("the process under test never got there");
+            }
             state = self
                 .shared
                 .changed
@@ -195,6 +275,16 @@ impl Shared {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// `clock` as the timeline shows it: its time and its distance from the
+    /// start.
+    fn time(&self, clock: Duration) -> String {
+        format!(
+            "{:.3} s (start + {:.3} s)",
+            clock.as_secs_f64(),
+            clock.saturating_sub(self.start).as_secs_f64()
+        )
     }
 
     /// Sets the clock and writes it as `state::seams` reads it: its
@@ -229,13 +319,25 @@ impl Shared {
     fn answer_one(&self, line: &str) -> String {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
-            [PROTOCOL, _pid, "clock"] => self.lock().clock.as_nanos().to_string(),
-            [PROTOCOL, _pid, "barrier", name] => {
-                self.pass(name);
+            [PROTOCOL, pid, "clock"] => {
+                let clock = self.lock().clock;
+                timeline::note(
+                    &self.label,
+                    format!("process {pid} reads the clock at {}", self.time(clock)),
+                );
+                clock.as_nanos().to_string()
+            }
+            [PROTOCOL, pid, "barrier", name] => {
+                self.pass(pid, name);
                 "released".to_owned()
             }
-            [PROTOCOL, _pid, "count", name] => {
+            [PROTOCOL, pid, "count", name] => {
                 *self.lock().counters.entry((*name).to_owned()).or_default() += 1;
+                timeline::note_repeated(
+                    &self.label,
+                    &format!("{pid} {name}"),
+                    format!("process {pid} counts {name}"),
+                );
                 self.changed.notify_all();
                 "ok".to_owned()
             }
@@ -243,10 +345,17 @@ impl Shared {
         }
     }
 
-    fn pass(&self, name: &str) {
+    fn pass(&self, pid: &str, name: &str) {
         let mut state = self.lock();
         *state.waiting.entry(name.to_owned()).or_default() += 1;
         self.changed.notify_all();
+        let held = state.held.contains(name);
+        if held {
+            timeline::note(
+                &self.label,
+                format!("process {pid} waits at barrier {name}"),
+            );
+        }
         while state.held.contains(name) && !state.stopped {
             if let Some(passes) = state.passes.get_mut(name)
                 && *passes > 0
@@ -260,5 +369,9 @@ impl Shared {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         *state.waiting.entry(name.to_owned()).or_default() -= 1;
+        drop(state);
+        if held {
+            timeline::note(&self.label, format!("process {pid} passes barrier {name}"));
+        }
     }
 }

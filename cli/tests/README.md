@@ -107,6 +107,16 @@ the isolated harness tests without starting the CLI.
   fails instead (`other_user::sudo`, `other_user::RootDirectory`). A state
   root owned by another user needs no privilege: such a case uses a
   directory that root already owns (`other_user::directory`).
+- A test that fails leaves, beside its acceptance record, what the other
+  processes saw (`timeline`): `<record>.timeline.log` holds, at their times
+  since the test's start, each line that each process the harness started
+  wrote, each control the test sent the reference control server, each
+  request on Engine's side at its arrival and its end, each step of a seam
+  clock, each barrier a process waited at and each count it reported;
+  `<record>.reference-<n>.json` holds that server's traffic and state at the
+  failure. The harness writes them from a panic hook, so a test needs no code
+  of its own for them, and prints where they are and the timeline's last
+  lines.
 
 ## Where things are
 
@@ -130,6 +140,8 @@ the isolated harness tests without starting the CLI.
   `state::seams` defines; a held barrier lets all pass at its release, or one
   at a time (`Seams::release_one`).
 - `src/record.rs`: `Record`, `Case` and the `record!` macro.
+- `src/timeline.rs`: the timeline of a test and the failure's records written
+  from it.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
 - `src/socket_directory.rs`: owned temporary socket parents and per-test scopes.

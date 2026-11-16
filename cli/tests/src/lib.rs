@@ -18,6 +18,7 @@ pub mod small_volume;
 pub mod snapshot;
 pub mod socket_directory;
 pub mod tasks;
+pub mod timeline;
 
 use std::path::{Path, PathBuf};
 
