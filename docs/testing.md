@@ -248,7 +248,13 @@ before it removes them. A test that starts containers through
 the fixture's `Close`, each container's log is kept in
 `container-logs/<test>/<image>-<container>.log` of the run's evidence (the
 runner names the directory in `TETRAL_TEST_EVIDENCE_DIR`; outside the runner
-nothing is kept). Native package
+nothing is kept).
+
+Every run also writes `resources.jsonl` into its evidence: one JSON line at its
+start, every 15 seconds and at its end, with the host's available and total
+memory, its load averages and Docker's memory use of each running container.
+It is a record only; a value it cannot read is written as an error in that
+line, and it never fails a run. Native package
 commands remain appropriate while developing one owning package; the repository
 profiles are the pre-submission contract.
 

@@ -72,6 +72,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	if err := os.MkdirAll(options.OutputDir, 0o700); err != nil {
 		return result, err
 	}
+	defer recordResources(filepath.Join(options.OutputDir, resourceRecordFile), resourceRecordInterval)()
 
 	setupStart := time.Now()
 	dependencies, err := startDependencies(ctx, plan.Dependencies, options.Root)

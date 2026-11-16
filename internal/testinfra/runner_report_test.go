@@ -1,6 +1,7 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -235,6 +236,49 @@ func TestRunnerAnchorsRelativeEvidencePathsAtRepositoryRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".test-results", "example", "result.json")); err != nil {
 		t.Fatalf("relative evidence output was not rooted at the repository: %v", err)
+	}
+	// The run records its resources from its start to its end.
+	if body, err := os.ReadFile(filepath.Join(root, ".test-results", "example", resourceRecordFile)); err != nil || bytes.Count(body, []byte("\n")) < 2 {
+		t.Fatalf("resource record = %q, %v; want a first and a last sample", body, err)
+	}
+}
+
+func TestResourceRecordSamplesMemoryLoadAndContainers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	r, err := NewDockerResources(ctx, t, "resource-record")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	c, err := r.Run(ctx, ContainerSpec{Image: postgresImage, Entrypoint: "sh", Command: []string{"-c", "sleep 300"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), resourceRecordFile)
+	stop := recordResources(path, 20*time.Millisecond)
+	time.Sleep(time.Second)
+	stop()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	var previous time.Time
+	sawContainer := false
+	for _, line := range lines {
+		var sample resourceSample
+		if err := json.Unmarshal([]byte(line), &sample); err != nil {
+			t.Fatalf("sample %q: %v", line, err)
+		}
+		if !sample.At.After(previous) || sample.MemAvailableBytes <= 0 || sample.MemAvailableBytes > sample.MemTotalBytes || sample.Load1 < 0 || len(sample.Errors) != 0 {
+			t.Fatalf("sample %+v after %s; want a later time, available memory within the total, a load and no error", sample, previous)
+		}
+		previous = sample.At
+		sawContainer = sawContainer || strings.Contains(sample.ContainerMemory[c.Name], " / ")
+	}
+	if len(lines) < 3 || !sawContainer {
+		t.Fatalf("%d samples, container %s recorded %v; want several, with its memory", len(lines), c.Name, sawContainer)
 	}
 }
 
