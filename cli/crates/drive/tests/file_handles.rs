@@ -10,7 +10,7 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use drive::cache::LISTING_SPACING;
 use drive::mount::{Bound, Mounting};
@@ -97,8 +97,17 @@ async fn one_open_reuses_an_evicted_blob_and_tracks_the_current_source() {
     session.sync.drive_changed(session.drive.clone(), 2);
     session.caught_up().await;
     let file = blocking(move || {
+        // The kernel drops its cached pages of the old content on a notice
+        // the owner sends off its own task, a moment after catching up.
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut byte = [0];
-        assert_eq!(file.read_at(&mut byte, 1 << 20).unwrap(), 1);
+        loop {
+            assert_eq!(file.read_at(&mut byte, 1 << 20).unwrap(), 1);
+            if byte[0] == b'b' || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(
             byte,
             [b'b'],
