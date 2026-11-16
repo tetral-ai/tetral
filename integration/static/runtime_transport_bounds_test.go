@@ -1,6 +1,7 @@
 package static
 
 import (
+	"bytes"
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
@@ -52,9 +53,11 @@ func evaluatedBounds(t *testing.T, service string, script string) map[string]int
 	t.Helper()
 	command := exec.Command("bun", "-e", script) //nolint:gosec // A fixed script of this test.
 	command.Dir = filepath.Join(finalArchitectureEngineRoot(t), "services", service)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("evaluate the bounds of %s: %v", service, err)
+		t.Fatalf("evaluate the bounds of %s: %v\n%s", service, err, stderr.String())
 	}
 	var bounds map[string]int
 	if err := json.Unmarshal(output, &bounds); err != nil {

@@ -1,6 +1,7 @@
 package storage_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -41,9 +42,11 @@ func TestPostgreSQLFreshCatalogAndPredecessorPreservation(t *testing.T) {
 	assertGitObject(ctx, t, stageABaselineCommit+"^{commit}", stageABaselineCommit)
 	assertGitObject(ctx, t, stageABaselineCommit+"^{tree}", stageABaselineTree)
 	repositoryRootCommand := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	var repositoryRootStderr bytes.Buffer
+	repositoryRootCommand.Stderr = &repositoryRootStderr
 	repositoryRootOutput, err := repositoryRootCommand.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("git rev-parse --show-toplevel: %v\n%s", err, repositoryRootStderr.String())
 	}
 	repositoryRoot := strings.TrimSpace(string(repositoryRootOutput))
 
@@ -224,9 +227,11 @@ func firstSnapshotDifference(before, after []byte) string {
 func assertGitObject(ctx context.Context, t *testing.T, object, want string) {
 	t.Helper()
 	command := exec.CommandContext(ctx, "git", "rev-parse", object)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("resolve %s: %v", object, err)
+		t.Fatalf("resolve %s: %v\n%s", object, err, stderr.String())
 	}
 	if got := strings.TrimSpace(string(output)); got != want {
 		t.Fatalf("%s = %s; want %s", object, got, want)

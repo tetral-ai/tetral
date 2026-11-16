@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -190,9 +191,11 @@ func publicBrokerSubscriptions(t *testing.T, broker testinfra.NATSFixture, sessi
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "docker", "port", broker.Container, "8222/tcp") //nolint:gosec // The run-owned broker descriptor is infrastructure discovery.
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	address, err := command.Output()
 	if err != nil {
-		t.Fatal("discover broker monitoring endpoint")
+		t.Fatalf("discover broker monitoring endpoint: %v\n%s", err, stderr.String())
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+strings.TrimSpace(string(address))+"/subsz?subs=1", nil)
 	if err != nil {

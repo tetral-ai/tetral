@@ -55,9 +55,11 @@ func translateProductionEnvoyGatewayHosts(t *testing.T, profile string, ports en
 	defer cancel()
 	directory := t.TempDir()
 	command := exec.CommandContext(ctx, "helm", "template", "tetral", filepath.Join(transporttest.RepositoryRoot(t), "deploy/helm/tetral"), "--set", "edge.enabled=true", "--set", "transport.profile="+profile, "--set", "edge.apiHost="+apiHost, "--set", "gitProxyHost="+gitHost) //nolint:gosec // Repository-owned chart and bounded fixture host arguments, no shell.
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	rendered, err := command.Output()
 	if err != nil {
-		t.Fatal("render production edge resources")
+		t.Fatalf("render production edge resources: %v\n%s", err, stderr.String())
 	}
 	authority := transporttest.Must(transporttest.NewAuthority("local-production-edge"))
 	leaves := map[string]transporttest.Leaf{}
@@ -193,9 +195,11 @@ func runOfficialEnvoyTranslation(ctx context.Context, t *testing.T, directory, l
 		t.Fatal("native checksum-verified matching egctl is absent")
 	}
 	command := exec.CommandContext(ctx, executable, "x", "translate", "--from", "gateway-api", "--to", "gateway-api,xds,ir", "--file", path, "--output", "json") //nolint:gosec // Native verified tool, test-owned path, no shell.
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	body, err := command.Output()
 	if err != nil {
-		t.Fatal("matching upstream translator failed")
+		t.Fatalf("matching upstream translator failed: %v\n%s", err, stderr.String())
 	}
 	// The CLI may return exit zero with Accepted=False. Enumerate the actual input
 	// policy objects and require their complete owning status before reading xDS.

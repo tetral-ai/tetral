@@ -3,6 +3,7 @@
 package webconnector
 
 import (
+	"bytes"
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
@@ -22,9 +23,11 @@ console.log(JSON.stringify({
   operations: WEB_OPERATIONS_MAX, searchDomains: WEB_SEARCH_DOMAINS_MAX, textBytes: MaxTextBytes, domainBytes: WEB_DOMAIN_MAX_BYTES,
 }));`)
 	command.Dir = filepath.Join("..", "agent-runtime")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("evaluate the Runtime's web bounds: %v", err)
+		t.Fatalf("evaluate the Runtime's web bounds: %v\n%s", err, stderr.String())
 	}
 	var runtime map[string]int
 	if err := json.Unmarshal(output, &runtime); err != nil {

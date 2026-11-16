@@ -1,6 +1,7 @@
 package static
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"os"
@@ -37,9 +38,11 @@ type releaseWorkflowJob struct {
 func TestReleaseCLIDoesNotDependOnDatabaseRuntime(t *testing.T) {
 	command := exec.Command("go", "list", "-deps", "-f", `{{.ImportPath}}|{{join .Imports ","}}`, "./internal/release/cmd/tetral-release")
 	command.Dir = finalArchitectureEngineRoot(t)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	body, err := command.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("go list the release command's imports: %v\n%s", err, stderr.String())
 	}
 	const identityPackage = "github.com/tetral-ai/tetral/internal/schemaidentity"
 	const storagePackage = "github.com/tetral-ai/tetral/internal/storage"

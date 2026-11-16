@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -234,9 +235,12 @@ func publicBrokerCPU(t *testing.T, broker testinfra.NATSFixture) uint64 {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	data, err := exec.CommandContext(ctx, "docker", "exec", broker.Container, "cat", "/proc/1/stat").Output()
+	command := exec.CommandContext(ctx, "docker", "exec", broker.Container, "cat", "/proc/1/stat")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	data, err := command.Output()
 	if err != nil {
-		t.Fatal("read actual broker CPU counters")
+		t.Fatalf("read actual broker CPU counters: %v\n%s", err, stderr.String())
 	}
 	_, tail, found := strings.Cut(string(data), ") ")
 	fields := strings.Fields(tail)

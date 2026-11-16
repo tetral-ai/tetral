@@ -34,9 +34,11 @@ func RenderDirectResources(t *testing.T) (map[string]any, map[string]any, map[st
 	defer cancel()
 	// #nosec G204 -- fixed Helm command/flags and repository-owned chart path, with no shell.
 	command := exec.CommandContext(ctx, "helm", "template", "tetral", filepath.Join(RepositoryRoot(t), "deploy/helm/tetral"), "--set", "transport.profile=hardened")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("render actual Runtime EnvoyFilter: %v", err)
+		t.Fatalf("render actual Runtime EnvoyFilter: %v\n%s", err, stderr.String())
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(output))
 	var listener, cluster map[string]any
