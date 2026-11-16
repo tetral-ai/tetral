@@ -163,8 +163,11 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	// Version verification must work without kubeconfig and never query a cluster.
 	//nolint:gosec // Checksum-verified locked executable, fixed local version arguments.
 	output, err := exec.CommandContext(ctx, path, "version", "--remote=false").CombinedOutput()
-	if err != nil || strings.TrimSpace(string(output)) != "v"+tool.Version {
-		return errors.New("egctl executable version differs from lock")
+	if err != nil {
+		return fmt.Errorf("egctl version: %w%s", err, outputTail(output, false))
+	}
+	if version := strings.TrimSpace(string(output)); version != "v"+tool.Version {
+		return fmt.Errorf("egctl executable version %q differs from lock v%s", version, tool.Version)
 	}
 	m.environment = append(withoutEnvironmentVariable(m.environment, EnvTestEGCTL), EnvTestEGCTL+"="+path)
 	m.evidence = append(m.evidence, DependencyEvidence{Name: "egctl", Source: "canonical-pinned-archive", Identity: "v" + tool.Version + "/" + tool.OS + "/" + tool.Arch + "@sha256:" + tool.SHA256})
@@ -182,7 +185,7 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	command := exec.CommandContext(ctx, "go", "build", "-mod=readonly", "-p", "2", "-o", helperPath, ".")
 	command.Dir = helperDirectory
 	command.Env = append(withoutEnvironmentVariable(m.environment, "GOTOOLCHAIN"), "GOTOOLCHAIN="+helper.Toolchain)
-	if err := runWithOutputTail(command); err != nil {
+	if err := runCommand(command, nil); err != nil {
 		return fmt.Errorf("pinned upstream SecretType helper build failed: %w", err)
 	}
 	afterDigest, err := helperSourceDigest(helperDirectory)

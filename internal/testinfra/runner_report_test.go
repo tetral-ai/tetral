@@ -460,6 +460,38 @@ func TestAStepEndedByTheRunSaysWhatEndedIt(t *testing.T) {
 	}
 }
 
+func TestFailedPlanReportsTheFailedCommandsOwnError(t *testing.T) {
+	const cause = "go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: unexpected EOF"
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/sh\necho '"+cause+"' >&2\nexit 1\n"), 0o755); err != nil { //nolint:gosec // The stub must be executable.
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+	root, err := filepath.Abs(testRepositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A listing an earlier test kept would spare the plan its go list.
+	goPackageListings.Lock()
+	delete(goPackageListings.byRoot, root)
+	goPackageListings.Unlock()
+	started := time.Now()
+	_, planErr := BuildPlan(context.Background(), root, ProfileFast, "")
+	if planErr == nil {
+		t.Fatal("planning with a failing go list succeeded")
+	}
+	output := t.TempDir()
+	result, err := PlanFailed(context.Background(), ProfileFast, RunOptions{Root: root, OutputDir: output}, started, planErr)
+	var written Result
+	if body, readErr := os.ReadFile(filepath.Join(output, "result.json")); readErr != nil || json.Unmarshal(body, &written) != nil || len(written.Steps) != 1 {
+		t.Fatalf("result.json does not hold the plan step: %v", readErr)
+	}
+	// The console prints the returned error; result.json holds the step.
+	if result.Status != "apparatus-failed" || !strings.Contains(err.Error(), "go list: exit status 1") || !strings.Contains(err.Error(), cause) || !strings.Contains(written.Steps[0].FirstFailure, cause) {
+		t.Fatalf("status %s, error %v, recorded first failure %q; want each to carry go list's own error", result.Status, err, written.Steps[0].FirstFailure)
+	}
+}
+
 func endedStep(ctx context.Context, t *testing.T, spec commandSpec) (string, error) {
 	step, err := runStep(ctx, t.TempDir(), "gateway", spec, &dependencyManager{environment: os.Environ()}, t.TempDir())
 	if step.Status != "fail" {

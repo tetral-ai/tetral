@@ -412,7 +412,7 @@ func boundedDockerOutput(ctx context.Context, args ...string) (string, error) {
 	var output boundedDockerBuffer
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Run(); err != nil {
-		return string(output.data), fmt.Errorf("docker fixture command failed: %w", err)
+		return string(output.data), fmt.Errorf("docker fixture command %s failed: %w%s", commandName(command), err, outputTail(output.data, false))
 	}
 	return string(output.data), nil
 }

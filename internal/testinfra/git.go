@@ -3,7 +3,6 @@ package testinfra
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
@@ -76,9 +75,5 @@ func gitBytes(ctx context.Context, root string, arguments ...string) ([]byte, er
 	//nolint:gosec
 	command := exec.CommandContext(ctx, "git", arguments...)
 	command.Dir = root
-	output, err := command.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w", strings.Join(arguments, " "), err)
-	}
-	return output, nil
+	return commandStdout(command)
 }

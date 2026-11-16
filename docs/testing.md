@@ -234,11 +234,13 @@ step's diagnostic file: its first 20 and last 60 lines, after a `go test -json`
 report is reduced to the decoded output of the tests and packages that did not
 pass (a skipped test counts as not passing where the step rejects skips).
 Under GitHub Actions the same excerpt goes to the job summary; the complete
-diagnostic stays in the evidence artifact. These dependency setup commands end
-the setup error the runner prints with up to the last 20 lines of their output
-when they fail: the Bun workspace installs, the Docker check, image pulls, container
-starts and removals, and the egctl SecretType helper build. Native package
-commands remain appropriate while developing one owning package; the repository
+diagnostic stays in the evidence artifact. Every other command the runner and
+its fixtures run (`go list`, `git`, `gh`, `docker` and the setup commands such as
+the Bun workspace installs, image pulls and the egctl SecretType helper build)
+fails with an error that names the program and its subcommand and ends with up
+to the last 20 lines it wrote to standard error, so a failed plan or setup shows
+its own cause in the console and in `result.json`. Native package commands
+remain appropriate while developing one owning package; the repository
 profiles are the pre-submission contract.
 
 ## The CLI's tests

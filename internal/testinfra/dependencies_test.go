@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -41,15 +42,17 @@ func TestFastPlanStartsNoDurableDependency(t *testing.T) {
 	}
 }
 
-func TestSetupCommandErrorEndsWithItsOutputTail(t *testing.T) {
+func TestFailedCommandErrorNamesItAndEndsWithItsOutputTail(t *testing.T) {
 	longLine := "registry " + strings.Repeat("x", 1000)
-	failed := []string{"exit status 3"}
+	failed := []string{"sh: exit status 3"}
 	for line := 33; line < 50; line++ {
 		failed = append(failed, fmt.Sprintf("  | output %d", line))
 	}
 	failed = append(failed, "  | "+longLine[:300]+" ...", "  | unreachable", "  | ::error::forged")
 	for _, tc := range []struct {
 		name, script string
+		readStdout   bool
+		wantStdout   string
 		want         []string
 	}{
 		{
@@ -61,14 +64,36 @@ func TestSetupCommandErrorEndsWithItsOutputTail(t *testing.T) {
 			name:   "a successful command adds nothing",
 			script: `echo progress; echo warning >&2`,
 		},
+		{
+			name:       "a failing command whose output is read adds what it wrote to standard error",
+			script:     `echo '{"partial":'; echo 'go: example.com/m@v1.0.0: reading proxy: unexpected EOF' >&2; exit 1`,
+			readStdout: true,
+			wantStdout: "{\"partial\":\n",
+			want:       []string{"sh: exit status 1", "  | go: example.com/m@v1.0.0: reading proxy: unexpected EOF"},
+		},
+		{
+			name:       "a successful command whose output is read returns it",
+			script:     `echo listing; echo warning >&2`,
+			readStdout: true,
+			wantStdout: "listing\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var stdout []byte
+			var err error
+			if tc.readStdout {
+				command := exec.CommandContext(context.Background(), "sh", "-c", tc.script, "sh", longLine)
+				command.Dir = t.TempDir()
+				stdout, err = commandStdout(command)
+			} else {
+				err = runQuietInDir(context.Background(), t.TempDir(), "sh", "-c", tc.script, "sh", longLine)
+			}
 			var got []string
-			if err := runQuietInDir(context.Background(), t.TempDir(), "sh", "-c", tc.script, "sh", longLine); err != nil {
+			if err != nil {
 				got = strings.Split(err.Error(), "\n")
 			}
-			if !slices.Equal(got, tc.want) {
-				t.Fatalf("error lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+			if !slices.Equal(got, tc.want) || string(stdout) != tc.wantStdout {
+				t.Fatalf("standard output %q, error lines:\n%s\nwant %q and:\n%s", stdout, strings.Join(got, "\n"), tc.wantStdout, strings.Join(tc.want, "\n"))
 			}
 		})
 	}
