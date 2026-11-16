@@ -121,13 +121,13 @@ describe("ThreadLoop", () => {
 			new URL("../../../../../bun.lock", import.meta.url),
 			"utf8",
 		);
-		expect(packageJson.dependencies?.effect).toBe("4.0.0-beta.66");
-		expect(lockfileText).toContain('"effect": "4.0.0-beta.66"');
-		expect(lockfileText).toContain('"effect": ["effect@4.0.0-beta.66"');
+		expect(packageJson.dependencies?.effect).toBe("4.0.0-beta.103");
+		expect(lockfileText).toContain('"effect": "4.0.0-beta.103"');
+		expect(lockfileText).toContain('"effect": ["effect@4.0.0-beta.103"');
 		// A package's own peer range, such as @effect/opentelemetry's, is not a workspace pin.
 		const workspaceDeclarations = lockfileText.slice(lockfileText.indexOf('"workspaces"'), lockfileText.indexOf('"packages": {'));
-		expect(workspaceDeclarations).toContain('"effect": "4.0.0-beta.66"');
-		expect(workspaceDeclarations).not.toContain('"effect": "^4.0.0-beta.66"');
+		expect(workspaceDeclarations).toContain('"effect": "4.0.0-beta.103"');
+		expect(workspaceDeclarations).not.toContain('"effect": "^4.0.0-beta.103"');
 		expect(lockfileText).not.toContain('"effect": "4.0.0-beta.74"');
 		expect(lockfileText).not.toContain('"effect": "3.');
 	});

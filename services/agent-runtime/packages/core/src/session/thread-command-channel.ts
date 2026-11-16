@@ -1,4 +1,4 @@
-import { Deferred, Effect, Exit, Fiber, Queue, Scope } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Queue, Scope } from "effect";
 
 /** Raised when work is submitted after the owning ThreadEntry has closed. */
 export class ThreadCommandChannelClosed extends Error {
@@ -28,8 +28,24 @@ interface QueuedThreadCommand {
 /**
  * Creates an unbounded semantic command channel. The queue only carries executable
  * Effects; durable state remains in the database and hot state remains on ThreadEntry.
+ *
+ * Construction runs with Effect.runFork, never Effect.runSync: the queue and the
+ * worker keep the scheduler of the run that creates them, and a synchronous run's
+ * scheduler resumes work on microtasks, ahead of every timer and of the fibers on
+ * the default scheduler.
  */
-export function makeThreadCommandChannel(): Effect.Effect<ThreadCommandChannel> {
+export function makeThreadCommandChannel(): ThreadCommandChannel {
+  const exit = Effect.runFork(constructThreadCommandChannel()).pollUnsafe();
+  if (exit === undefined) {
+    throw new Error("thread command channel construction did not complete synchronously");
+  }
+  if (Exit.isFailure(exit)) {
+    throw Cause.squash(exit.cause);
+  }
+  return exit.value;
+}
+
+function constructThreadCommandChannel(): Effect.Effect<ThreadCommandChannel> {
   return Effect.gen(function* () {
     const queue = yield* Queue.unbounded<QueuedThreadCommand>();
     const commandScope = yield* Scope.make();

@@ -47,7 +47,7 @@ func VerifyCLIBuildCacheWorkflows(root string) error {
 	if scalar(mappingValue(checkout, "uses")) != "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" || scalar(mappingValue(mappingValue(checkout, "with"), "persist-credentials")) != "false" || mappingValue(mappingValue(checkout, "with"), "ref") != nil {
 		return fmt.Errorf("CLI cache producer must check out its exact revision without persisted credentials")
 	}
-	if scalar(mappingValue(setup, "uses")) != "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c" || scalar(mappingValue(mappingValue(setup, "with"), "cache")) != "false" || scalar(mappingValue(mappingValue(setup, "with"), "go-version")) != "1.26.10" {
+	if scalar(mappingValue(setup, "uses")) != "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c" || scalar(mappingValue(mappingValue(setup, "with"), "cache")) != "false" || scalar(mappingValue(mappingValue(setup, "with"), "go-version")) != "1.26.11" {
 		return fmt.Errorf("CLI cache producer must use pinned Go without its own cache")
 	}
 	if scalar(mappingValue(bwrap, "run")) != "./scripts/install-bubblewrap.sh" || scalar(mappingValue(rust, "run")) != "rustup toolchain install" || scalar(mappingValue(rust, "working-directory")) != "cli" {

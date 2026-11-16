@@ -27,7 +27,7 @@ jobs:
       - name: Set up Go without its own cache
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache: false
       - name: Install bubblewrap for the digest fixture
         run: ./scripts/install-bubblewrap.sh

@@ -5,7 +5,7 @@ import { makeThreadCommandChannel } from "../../src/session/thread-command-chann
 describe("ThreadCommandChannel", () => {
   test("runs semantic commands in enqueue order even when earlier work suspends", async () => {
     const observed: string[] = [];
-    const channel = await Effect.runPromise(makeThreadCommandChannel());
+    const channel = makeThreadCommandChannel();
     let releaseFirst = (): void => undefined;
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
@@ -35,8 +35,28 @@ describe("ThreadCommandChannel", () => {
     await Effect.runPromise(channel.close());
   });
 
+  test("resumes a parked worker on the default scheduler, never inside a microtask drain", async () => {
+    const channel = makeThreadCommandChannel();
+    await Effect.runPromise(channel.submit(Effect.void));
+    let commandRan = false;
+    const submitted = Effect.runPromise(channel.submit(
+      Effect.sync(() => {
+        commandRan = true;
+      }),
+    ));
+
+    for (let turn = 0; turn < 100; turn += 1) {
+      await Promise.resolve();
+    }
+    expect(commandRan).toBe(false);
+    await submitted;
+    expect(commandRan).toBe(true);
+
+    await Effect.runPromise(channel.close());
+  });
+
   test("owns and interrupts its worker Fiber when the thread closes", async () => {
-    const channel = await Effect.runPromise(makeThreadCommandChannel());
+    const channel = makeThreadCommandChannel();
     expect(channel.closed()).toBe(false);
 
     await Effect.runPromise(channel.close());
@@ -47,7 +67,7 @@ describe("ThreadCommandChannel", () => {
   });
 
   test("settles active and queued submissions when the thread closes", async () => {
-    const channel = await Effect.runPromise(makeThreadCommandChannel());
+    const channel = makeThreadCommandChannel();
     const active = Effect.runPromiseExit(channel.submit(Effect.never));
     const queued = Effect.runPromiseExit(channel.submit(Effect.succeed("queued")));
 
@@ -63,7 +83,7 @@ describe("ThreadCommandChannel", () => {
 
   test("does not execute a queued command after its submitter is interrupted", async () => {
     const observed: string[] = [];
-    const channel = await Effect.runPromise(makeThreadCommandChannel());
+    const channel = makeThreadCommandChannel();
     let releaseFirst = (): void => undefined;
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;

@@ -36,7 +36,7 @@
     "@bufbuild/protobuf": "2.12.0",
     "@grpc/grpc-js": "1.14.5",
     "@tetral/gateway-protocol": "file:../gateway/packages/protocol",
-    "effect": "4.0.0-beta.66",
+    "effect": "4.0.0-beta.103",
     "zod": "4.6.6"
   },
   "overrides": {
