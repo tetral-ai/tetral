@@ -44,9 +44,13 @@ func (s *issueAPIStandIn) CloseIssue(number int) error {
 
 func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 	const reporter = "Report a Red Scheduled Run"
-	run := ScheduledRun{Workflow: "Scheduled Verification", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter}
-	title := ScheduledIssueTitle(run.Workflow)
-	open := []ScheduledIssue{{Number: 3, Title: "Scheduled check red on main: engine-vulncheck"}, {Number: 9, Title: title}}
+	run := ScheduledRun{Workflow: "Scheduled Verification", Schedule: "41 6 * * *", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter}
+	title := ScheduledIssueTitle(run.Workflow, run.Schedule)
+	if title != "Scheduled check red on main: Scheduled Verification (41 6 * * *)" {
+		t.Fatalf("title %q", title)
+	}
+	weekly := ScheduledIssue{Number: 5, Title: ScheduledIssueTitle(run.Workflow, "17 7 * * 1")}
+	open := []ScheduledIssue{{Number: 3, Title: "Scheduled check red on main: engine-vulncheck (23 6 * * *)"}, {Number: 9, Title: title}}
 	failedRun := []ScheduledJob{
 		{ID: 1, Name: "Dependency Advisories", Conclusion: "failure"},
 		{ID: 2, Name: "Report-only Coverage", Conclusion: "success"},
@@ -82,10 +86,15 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 			calls: []string{"log 1", "log 4", "comment 9\n" + failedBody},
 		},
 		{
-			name: "all jobs succeeded and an open issue: a comment, then the issue closes", jobs: green, issues: open, did: "closed",
+			name: "the jobs that ran succeeded, the rest skipped, and an open issue: a comment, then the issue closes", jobs: green, issues: open, did: "closed",
 			calls: []string{"comment 9\nScheduled run https://github.com/o/r/actions/runs/7 of Scheduled Verification on commit abc123 succeeded.\n", "close 9"},
 		},
 		{name: "all jobs succeeded and no open issue: nothing", jobs: green, issues: open[:1], did: "none"},
+		{name: "a green run leaves the other schedule's open issue as it is", jobs: green, issues: []ScheduledIssue{weekly}, did: "none"},
+		{
+			name: "a red run opens its own schedule's issue beside the other schedule's", jobs: failedRun, issues: []ScheduledIssue{weekly}, did: "created",
+			calls: []string{"log 1", "log 4", "label " + ScheduledRedLabel, "create " + title + " [" + ScheduledRedLabel + "]\n" + failedBody},
+		},
 		{
 			name: "none failed but one cancelled: nothing", issues: open, did: "none",
 			jobs: []ScheduledJob{{ID: 1, Name: "Dependency Advisories", Conclusion: "success"}, {ID: 2, Name: "Report-only Coverage", Conclusion: "cancelled"}},

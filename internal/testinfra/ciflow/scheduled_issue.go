@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// ScheduledRedLabel marks the one open issue per workflow that says its
-// scheduled run on main is red.
+// ScheduledRedLabel marks the one open issue per workflow and schedule that
+// says that schedule's run on main is red.
 const ScheduledRedLabel = "scheduled-check-red"
 
 // ScheduledJob is a job of a scheduled run as the GitHub API lists it.
@@ -38,17 +38,21 @@ type ScheduledIssueAPI interface {
 // ScheduledRun names the run the report is about.
 type ScheduledRun struct {
 	Workflow, URL, Commit string
+	// Schedule is the cron expression that started the run. A workflow's
+	// schedules can run different jobs, so each has its own issue.
+	Schedule string
 	// Reporter is the reporting job's own name, left out of the jobs it reads.
 	Reporter string
 }
 
-// ScheduledIssueTitle is the exact title of a workflow's issue.
-func ScheduledIssueTitle(workflow string) string {
-	return "Scheduled check red on main: " + workflow
+// ScheduledIssueTitle is the exact title of the issue of a workflow's
+// schedule.
+func ScheduledIssueTitle(workflow, schedule string) string {
+	return "Scheduled check red on main: " + workflow + " (" + schedule + ")"
 }
 
-// ReportScheduledRun keeps a workflow's issue in step with its scheduled
-// run: a run with a failed job opens the issue or comments on the open one;
+// ReportScheduledRun keeps the issue of a workflow's schedule in step with
+// its scheduled run: a run with a failed job opens the issue or comments on the open one;
 // a run whose jobs all succeeded comments on the open issue and closes it. A
 // skipped job did not run (each schedule runs only its own jobs) and counts
 // for neither; a run with a cancelled job and none failed changes nothing,
@@ -71,7 +75,7 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 			cancelled = true
 		}
 	}
-	title := ScheduledIssueTitle(run.Workflow)
+	title := ScheduledIssueTitle(run.Workflow, run.Schedule)
 	open, err := api.OpenIssues(ScheduledRedLabel)
 	if err != nil {
 		return "", fmt.Errorf("list the open issues: %w", err)

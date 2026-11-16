@@ -112,8 +112,9 @@ jobs:
       - name: Separate upstream translator module and symbol scans
         run: python3 scripts/check-envoy-secret-helper.py
 
-  # On a schedule only: opens this workflow's issue when a job failed, adds a
-  # comment while it stays red, and closes it on the next green run.
+  # On a schedule only: opens the issue of this workflow's schedule when a job
+  # failed, adds a comment while it stays red, and closes it on the schedule's
+  # next green run.
   report-red:
     name: Report a Red Scheduled Run
     needs: [govulncheck]
@@ -138,10 +139,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           WORKFLOW: ${{ github.workflow }}
+          SCHEDULE: ${{ github.event.schedule }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           go run ./internal/testinfra/cmd/tetral-ci-flow scheduled-issue
           --workflow "$WORKFLOW"
+          --schedule "$SCHEDULE"
           --run "$GITHUB_RUN_ID"
           --attempt "$GITHUB_RUN_ATTEMPT"
           --run-url "$RUN_URL"

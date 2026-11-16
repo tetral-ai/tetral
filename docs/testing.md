@@ -511,12 +511,13 @@ Every workflow with a schedule (Scheduled Verification, engine-vulncheck, CLI
 Dependency Check, Go Build Cache) ends with the job **Report a Red Scheduled
 Run**, which waits for all its other jobs whatever their result and acts only
 on a scheduled run (`tetral-ci-flow scheduled-issue`, with `actions: read` to
-read the run's jobs and `issues: write`). A run with a failed job opens the
-issue `Scheduled check red on main: <workflow name>`, labelled
-`scheduled-check-red`, or adds a comment to it while it is open; the next run
-whose jobs all succeeded comments and closes it. A job skipped because its
-schedule does not run it counts for neither; a run with a cancelled job and
-none failed leaves the issue as it is. Each failed job is listed with the
+read the run's jobs and `issues: write`). Each schedule has its own issue,
+since a workflow's schedules can run different jobs: a run with a failed job
+opens the issue `Scheduled check red on main: <workflow name> (<cron>)`,
+labelled `scheduled-check-red`, or adds a comment to it while it is open; the
+schedule's next run whose jobs all succeeded comments and closes it. A skipped
+job did not run and counts for neither, so a run whose other jobs succeeded is
+green; a run with a cancelled job and none failed leaves the issue as it is. Each failed job is listed with the
 cause its log prints: the advisories it reports, the tests that failed, or the
 error of a run that failed before its tests, and "no cause recorded" when the
 log names none, which is a defect of that job's output to fix.

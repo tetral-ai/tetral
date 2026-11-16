@@ -5,7 +5,7 @@
 // its ID waited for a runner and ran; gh reads the repository from the
 // checkout and the token from the environment or its own login.
 // scheduled-issue, the last job of each scheduled workflow, opens, comments
-// on or closes that workflow's issue for its scheduled runs on main.
+// on or closes the issue of the workflow's schedule for its runs on main.
 package main
 
 import (
@@ -95,20 +95,21 @@ func main() {
 		}
 	case "scheduled-issue":
 		workflow := flags.String("workflow", "", "the workflow's name")
+		schedule := flags.String("schedule", "", "the cron expression of the schedule that started the run")
 		run := flags.String("run", "", "the run's ID")
 		attempt := flags.Int("attempt", 1, "the run's attempt")
 		runURL := flags.String("run-url", "", "the run's page")
 		commit := flags.String("commit", "", "the commit the run tested")
 		reporter := flags.String("reporter", "", "the name of the job that runs this report")
 		_ = flags.Parse(os.Args[2:])
-		if *workflow == "" || *run == "" || *runURL == "" || *commit == "" || *reporter == "" {
-			fail(2, "usage: tetral-ci-flow scheduled-issue --workflow <name> --run <ID> --attempt <n> --run-url <URL> --commit <SHA> --reporter <job name>")
+		if *workflow == "" || *schedule == "" || *run == "" || *runURL == "" || *commit == "" || *reporter == "" {
+			fail(2, "usage: tetral-ci-flow scheduled-issue --workflow <name> --schedule <cron> --run <ID> --attempt <n> --run-url <URL> --commit <SHA> --reporter <job name>")
 		}
-		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, URL: *runURL, Commit: *commit, Reporter: *reporter})
+		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, Schedule: *schedule, URL: *runURL, Commit: *commit, Reporter: *reporter})
 		if err != nil {
 			fail(1, err.Error())
 		}
-		fmt.Printf("%s: %s\n", ciflow.ScheduledIssueTitle(*workflow), did)
+		fmt.Printf("%s: %s\n", ciflow.ScheduledIssueTitle(*workflow, *schedule), did)
 	default:
 		fail(2, "unknown command "+os.Args[1])
 	}
