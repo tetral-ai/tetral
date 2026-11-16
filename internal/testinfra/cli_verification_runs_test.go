@@ -295,6 +295,67 @@ func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 	}
 }
 
+// A run stopped by a signal or at its limit before its tests start ends the
+// command that runs with its ordinary children, as a build script is of Cargo.
+func TestCLIVerificationStoppedBeforeItsTestsEndsTheCommandWithItsChildren(t *testing.T) {
+	rows := []struct {
+		phase, wantError string
+		limit            bool
+	}{
+		{"build", "stopped by SIGTERM", false},
+		{"build", "stopped by the run's limit of 3 s", true},
+		{"seams", "stopped by SIGTERM", false},
+		{"reference-server", "stopped by SIGTERM", false},
+		{"digest", "stopped by SIGTERM", false},
+		{"list", "stopped by SIGTERM", false},
+	}
+	for _, row := range rows {
+		t.Run(row.phase+" "+row.wantError, func(t *testing.T) {
+			if row.phase == "digest" && runtime.GOOS != "linux" {
+				t.Skip("the build with the host bwrap's digest runs on Linux only")
+			}
+			child := filepath.Join(t.TempDir(), "child")
+			result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "", "CLI_FIXTURE_CHILD="+row.phase, "CLI_FIXTURE_CHILD_PID="+child)
+			if row.limit {
+				command.Args = append(command.Args, "--run-limit", "3")
+			}
+			var output strings.Builder
+			command.Stdout, command.Stderr = &output, &output
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var pid int
+			for start := time.Now(); pid == 0; time.Sleep(10 * time.Millisecond) {
+				if body, err := os.ReadFile(child); err == nil {
+					if pid, err = strconv.Atoi(string(body)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if time.Since(start) > 20*time.Second {
+					t.Fatalf("the %s command never started its child: %s", row.phase, output.String())
+				}
+			}
+			if !row.limit {
+				if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := command.Wait()
+			result.output = output.String()
+			if command.ProcessState.ExitCode() != 1 {
+				t.Fatalf("the stopped script ended %v\n%s", err, result.output)
+			}
+			readCLIVerificationFixture(t, &result)
+			if result.report.Error != row.wantError || result.report.Success {
+				t.Fatalf("report: %+v", result.report)
+			}
+			if cliVerificationRuns(t, pid) {
+				t.Errorf("process %d, a child of the %s command, outlived the stopped run", pid, row.phase)
+			}
+		})
+	}
+}
+
 func evalSymlinks(t *testing.T, path string) string {
 	t.Helper()
 	resolved, err := filepath.EvalSymlinks(path)

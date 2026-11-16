@@ -326,8 +326,9 @@ seconds. On macOS it first force-unmounts the run's drives, those of its
 in-memory machines included, because a listing of processes waits on a
 mount whose server has ended; the mounts at one depth are unmounted at
 once, so the time is that of the slowest, ten seconds or less, not the sum.
-The `reference` profile runs each command in a process group of its
-own, which a stop ends whole, and stops its whole run at 480 s, below the
+Each command before the tests, and each of the `reference` profile, runs in
+a process group of its own, which a stop ends whole, so a build's children
+end with it. The `reference` profile stops its whole run at 480 s, below the
 10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
 `error`. Every other profile stops its whole run, as a stop does, at 1,380 s
 (23 min) on Linux and 1,460 s (24 min 20 s) on macOS, with `stopped by the

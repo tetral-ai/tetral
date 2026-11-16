@@ -940,6 +940,17 @@ with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
     }) + "\n")
 print(phase + " stdout marker", flush=True)
 print(phase + " stderr marker", file=sys.stderr, flush=True)
+if os.environ.get("CLI_FIXTURE_CHILD") == phase:
+    # An ordinary child, as a build script is of cargo: in the command's
+    # group and session, its working directory the command's.
+    import subprocess
+    import time
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    child = subprocess.Popen(["sleep", "300"], **quiet)
+    written = Path(os.environ["CLI_FIXTURE_CHILD_PID"] + ".new")
+    written.write_text(str(child.pid))
+    written.rename(os.environ["CLI_FIXTURE_CHILD_PID"])
+    time.sleep(300)
 if phase == "list":
     # As cargo-nextest lists: every test of the scope by binary, with
     # whether the filter selects it. A filter names tests by their whole
