@@ -507,6 +507,20 @@ The readable CI topology is:
 - **CI Benchmark**: dispatched by hand to measure a speed change; see
   [CI Benchmark](#ci-benchmark). Nothing gates on it.
 
+Every workflow with a schedule (Scheduled Verification, engine-vulncheck, CLI
+Dependency Check, Go Build Cache) ends with the job **Report a Red Scheduled
+Run**, which waits for all its other jobs whatever their result and acts only
+on a scheduled run (`tetral-ci-flow scheduled-issue`, with `actions: read` to
+read the run's jobs and `issues: write`). A run with a failed job opens the
+issue `Scheduled check red on main: <workflow name>`, labelled
+`scheduled-check-red`, or adds a comment to it while it is open; the next run
+whose jobs all succeeded comments and closes it. A job skipped because its
+schedule does not run it counts for neither; a run with a cancelled job and
+none failed leaves the issue as it is. Each failed job is listed with the
+cause its log prints: the advisories it reports, the tests that failed, or the
+error of a run that failed before its tests, and "no cause recorded" when the
+log names none, which is a defect of that job's output to fix.
+
 `internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
 holds medians of Go Race evidence in milliseconds: every package's `Elapsed`
 (summed over its slices in a run) and its overhead per step (step time outside

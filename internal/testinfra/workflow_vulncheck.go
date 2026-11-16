@@ -49,11 +49,20 @@ func VerifyVulnerabilityWorkflow(root, module string, packages []string) error {
 	if err := verifyVulnerabilityTriggers(mappingValue(document.Content[0], "on")); err != nil {
 		return err
 	}
+	var job *workflowYAMLNode
 	jobs := mappingValue(document.Content[0], "jobs")
-	if jobs == nil || len(jobs.Content) != 2 {
-		return fmt.Errorf("vulnerability workflow must have exactly one job")
+	for index := 0; jobs != nil && index+1 < len(jobs.Content); index += 2 {
+		if jobs.Content[index].Value == scheduledReporterJobID {
+			continue
+		}
+		if job != nil {
+			return fmt.Errorf("vulnerability workflow must have exactly one job beside its scheduled reporter")
+		}
+		job = jobs.Content[index+1]
 	}
-	job := jobs.Content[1]
+	if job == nil {
+		return fmt.Errorf("vulnerability workflow must have exactly one job beside its scheduled reporter")
+	}
 	if mappingValue(job, "continue-on-error") != nil {
 		return fmt.Errorf("vulnerability job continues on error")
 	}

@@ -1030,6 +1030,9 @@ func VerifyWorkflowSkeletons(root string) error {
 		if err != nil {
 			return err
 		}
+		if err := verifyScheduledReporter(document.Content[0]); err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(file), err)
+		}
 		concurrency := mappingValue(document.Content[0], "concurrency")
 		group := scalar(concurrency)
 		if concurrency != nil && concurrency.Kind == workflowYAMLMapping {
@@ -1045,6 +1048,47 @@ func VerifyWorkflowSkeletons(root string) error {
 			}
 		}
 		fixed[filepath.Base(file)] = prefix
+	}
+	return nil
+}
+
+const (
+	scheduledReporterJobID     = "report-red"
+	scheduledReporterCondition = "always() && github.event_name == 'schedule'"
+)
+
+// verifyScheduledReporter holds that a workflow with a schedule ends with the
+// job that reports a red scheduled run: it waits for every other job whatever
+// their result, runs on a schedule only, and may write issues and read the
+// run's jobs and nothing else.
+func verifyScheduledReporter(workflow *workflowYAMLNode) error {
+	if mappingValue(mappingValue(workflow, "on"), "schedule") == nil {
+		return nil
+	}
+	jobs := mappingValue(workflow, "jobs")
+	reporter := mappingValue(jobs, scheduledReporterJobID)
+	if reporter == nil {
+		return fmt.Errorf("a scheduled workflow has no %s job", scheduledReporterJobID)
+	}
+	var others []string
+	for index := 0; jobs != nil && index+1 < len(jobs.Content); index += 2 {
+		if id := jobs.Content[index].Value; id != scheduledReporterJobID {
+			others = append(others, id)
+		}
+	}
+	needs := sequenceScalars(mappingValue(reporter, "needs"))
+	if needs == nil {
+		needs = []string{scalar(mappingValue(reporter, "needs"))}
+	}
+	if !sameStrings(needs, others) {
+		return fmt.Errorf("%s needs %v, not every other job %v", scheduledReporterJobID, needs, others)
+	}
+	if scalar(mappingValue(reporter, "if")) != scheduledReporterCondition {
+		return fmt.Errorf("%s does not run with if: %s", scheduledReporterJobID, scheduledReporterCondition)
+	}
+	permissions := mappingValue(reporter, "permissions")
+	if permissions == nil || len(permissions.Content) != 4 || scalar(mappingValue(permissions, "actions")) != "read" || scalar(mappingValue(permissions, "issues")) != "write" {
+		return fmt.Errorf("%s permissions are not exactly actions: read and issues: write", scheduledReporterJobID)
 	}
 	return nil
 }
