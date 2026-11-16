@@ -501,7 +501,9 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 				!sameCondition(scalar(mappingValue(steps[reference], "if")), "${{ !cancelled() && matrix.profile == 'functional' && steps.go.outcome == 'success' && steps.lint.outcome == 'success' }}") {
 				t.Fatal("linux: the functional job must check the reference control server after the tests, also after their failure")
 			}
-			stopCLIVerificationStep(t, workflow.Content[0], job, steps[reference], "functional")
+			if arguments := stopCLIVerificationStep(t, workflow.Content[0], job, steps[reference], "functional"); len(arguments) < 2 || arguments[1] != "reference" {
+				t.Fatalf("linux: the reference step runs the verification with %q, want profile reference", arguments)
+			}
 		}
 		uploads := 0
 		for index, step := range steps {
