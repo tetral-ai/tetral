@@ -44,6 +44,8 @@ func (ghIssueAPI) JobLog(id int64) (string, error) {
 	if api == "" {
 		api = "https://api.github.com"
 	}
+	// The address is the workflow's own API and repository, set by the runner.
+	//nolint:gosec
 	request, err := http.NewRequest(http.MethodGet, api+"/repos/"+os.Getenv("GH_REPO")+"/actions/jobs/"+strconv.FormatInt(id, 10)+"/logs", nil)
 	if err != nil {
 		return "", err
@@ -52,6 +54,7 @@ func (ghIssueAPI) JobLog(id int64) (string, error) {
 	request.Header.Set("Accept", "application/vnd.github+json")
 	// The API answers with a redirect to the log's storage, which the client
 	// follows without the token.
+	//nolint:gosec
 	response, err := (&http.Client{Timeout: time.Minute}).Do(request)
 	if err != nil {
 		return "", err
