@@ -20,33 +20,47 @@ import (
 
 // stream is one SSE stream of a connection.
 type stream struct {
-	conn          *connection
-	number        int
-	started       time.Time
-	frames        chan []byte
+	conn    *connection
+	number  int
+	started time.Time
+	// queue holds the events waiting to be written, in order, however many;
+	// wake tells the writer that one was added.
+	queueMu       sync.Mutex
+	queue         [][]byte
+	wake          chan struct{}
 	closed        chan struct{}
 	closeOnce     sync.Once
 	nextHeartbeat time.Time
 	log           *serverLog
 }
 
-// streamBuffer bounds the events waiting to be written on one stream.
-const streamBuffer = 1 << 16
-
 func (st *stream) send(data []byte, messageID, kind string) {
-	select {
-	case <-st.closed:
+	if st.isClosed() {
 		return
-	default:
 	}
+	st.queueMu.Lock()
+	st.queue = append(st.queue, data)
+	st.queueMu.Unlock()
 	select {
-	case st.frames <- data:
-		st.log.events = append(st.log.events, sentEvent{
-			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind, data: data,
-		})
+	case st.wake <- struct{}{}:
 	default:
-		st.close()
 	}
+	st.log.events = append(st.log.events, sentEvent{
+		ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind, data: data,
+	})
+}
+
+// take removes the next event waiting to be written.
+func (st *stream) take() ([]byte, bool) {
+	st.queueMu.Lock()
+	defer st.queueMu.Unlock()
+	if len(st.queue) == 0 {
+		return nil, false
+	}
+	frame := st.queue[0]
+	st.queue[0] = nil
+	st.queue = st.queue[1:]
+	return frame, true
 }
 
 func (st *stream) close() { st.closeOnce.Do(func() { close(st.closed) }) }
@@ -69,7 +83,7 @@ func (server *Server) openStream(conn *connection) *stream {
 	conn.streams++
 	st := &stream{
 		conn: conn, number: conn.streams, started: server.clock.Now(),
-		frames: make(chan []byte, streamBuffer), closed: make(chan struct{}),
+		wake: make(chan struct{}, 1), closed: make(chan struct{}),
 		log: &server.log,
 	}
 	conn.stream = st
@@ -277,21 +291,20 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		return err == nil
 	}
 	for {
-		select {
-		case frame := <-st.frames:
+		if frame, ok := st.take(); ok {
 			if !write(frame) {
 				server.lost(st)
 				return
 			}
+			continue
+		}
+		select {
+		case <-st.wake:
 		case <-st.closed:
-			for {
-				select {
-				case frame := <-st.frames:
-					write(frame)
-				default:
-					return
-				}
+			for frame, ok := st.take(); ok; frame, ok = st.take() {
+				write(frame)
 			}
+			return
 		case <-request.Context().Done():
 			server.lost(st)
 			return
