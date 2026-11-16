@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
 func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
@@ -666,5 +668,44 @@ func writeReport(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFailedRunKeepsItsDependencyContainersLogs(t *testing.T) {
+	// The run starts its own PostgreSQL container, not an external one.
+	t.Setenv(storagetest.EnvTestDatabaseURL, "")
+	root := t.TempDir()
+	for path, body := range map[string]string{
+		"go.mod": "module example.com/failing\n\ngo 1.26\n",
+		"failing/failing_test.go": "package failing\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+			"func TestFailsAgainstTheDatabase(t *testing.T) {\n\tt.Log(\"evidence directory: \" + os.Getenv(\"" + EnvTestEvidenceDir + "\"))\n\tt.Fatal(\"deliberate failure\")\n}\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, path), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := t.TempDir()
+	plan := Plan{Profile: ProfileFast, Dependencies: []string{"postgresql"}, Selections: []Selection{{Group: "go", Packages: []string{"./failing"}, Tests: []string{"TestFailsAgainstTheDatabase"}}}}
+	result, err := Execute(context.Background(), plan, RunOptions{Root: root, OutputDir: output})
+	if err == nil || result.Status != "fail" {
+		t.Fatalf("run = %s, %v; want a failed run", result.Status, err)
+	}
+	logs, _ := filepath.Glob(filepath.Join(output, "dependency-logs", "postgresql-tetral-test-postgres-*.log"))
+	if len(logs) != 1 {
+		t.Fatalf("dependency logs = %q; want one PostgreSQL log", logs)
+	}
+	body, err := os.ReadFile(logs[0])
+	if err != nil || !strings.Contains(string(body), "database system is ready to accept connections") {
+		t.Fatalf("PostgreSQL log = %q, %v; want its start", body, err)
+	}
+	reports, _ := filepath.Glob(filepath.Join(output, "go-*.jsonl"))
+	if len(reports) != 1 {
+		t.Fatalf("Go reports = %q; want one", reports)
+	}
+	if report, err := os.ReadFile(reports[0]); err != nil || !strings.Contains(string(report), "evidence directory: "+output) {
+		t.Fatalf("the test was not told the evidence directory %s: %v", output, err)
 	}
 }

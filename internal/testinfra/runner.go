@@ -82,6 +82,9 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		_ = writeJSON(filepath.Join(options.OutputDir, "result.json"), result)
 		return result, err
 	}
+	if evidence, absErr := filepath.Abs(options.OutputDir); absErr == nil {
+		dependencies.environment = append(withoutEnvironmentVariable(dependencies.environment, EnvTestEvidenceDir), EnvTestEvidenceDir+"="+evidence)
+	}
 	var runErr error
 	goSelections := make([]Selection, 0)
 	for _, selection := range plan.Selections {
@@ -102,6 +105,9 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		runErr = errors.Join(runErr, stepErr)
 	}
 
+	if runErr != nil {
+		dependencies.saveLogs(options.OutputDir)
+	}
 	teardownStart := time.Now()
 	stopErr := dependencies.stopBounded()
 	result.Teardown = time.Since(teardownStart)

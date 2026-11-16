@@ -544,6 +544,16 @@ func (m *dependencyManager) recordDependencyTeardown(name string, elapsed time.D
 	}
 }
 
+// saveLogs keeps each dependency container's log beneath directory, for a
+// run whose tests failed against them.
+func (m *dependencyManager) saveLogs(directory string) {
+	ctx, cancel := context.WithTimeout(context.Background(), dependencyStopTimeout)
+	defer cancel()
+	for index, name := range m.containers {
+		saveContainerLog(ctx, name, filepath.Join(directory, "dependency-logs", m.containerDependencies[index]+"-"+name+".log"))
+	}
+}
+
 func (m *dependencyManager) stopBounded() error {
 	ctx, cancel := context.WithTimeout(context.Background(), dependencyStopTimeout)
 	defer cancel()

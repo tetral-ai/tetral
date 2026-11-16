@@ -285,7 +285,7 @@ func TestPinnedEdgeEnvoyRuntimeAndTranslator(t *testing.T) {
 	if !found {
 		t.Fatal("actual helper lacks the exact upstream translator module")
 	}
-	resources, err := NewDockerResources(ctx, "edge-prerequisite")
+	resources, err := NewDockerResources(ctx, t, "edge-prerequisite")
 	if err != nil {
 		t.Fatal(err)
 	}

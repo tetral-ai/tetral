@@ -239,8 +239,17 @@ its fixtures run (`go list`, `git`, `gh`, `docker` and the setup commands such a
 the Bun workspace installs, image pulls and the egctl SecretType helper build)
 fails with an error that names the program and its subcommand and ends with up
 to the last 20 lines it wrote to standard error, so a failed plan or setup shows
-its own cause in the console and in `result.json`. Native package commands
-remain appropriate while developing one owning package; the repository
+its own cause in the console and in `result.json`.
+
+A run whose steps failed keeps the whole log of each dependency container it
+started (PostgreSQL, MinIO, NATS, ...) in `dependency-logs/` of its evidence,
+before it removes them. A test that starts containers through
+`testinfra.NewDockerResources` passes itself to it; when that test has failed by
+the fixture's `Close`, each container's log is kept in
+`container-logs/<test>/<image>-<container>.log` of the run's evidence (the
+runner names the directory in `TETRAL_TEST_EVIDENCE_DIR`; outside the runner
+nothing is kept). Native package
+commands remain appropriate while developing one owning package; the repository
 profiles are the pre-submission contract.
 
 ## The CLI's tests

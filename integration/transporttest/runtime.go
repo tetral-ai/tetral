@@ -104,7 +104,7 @@ func newRuntimePair(t *testing.T, profile, uid string, root *Authority, startPro
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	p := &RuntimePair{Directory: t.TempDir(), PodUID: uid, ProcessID: "process-" + uid}
-	p.Resources = Must(testinfra.NewDockerResources(ctx, "runtime-tls"))
+	p.Resources = Must(testinfra.NewDockerResources(ctx, t, "runtime-tls"))
 	network := Must(p.Resources.Network(ctx))
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)

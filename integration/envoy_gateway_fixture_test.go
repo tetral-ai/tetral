@@ -379,7 +379,7 @@ func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *tran
 	}
 	startup, stopStartup := context.WithTimeout(ctx, fixtureCallTimeout)
 	defer stopStartup()
-	resources, err := testinfra.NewDockerResources(startup, "public-edge")
+	resources, err := testinfra.NewDockerResources(startup, t, "public-edge")
 	if err != nil {
 		t.Fatal(err)
 	}

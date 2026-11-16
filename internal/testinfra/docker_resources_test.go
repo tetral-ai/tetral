@@ -3,6 +3,8 @@ package testinfra
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -12,7 +14,7 @@ import (
 func TestDockerResourcesOwnAndCleanFailedFixture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	r, err := NewDockerResources(ctx, "ownership-proof")
+	r, err := NewDockerResources(ctx, t, "ownership-proof")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,5 +146,57 @@ func TestDockerResourcesCollectDeadOwnerNetwork(t *testing.T) {
 	output, err := dockerOutput(ctx, "network", "ls", "-q", "--filter", "name=^"+name+"$")
 	if err != nil || output != "" {
 		t.Fatalf("dead fixture network remains: %q %v", output, err)
+	}
+}
+
+type fixtureTestOutcome struct {
+	name   string
+	failed bool
+}
+
+func (o fixtureTestOutcome) Name() string { return o.name }
+func (o fixtureTestOutcome) Failed() bool { return o.failed }
+
+func TestFixtureKeepsItsContainersLogsWhenItsTestFailed(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		failed   bool
+		wantLogs bool
+	}{
+		{name: "a failed test keeps each container's log under its name", failed: true, wantLogs: true},
+		{name: "a passed test keeps none", failed: false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			evidence := t.TempDir()
+			t.Setenv(EnvTestEvidenceDir, evidence)
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			r, err := NewDockerResources(ctx, fixtureTestOutcome{name: "TestOwner/case_one", failed: row.failed}, "log-proof")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := r.Run(ctx, ContainerSpec{Image: postgresImage, Entrypoint: "sh", Command: []string{"-c", "echo fixture-log-line; echo fixture-error-line >&2; sleep 300"}})
+			if err != nil {
+				_ = r.Close(context.Background())
+				t.Fatal(err)
+			}
+			for logs, _ := c.Logs(ctx); !strings.Contains(logs, "fixture-error-line"); logs, _ = c.Logs(ctx) {
+				if ctx.Err() != nil {
+					t.Fatalf("the container never logged its lines: %q", logs)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if err := r.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(evidence, "container-logs", "TestOwner_case_one", "postgres-"+c.Name+".log")
+			body, err := os.ReadFile(path) //nolint:gosec // The path is beneath this test's directory.
+			if row.wantLogs && (err != nil || !strings.Contains(string(body), "fixture-log-line") || !strings.Contains(string(body), "fixture-error-line")) {
+				t.Fatalf("log %s = %q, %v; want both lines", path, body, err)
+			}
+			if _, statErr := os.Stat(filepath.Join(evidence, "container-logs")); !row.wantLogs && !os.IsNotExist(statErr) {
+				t.Fatalf("a passed test kept container logs: %v", statErr)
+			}
+		})
 	}
 }

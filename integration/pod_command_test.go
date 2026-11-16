@@ -90,7 +90,7 @@ func startPodCommand(t *testing.T, name, pkg, namespace string, env map[string]s
 	if image == "" {
 		t.Fatal("the base inventory names no final image of the Engine Dockerfile")
 	}
-	resources, err := testinfra.NewDockerResources(ctx, "pod-command")
+	resources, err := testinfra.NewDockerResources(ctx, t, "pod-command")
 	if err != nil {
 		t.Fatal(err)
 	}
