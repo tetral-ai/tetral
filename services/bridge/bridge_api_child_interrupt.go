@@ -15,8 +15,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -214,7 +216,7 @@ func logThreadControlFailure(logger *slog.Logger, scope *bridgev1.RuntimeScope, 
 		return
 	}
 	defer func() { _ = recover() }()
-	logger.Error("thread control failed",
+	workload.WriteFailure(context.Background(), logger, "thread_control_failed", internalgrpc.StatusCodeName(status.Code(err)), workload.CauseOf(err),
 		slog.String("event.kind", "thread_control_failed"),
 		slog.String("operation", "thread_control"),
 		slog.String("operation.id", safeActorDiagnosticIdentity(operationID)),
@@ -222,9 +224,6 @@ func logThreadControlFailure(logger *slog.Logger, scope *bridgev1.RuntimeScope, 
 		slog.String("session.id", scope.GetSessionId()),
 		slog.String("thread.id", scope.GetSessionThreadId()),
 		slog.String("stage", stage),
-		slog.String("error.class", "thread_control"),
-		slog.String("error.code", status.Code(err).String()),
-		slog.String("error.message_safe", "thread control failed"),
 	)
 }
 

@@ -51,8 +51,8 @@ pub(crate) enum Uploaded {
         status: u16,
         code: String,
     },
-    /// The content file could not be read.
-    Unreadable,
+    /// The content file could not be read, with the cause.
+    Unreadable(observe::Cause),
 }
 
 /// The upload state of one Session.
@@ -208,7 +208,9 @@ impl Owner {
                     )
                     .await
                 }
-                _ => Uploaded::Unreadable,
+                _ => Uploaded::Unreadable(observe::Cause::system(
+                    "the upload's content source was gone when its turn came",
+                )),
             };
             let _ = mailbox.send(Message::UploadEnded {
                 key: task_key,
@@ -337,16 +339,18 @@ impl Owner {
                     "upload_content",
                     status,
                     &code,
+                    None,
                     &span,
                 )
                 .await;
             }
-            Uploaded::Unreadable => {
+            Uploaded::Unreadable(cause) => {
                 self.fault_changes(
                     std::slice::from_ref(&key),
                     "upload_content",
                     0,
                     "content_unreadable",
+                    Some(cause),
                     &span,
                 )
                 .await;
@@ -359,13 +363,15 @@ impl Owner {
     }
 
     /// A fault keeps the change pending with its code; it is tried again
-    /// only at a retry point.
+    /// only at a retry point. `cause` is that of a fault of this CLI's own;
+    /// one that Engine answered has none.
     pub(crate) async fn fault_changes(
         &mut self,
         keys: &[Key],
         operation: &'static str,
         status: u16,
         code: &str,
+        cause: Option<observe::Cause>,
         span: &tracing::Span,
     ) {
         let pending: Vec<_> = keys
@@ -379,14 +385,22 @@ impl Owner {
         if pending.is_empty() {
             return;
         }
-        span.in_scope(|| {
-            observe::warn!(
+        span.in_scope(|| match cause {
+            Some(cause) => observe::warn!(
+                "drive.upload_fault",
+                drive_transfer.operation = observe::Id(operation),
+                drive_transfer.changes = pending.len() as i64,
+                http.response.status_code = i64::from(status),
+                error.code = observe::Code(crate::upload::declared(code)),
+                error.message = cause
+            ),
+            None => observe::warn!(
                 "drive.upload_fault",
                 drive_transfer.operation = observe::Id(operation),
                 drive_transfer.changes = pending.len() as i64,
                 http.response.status_code = i64::from(status),
                 error.code = observe::Code(crate::upload::declared(code))
-            )
+            ),
         });
         for key in keys {
             self.uncovered.remove(key);
@@ -549,7 +563,12 @@ async fn upload(
             };
             match hashed {
                 Ok(Ok((sha256, size))) => (path, sha256, size),
-                Ok(Err(_)) | Err(_) => return Uploaded::Unreadable,
+                Ok(Err(error)) => {
+                    return Uploaded::Unreadable(observe::Cause::system(&error.to_string()));
+                }
+                Err(ended) => {
+                    return Uploaded::Unreadable(observe::Cause::system(&ended.to_string()));
+                }
             }
         }
     };
@@ -557,7 +576,9 @@ async fn upload(
         return Uploaded::Done { sha256, size };
     }
     let Ok(hash) = Sha256::new(sha256.clone()) else {
-        return Uploaded::Unreadable;
+        return Uploaded::Unreadable(observe::Cause::system(
+            "the content's hash is not a SHA-256",
+        ));
     };
     let request = Request {
         drive_id,

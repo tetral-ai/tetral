@@ -90,6 +90,10 @@ func TestOpenPlainDSNEmptyAndMalformedAreDiagnostics(t *testing.T) {
 	}{
 		{name: "empty", dsn: ""},
 		{name: "malformed", dsn: "postgres://tetral:" + sensitivePlainDSNSentinel + "@%zz/tetral"},
+		{name: "slash in password", dsn: "postgres://tetral:ab9Q/" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
+		{name: "question mark in password", dsn: "postgres://tetral:ab9Q?" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
+		{name: "hash in password", dsn: "postgres://tetral:ab9Q#" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
+		{name: "bad escape in password", dsn: "postgres://tetral:ab9Q%zz" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := OpenPlainDSN(ctx, "TETRAL_DATABASE_URL", tc.dsn)
@@ -98,6 +102,8 @@ func TestOpenPlainDSNEmptyAndMalformedAreDiagnostics(t *testing.T) {
 				t.Fatalf("descriptor = %+v; want unknown fields", diagnostic.Descriptor)
 			}
 			assertPublicSafe(t, err, tc.dsn, sensitivePlainDSNSentinel)
+			// The recorded cause becomes the failure record's error.message.
+			assertPublicSafe(t, diagnostic.RecordedCause(), tc.dsn, "ab9Q", "%zz", sensitivePlainDSNSentinel)
 		})
 	}
 }

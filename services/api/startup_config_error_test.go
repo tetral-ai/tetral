@@ -15,7 +15,7 @@ import (
 // config-validation error — blob.ConfigError — as a
 // workload.ConfigError carrying the underlying safe static message. The foreign
 // types are structurally unmatchable by workload.AsConfigError, so without the
-// helper they would degrade to class-only startup_error.
+// helper they would be recorded as startup_error.
 func TestAsStartupConfigErrorConvertsForeignConfigErrors(t *testing.T) {
 	for _, test := range []struct {
 		name    string

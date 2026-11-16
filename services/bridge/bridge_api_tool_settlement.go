@@ -36,6 +36,7 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 	if settlement == nil || settlement.GetToolUseEventId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "Tool settlement target is required")
 	}
+	evidence.Kind = "schema"
 	canonicalSettlement, err := canonicalRuntimeToolSettlement(settlement)
 	if err != nil {
 		return nil, err

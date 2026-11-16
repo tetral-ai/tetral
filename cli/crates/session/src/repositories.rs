@@ -60,7 +60,20 @@ pub fn listed(session_directory: &Path) -> Vec<String> {
 /// inventory, which must remain available for operator recovery.
 pub(crate) fn read_listed(session_directory: &Path) -> std::io::Result<Vec<String>> {
     match std::fs::read(session_directory.join(REPOSITORIES_FILE)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
+        // The parser's own text can quote the file, so only its kind and place
+        // are kept.
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            std::io::Error::other(match error.classify() {
+                serde_json::error::Category::Data => {
+                    "the file's JSON is not an array of paths".to_owned()
+                }
+                _ => format!(
+                    "the file is not JSON: line {}, column {}",
+                    error.line(),
+                    error.column()
+                ),
+            })
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error),
     }
@@ -607,28 +620,19 @@ async fn git_command(
 }
 
 /// Records a launcher that exited before its `git` ran, with the last
-/// nonempty line of its stderr as the cause when it wrote one.
+/// nonempty line of its stderr as the cause, or that it wrote none.
 fn record_launch_failure(job: &Job, stderr: &[u8]) {
-    let line = last_line(&String::from_utf8_lossy(stderr));
-    let session = observe::Id(job.session_id.as_str());
-    let binding = observe::Id(job.binding_id.as_str());
-    let code = observe::Code("git_launch_failed");
+    let mut line = last_line(&String::from_utf8_lossy(stderr));
     if line.is_empty() {
-        observe::warn!(
-            "repository.git_launch_failed",
-            session.id = session,
-            binding.id = binding,
-            error.code = code
-        );
-    } else {
-        observe::warn!(
-            "repository.git_launch_failed",
-            session.id = session,
-            binding.id = binding,
-            error.code = code,
-            error.message = observe::Cause::system(&line)
-        );
+        line = "the launcher wrote nothing to its standard error".to_owned();
     }
+    observe::warn!(
+        "repository.git_launch_failed",
+        session.id = observe::Id(job.session_id.as_str()),
+        binding.id = observe::Id(job.binding_id.as_str()),
+        error.code = observe::Code("git_launch_failed"),
+        error.message = observe::Cause::system(&line)
+    );
 }
 
 /// The cause that a failed `git clone`'s stderr names, checked in this

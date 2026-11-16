@@ -503,6 +503,8 @@ func (h *instanceHandler) writeError(w http.ResponseWriter, r *http.Request, err
 	case errors.As(err, &validation), errors.As(err, &tooLarge), errors.As(err, &conflict), errors.As(err, &limit), errors.As(err, &offline), errors.As(err, &unavailable),
 		errors.As(err, &claimed), errors.As(err, &notPending), errors.As(err, &notClaimed):
 	default:
+		// The answer names the store; the request's failure record takes the error itself.
+		httpapi.NoteRequestFailure(r, err)
 		err = &httpapi.UnavailableError{Message: "the instance store is unavailable"}
 	}
 	httpapi.WriteError(w, r, err)

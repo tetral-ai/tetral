@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralapi "github.com/tetral-ai/tetral/services/api"
 )
@@ -119,6 +120,44 @@ func TestTetralAPIProductionRouterExercisesRepresentativeMatureFamilies(t *testi
 
 // An open drive change stream ends when the process context ends, as it
 // does when shutdown begins, so the HTTP drain does not wait for it.
+// A request the handler answers with a 5xx is recorded with the handler's
+// error as its cause. Layer 2: the production router on PostgreSQL, whose
+// event insert is made to fail. The request's prompt holds a marker: with
+// every record written at DEBUG, http.request.failed carries the store's
+// error and no record holds the marker.
+func TestTetralAPIAFailedRequestRecordsItsCauseAndNoneOfItsContent(t *testing.T) {
+	const marker = "MARKER_PROMPT"
+	var logs bytes.Buffer
+	env := newTetralAPITestEnv(t, func(config *tetralapi.RouterConfig) {
+		config.Logger = workloadtest.Logger(t, &logs, "api", "observability.json")
+	})
+	agentID := createTetralAPIResource(t, env.router, "/v1/agents", `{"name":"canary-agent","model":"anthropic/claude-opus-4-8","system":"v1","tools":[{"type":"tetral_agent_toolset","family":"claude"}]}`)
+	environmentID := createTetralAPIResource(t, env.router, "/v1/environments", `{"name":"canary-env","config":{"networking":{"type":"unrestricted"}}}`)
+	sessionID := createTetralAPIResource(t, env.router, "/v1/sessions?beta=true", `{"agent":"`+agentID+`","environment_id":"`+environmentID+`","vault_ids":[]}`)
+	if _, err := env.admin.Exec(`CREATE FUNCTION public.fail_event_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'fixture event store failure' USING ERRCODE = 'P0001'; END $$;
+		CREATE TRIGGER fail_event_fixture BEFORE INSERT ON session_events FOR EACH ROW EXECUTE FUNCTION public.fail_event_fixture()`); err != nil {
+		t.Fatal(err)
+	}
+	logs.Reset()
+	response := requestTetralAPI(env.router, http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+		`{"events":[{"type":"user.message","content":[{"type":"text","text":"`+marker+`"}]}]}`, tetralAPITestAPIKeyID)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body=%s; want 500 from the failed insert", response.Code, response.Body.String())
+	}
+	failures := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "http.request.failed")
+	if len(failures) != 1 {
+		t.Fatalf("http.request.failed records = %v; want one", failures)
+	}
+	cause, _ := failures[0]["error.message"].(string)
+	if failures[0]["error.code"] != "server_error" || !strings.Contains(cause, "ERROR: fixture event store failure (SQLSTATE P0001)") {
+		t.Fatalf("http.request.failed = %v; want the store's error as the cause", failures[0])
+	}
+	if strings.Contains(logs.String(), marker) {
+		t.Fatalf("a record holds the request's prompt: %s", logs.String())
+	}
+}
+
 func TestTetralAPIDriveChangeStreamEndsWithTheProcessContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

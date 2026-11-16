@@ -104,6 +104,9 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 // WriteError maps a typed error to an HTTP status and writes the standard JSON error response.
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	classification := classifyError(err)
+	if classification.status >= http.StatusInternalServerError {
+		NoteRequestFailure(r, err)
+	}
 	var rejected *driveErrors.CommitRejectedError
 	if errors.As(err, &rejected) && (rejected.Result.Reason == driveErrors.ReasonConflict || rejected.Result.Reason == driveErrors.ReasonPathRule) {
 		w.Header().Set("x-should-retry", "false")

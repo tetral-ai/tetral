@@ -105,6 +105,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	var diagnosticOutput bytes.Buffer
 	diagnosticConfig := workload.DefaultDiagnosticConfig()
 	diagnosticConfig.Level = slog.LevelDebug
+	diagnosticConfig.Burst = 1 << 20 // every failure is written, so each subtest's record can be read
 	diagnosticOwner := workload.NewProcessLogger(&diagnosticOutput, "auth", "test", "owning", diagnosticConfig)
 	defer diagnosticOwner.CloseWithBudget()
 	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: diagnosticOwner.Logger})
@@ -539,7 +540,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	}
 	diagnosticOwner.CloseWithBudget()
 	classes := map[string]bool{}
-	provenance := false
+	provenance, closedStore := false, false
 	correlated := false
 	for _, line := range bytes.Split(bytes.TrimSpace(diagnosticOutput.Bytes()), []byte("\n")) {
 		var event map[string]any
@@ -549,6 +550,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if class, ok := event["error.class"].(string); ok {
 			classes[class] = true
 		}
+		closedStore = closedStore || event["error.code"] == "auth_store_unavailable" && event["error.message"] == "sql: database is closed"
 		if event["auth.identity.kind"] == auth.IdentityService && event["auth.rule.revision"] == float64(1) && event["auth.identity.revision"] == float64(1) && event["auth.grant.revision"] == float64(1) {
 			provenance = true
 		}
@@ -559,9 +561,12 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	if !classes["authentication_error"] || !classes["dependency_unavailable"] || !provenance || !correlated {
 		t.Fatalf("Check diagnostics lost established class/provenance/correlation: classes=%v provenance=%t correlation=%t", classes, provenance, correlated)
 	}
-	for _, forbidden := range []string{testBootstrapAPIKey(), "tetral_sk_", "tetral_at_", "ws_auth_test", "identity_ext_service", "rule_ext_service", "grant_ext_service", "database is closed", "/v1/sessions"} {
+	if !closedStore {
+		t.Fatal("the closed database's admission record lost its cause")
+	}
+	for _, forbidden := range []string{testBootstrapAPIKey(), "tetral_sk_", "tetral_at_", "ws_auth_test", "identity_ext_service", "rule_ext_service", "grant_ext_service", "/v1/sessions"} {
 		if strings.Contains(diagnosticOutput.String(), forbidden) {
-			t.Fatal("Check diagnostic disclosed credentials/selectors or raw dependency material")
+			t.Fatalf("Check diagnostic disclosed %q", forbidden)
 		}
 	}
 

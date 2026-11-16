@@ -3,12 +3,14 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const maxProviderLogMessageBytes = 512
@@ -105,26 +107,63 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 			message = "sandbox provider failure detail redacted"
 		}
 		attrs = append(attrs,
-			slog.String("error.class", "sandbox_provider_error"),
-			slog.String("error.code", outcome.ErrorKind),
 			slog.Int("provider.status_code", outcome.ProviderStatusCode),
-			slog.String("error.message_safe", providerOperationFailedMessage),
 			slog.String("provider.failure_detail", boundedProviderLogMessage(message)),
 		)
 		attrs = appendProviderDiagnosticAttrs(attrs, outcome.Diagnostic)
+		writeProviderFailure(ctx, logger, event, outcome.ErrorKind, message, localProviderCause(ctx, nil), attrs)
+		return
 	} else if buildFailed {
-		attrs = append(attrs,
-			slog.String("error.class", "sandbox_provider_error"),
-			slog.String("error.code", "artifact_build_failed"),
-			slog.String("error.message_safe", "sandbox environment artifact build failed"),
-		)
+		writeProviderFailure(ctx, logger, event, "artifact_build_failed", "the provider reported the environment artifact build as failed", nil, attrs)
+		return
 	}
 	logger.LogAttrs(ctx, level, event, attrs...)
 }
 
-// providerOperationFailedMessage is the fixed safe text of every provider
-// failure; the provider's own safe detail goes to provider.failure_detail.
-const providerOperationFailedMessage = "sandbox provider operation failed"
+// writeProviderFailure writes a provider operation's failure record. Its
+// cause is this service's own safe text for the failure, followed by the
+// local error behind it when there is one, never the provider's response.
+func writeProviderFailure(ctx context.Context, logger *slog.Logger, event, code, safeMessage string, local error, attrs []slog.Attr) {
+	fields := make([]any, len(attrs))
+	for i, attr := range attrs {
+		fields[i] = attr
+	}
+	workload.WriteFailure(ctx, logger, event, code, providerFailureCause(code, safeMessage, local), fields...)
+}
+
+// providerFailureCause is the cause of a provider failure: this service's
+// safe text for it and the local error. The message of an output capture scan
+// failure is written by the capture helper inside the Session's sandbox, so
+// its cause names only the kind the helper reported.
+func providerFailureCause(code, safeMessage string, local error) workload.Cause {
+	if reported, ok := strings.CutPrefix(code, "output_capture_scan_"); ok {
+		safeMessage = "the sandbox output capture helper reported " + reported
+	}
+	if local != nil {
+		return workload.CauseOf(fmt.Errorf("%s: %w", safeMessage, local))
+	}
+	return workload.CauseOf(errors.New(safeMessage))
+}
+
+// localProviderCause is the part of a failed provider operation that is this
+// service's own: the end of the operation's context, or an error a carrier in
+// err's chain keeps for the record (a blob store's). The provider's answer
+// and what the sandbox printed stay out.
+func localProviderCause(ctx context.Context, err error) error {
+	if ctx != nil && ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	for _, ended := range []error{context.DeadlineExceeded, context.Canceled} {
+		if errors.Is(err, ended) {
+			return ended
+		}
+	}
+	var carrier interface{ RecordedCause() error }
+	if errors.As(err, &carrier) {
+		return carrier.RecordedCause()
+	}
+	return nil
+}
 
 // providerOperationEvent names a provider operation's record: a failure has an
 // event of its own, so each event keeps one level.
@@ -184,13 +223,12 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 	attrs = appendProviderIdentityAttrs(attrs, identity)
 	if err != nil {
 		attrs = append(attrs,
-			slog.String("error.class", "sandbox_provider_error"),
-			slog.String("error.code", errorKind),
 			slog.Int("provider.status_code", statusCode),
-			slog.String("error.message_safe", providerOperationFailedMessage),
 			slog.String("provider.failure_detail", boundedProviderLogMessage(safeMessage)),
 		)
 		attrs = appendProviderDiagnosticAttrs(attrs, diagnostic)
+		writeProviderFailure(ctx, logger, event, errorKind, safeMessage, localProviderCause(ctx, err), attrs)
+		return
 	}
 	logger.LogAttrs(ctx, level, event, attrs...)
 }

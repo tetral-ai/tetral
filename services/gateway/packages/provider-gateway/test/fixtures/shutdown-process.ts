@@ -8,6 +8,7 @@ import { createProviderGatewayApp } from "../../src/app.js";
 import { runProviderGatewayCommand } from "../../src/command.js";
 import { validProviderRequest } from "../unit/fixtures.js";
 import { commandEnv, commandFixture } from "./command-process.js";
+import { createJsonLogger } from "../../src/logger.js";
 const [sink = "normal", trigger = "SIGTERM", mode = "held"] =
   process.argv.slice(2);
 Object.assign(process.env, commandEnv(), {
@@ -16,10 +17,10 @@ Object.assign(process.env, commandEnv(), {
 });
 const emit = (event: string) =>
   process.stdout.write(JSON.stringify({ event, at: Date.now() }) + "\n");
-const observe = (record: Record<string, unknown>) => {
+const observe = () => {
   if (sink === "throw") throw new Error("synthetic diagnostic sink failure");
-  if (sink === "normal") process.stderr.write(JSON.stringify(record) + "\n");
 };
+const written = createJsonLogger({ write: (line) => { process.stderr.write(line); } });
 let release!: () => void, entered!: () => void;
 const held = new Promise<void>((resolve) => {
   release = resolve;
@@ -31,7 +32,7 @@ let app: ReturnType<typeof createProviderGatewayApp>;
 await runProcessEntry((processBoundary) =>
   runProviderGatewayCommand({
     processBoundary,
-    logger: { info: observe, error: observe },
+    logger: sink === "normal" ? written : { info: observe, error: observe },
     dependencyBuilder: async ({ config, logger }) => {
       app = createProviderGatewayApp({
         config: {

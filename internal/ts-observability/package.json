@@ -8,6 +8,8 @@
     ".": "./src/index.ts",
     "./effect": "./src/effect.ts",
     "./test-support/executable-shutdown": "./test-support/executable-shutdown.ts",
+    "./test-support/cause-shaping.json": "./test-support/cause-shaping.json",
+    "./test-support/go-typescript-rules.json": "./test-support/go-typescript-rules.json",
     "./test-support/handled-failure-record.json": "./test-support/handled-failure-record.json",
     "./test-support/recording-telemetry": "./test-support/recording-telemetry.ts"
   },

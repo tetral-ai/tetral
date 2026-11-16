@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type MaintenanceStore interface {
@@ -146,16 +147,13 @@ func logJobRunnerRetentionResult(logger *slog.Logger, result queue.JobRunnerTerm
 		slog.Int("target.count", result.ExhaustedStates),
 	}
 	if err != nil {
-		logger.Warn(operation+".failed", append([]any{
+		workload.WriteFailure(context.Background(), logger, operation+".failed", "queue_retention_failed", workload.CauseOf(err), append([]any{
 			slog.String("operation", operation),
 			slog.String("event.kind", operation+".failed"),
 			slog.String("component", "queue"),
 			slog.Int64("duration.ms", duration.Milliseconds()),
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "queue_maintenance_error"),
-			slog.String("error.code", "queue_retention_failed"),
-			slog.String("error.message_safe", "queue retention failed"),
 		}, counts...)...)
 		return
 	}
@@ -181,16 +179,13 @@ func logLeaseReclaimResult(logger *slog.Logger, reclaimed int, err error, durati
 		return
 	}
 	if err != nil {
-		logger.Warn("queue.lease_reclaim.failed",
+		workload.WriteFailure(context.Background(), logger, "queue.lease_reclaim.failed", "lease_reclaim_failed", workload.CauseOf(err),
 			slog.String("operation", "queue.lease_reclaim"),
 			slog.String("event.kind", "queue.lease_reclaim.failed"),
 			slog.String("component", "queue"),
 			slog.Int64("duration.ms", duration.Milliseconds()),
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "queue_maintenance_error"),
-			slog.String("error.code", "lease_reclaim_failed"),
-			slog.String("error.message_safe", "queue lease reclaim failed"),
 		)
 		return
 	}
@@ -210,16 +205,13 @@ func logSandboxRetentionResult(logger *slog.Logger, operation string, countField
 		return
 	}
 	if err != nil {
-		logger.Warn(operation+".failed",
+		workload.WriteFailure(context.Background(), logger, operation+".failed", "queue_retention_failed", workload.CauseOf(err),
 			slog.String("operation", operation),
 			slog.String("event.kind", operation+".failed"),
 			slog.String("component", "queue"),
 			slog.Int64("duration.ms", duration.Milliseconds()),
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "queue_maintenance_error"),
-			slog.String("error.code", "queue_retention_failed"),
-			slog.String("error.message_safe", "queue retention failed"),
 		)
 		return
 	}

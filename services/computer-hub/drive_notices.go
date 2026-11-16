@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -72,11 +73,8 @@ func (s *Streams) driveNotice(ctx context.Context, payload string) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.WarnContext(ctx, "drive_notices.route_failed",
-			slog.String("operation", "computer_hub.drive_notice_route"),
-			slog.String("error.class", "dependency_unavailable"),
-			slog.String("error.code", "drive_notice_route_failed"),
-			slog.String("error.message_safe", "drive notice routing failed; the streams send their drives' last commits again"))
+		workload.WriteFailure(ctx, s.logger, "drive_notices.route_failed", "drive_notice_route_failed", workload.CauseOf(err),
+			slog.String("operation", "computer_hub.drive_notice_route"))
 		for _, stream := range streams {
 			stream.resendDrives()
 		}

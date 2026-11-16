@@ -3,10 +3,16 @@ package files
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -113,4 +119,37 @@ func (r attachmentLockRow) Scan(dest ...any) error {
 		}
 	}
 	return nil
+}
+
+// A legacy PDF that cannot be staged for counting fails with the error that
+// stopped it, which the request's failure record carries as its cause.
+func TestCountStoredPDFKeepsTheErrorThatStoppedIt(t *testing.T) {
+	readFailure := errors.New("blob stream reset")
+	for _, test := range []struct {
+		name   string
+		source io.Reader
+		tmpDir string
+		want   error
+	}{
+		{name: "the staging file", source: strings.NewReader("%PDF"), tmpDir: filepath.Join(t.TempDir(), "missing"), want: fs.ErrNotExist},
+		{name: "the stored bytes", source: iotest.ErrReader(readFailure), tmpDir: t.TempDir(), want: readFailure},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("TMPDIR", test.tmpDir)
+			store := &PostgreSQLFileStore{blob: readerBlobStore{source: test.source}}
+			_, err := store.countStoredPDF(context.Background(), "files/wksp/object_a", 4)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("countStoredPDF error = %v; want %v in its chain", err, test.want)
+			}
+		})
+	}
+}
+
+type readerBlobStore struct {
+	blob.BlobStore
+	source io.Reader
+}
+
+func (s readerBlobStore) Get(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(s.source), nil
 }

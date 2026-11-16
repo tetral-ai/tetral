@@ -38,7 +38,7 @@ func main() {
 
 // run opens the process's dependencies in order (configuration, database
 // with schema and role checks, blob store) and serves until ctx ends. Each
-// startup failure is one redacted record.
+// startup failure is one record with the error as its cause.
 func run(ctx context.Context, env computerhub.Env) error {
 	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
 	diagnosticOwner := workload.NewProcessLogger(os.Stderr, computerhub.ServiceName, env.Getenv(workload.EnvDeploymentEnvironment), env.Getenv(workload.EnvServiceVersion), diagnostics)

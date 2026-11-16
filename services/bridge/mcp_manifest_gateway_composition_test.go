@@ -68,7 +68,7 @@ func TestPostgreSQLMCPManifestCapacityClassificationAcrossBridgeAndGateway(t *te
 	if err := json.Unmarshal(output, &result); err != nil {
 		t.Fatalf("decode manifest capacity composition: %v: %s", err, output)
 	}
-	if result.OverCap["ok"] != true || result.TransportCapacity["ok"] != false || result.TransportCapacity["code"] != "grpc_8" {
+	if result.OverCap["ok"] != true || result.TransportCapacity["ok"] != false || result.TransportCapacity["code"] != "resource_exhausted" {
 		t.Fatalf("capacity classifications = over-cap %#v transport %#v", result.OverCap, result.TransportCapacity)
 	}
 	var readiness, diagnostic string

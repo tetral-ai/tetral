@@ -7,8 +7,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
-	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -16,9 +14,10 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
-func TestMigrationLogsObserveRollbackAndRetryWithoutDriverDetails(t *testing.T) {
+func TestMigrationLogsObserveRollbackAndRetryWithTheDriverErrorAsCause(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	_, err := db.Exec(`CREATE SCHEMA schema_fault; CREATE FUNCTION schema_fault.reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -31,19 +30,17 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_end WHEN TAG IN ('CREATE IN
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	ctx := storage.WithMigrationLogger(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)))
+	ctx := storage.WithMigrationLogger(context.Background(), workloadtest.Logger(t, &logs, "db-prepare", "../../cmd/tetral-db-prepare/observability.json"))
 	if err := storage.MigrateSchema(ctx, db); err == nil {
 		t.Fatal("expected rejected DDL")
-	}
-	if strings.Contains(logs.String(), "private-migration") {
-		t.Fatal("driver message or detail escaped into logs")
 	}
 	records := migrationLogRecords(t, &logs)
 	if len(records) != 2 {
 		t.Fatalf("records = %d; want start and failure", len(records))
 	}
 	failed := records[1]
-	if failed["msg"] != "schema.migration.failed" || failed["schema.version"] != float64(1) || failed["schema.step"] != "index_runtime_processes_current" || failed["db.sqlstate"] != "42501" || failed["transaction.outcome"] != "rolled_back" {
+	if failed["msg"] != "schema.migration.failed" || failed["schema.version"] != float64(1) || failed["schema.step"] != "index_runtime_processes_current" || failed["db.sqlstate"] != "42501" || failed["transaction.outcome"] != "rolled_back" ||
+		failed["error.message"] != "ERROR: private-migration-message (SQLSTATE 42501)" {
 		t.Fatalf("failure record = %#v", failed)
 	}
 	var stamps, columns int
@@ -88,15 +85,12 @@ func TestMigrationCommitAcknowledgementLossLogsUnknown(t *testing.T) {
 	db := sql.OpenDB(lostCommitConnector{stdlib.GetConnector(*config)})
 	defer func() { _ = db.Close() }()
 	var logs bytes.Buffer
-	ctx := storage.WithMigrationLogger(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)))
+	ctx := storage.WithMigrationLogger(context.Background(), workloadtest.Logger(t, &logs, "db-prepare", "../../cmd/tetral-db-prepare/observability.json"))
 	if err := storage.MigrateSchema(ctx, db); err == nil {
 		t.Fatal("expected lost acknowledgement")
 	}
-	if strings.Contains(logs.String(), "private-commit-response") {
-		t.Fatal("driver error escaped into logs")
-	}
 	records := migrationLogRecords(t, &logs)
-	if len(records) != 2 || records[1]["schema.step"] != "commit" || records[1]["transaction.outcome"] != "unknown" {
+	if len(records) != 2 || records[1]["schema.step"] != "commit" || records[1]["transaction.outcome"] != "unknown" || records[1]["error.message"] != "private-commit-response" {
 		t.Fatalf("records = %#v", records)
 	}
 	var stamps int

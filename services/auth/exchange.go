@@ -93,7 +93,7 @@ func (cfg RouterConfig) exchange(w http.ResponseWriter, r *http.Request) {
 	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(cfg.ExchangeLimits.BodyReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		deny(&auth.UnavailableError{})
+		deny(auth.Unavailable(err))
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, int64(cfg.ExchangeLimits.BodyBytes))
@@ -142,7 +142,7 @@ func (cfg RouterConfig) exchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.Resolver == nil || cfg.AssertionVerifier == nil {
-		deny(&auth.UnavailableError{})
+		deny(auth.Unavailable(errors.New("the token exchange has no resolver or assertion verifier")))
 		return
 	}
 	stage = "rule"

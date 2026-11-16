@@ -28,6 +28,8 @@ export interface SQLOwnerObservation {
   readonly pools: number;
   readonly failedCount?: number;
   readonly reason?: SQLOwnerReloadFailure;
+  /** What a reload_failed failed with: the cause of its record. */
+  readonly error?: unknown;
 }
 export interface PostgresSQLOwnerOptions {
   readonly url: string;
@@ -36,7 +38,7 @@ export interface PostgresSQLOwnerOptions {
   readonly drainTimeoutSeconds?: number;
   readonly verify: (sql: Bun.SQL) => Promise<void>;
   readonly sqlFactory?: (options: Bun.SQL.PostgresOrMySQLOptions) => Bun.SQL;
-  /** Bounded lifecycle observations carry no connection strings or material. */
+  /** Bounded lifecycle observations; a failed reload carries the error it failed with. */
   readonly observe?: (event: SQLOwnerObservation) => void;
 }
 interface Trust {
@@ -55,9 +57,17 @@ const candidateRetryInitialMs = 250;
 const candidateRetryMaxMs = 5_000;
 
 async function readTrust(path: string): Promise<Trust> {
-  const resolved = await realpath(path);
-  const pem = await readFile(resolved, "utf8");
-  if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
+  let pem: string;
+  try {
+    const resolved = await realpath(path);
+    pem = await readFile(resolved, "utf8");
+    if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
+  } catch (error) {
+    // The file system's error names the mounted path. This package has no
+    // dependencies, so it leaves the path out itself.
+    const named = error instanceof Error ? (error as NodeJS.ErrnoException).path : undefined;
+    throw typeof named === "string" ? new Error((error as Error).message.replaceAll(` '${named}'`, "")) : error;
+  }
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (blocks === null || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() !== "") throw new Error("database trust bundle is malformed");
   const now = Date.now();
@@ -111,16 +121,16 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
   // A failing candidate is retried with exponential spacing; any new mounted
   // fingerprint or an activation resets the spacing.
   let failedFingerprint: string | undefined, failedAttempts = 0, retryAt = 0;
-  const event = (kind: SQLOwnerObservation["kind"], failedCount?: number, reason?: SQLOwnerReloadFailure) => {
+  const event = (kind: SQLOwnerObservation["kind"], failedCount?: number, reason?: SQLOwnerReloadFailure, error?: unknown) => {
     // Diagnostics cannot alter SQL admission, activation or joined cleanup.
-    try { options.observe?.({ kind, pools, ...(failedCount === undefined ? {} : { failedCount }), ...(reason === undefined ? {} : { reason }) }); } catch { /* observer owns its sink */ }
+    try { options.observe?.({ kind, pools, ...(failedCount === undefined ? {} : { failedCount }), ...(reason === undefined ? {} : { reason }), ...(error === undefined ? {} : { error }) }); } catch { /* observer owns its sink */ }
   };
-  const reloadFailed = (reason?: SQLOwnerReloadFailure) => {
+  const reloadFailed = (error: unknown, reason?: SQLOwnerReloadFailure) => {
     reloadFailures++;
     const now = Date.now();
     if (!degraded || now - lastFailureSummary >= 30_000) {
       degraded = true; lastFailureSummary = now;
-      event("reload_failed", reloadFailures, reason);
+      event("reload_failed", reloadFailures, reason, error);
     }
   };
   const reloadRecovered = () => {
@@ -159,7 +169,7 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
     const generation: Generation = { sql, ...(trust === undefined ? {} : { trust }), users: 0, idle: [] };
     generations.add(generation); pools++; event("opened");
     try { await options.verify(sql); return generation; }
-    catch { await closePool(generation, 1); throw new Error("database pool generation verification failed"); }
+    catch (error) { await closePool(generation, 1); throw new Error("database pool generation verification failed", { cause: error }); }
   };
   // Undefined only while a narrowed trust update has retired admission and no
   // candidate built from the mounted bundle has verified yet.
@@ -192,7 +202,7 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
     if (stopped || options.tls === undefined) return;
     let trust: Trust;
     try { trust = await readTrust(options.tls.caPath); }
-    catch { if (!stopped) reloadFailed("invalid_bundle"); return; }
+    catch (error) { if (!stopped) reloadFailed(error, "invalid_bundle"); return; }
     if (stopped) return;
     if (active !== undefined && active.trust?.fingerprint === trust.fingerprint) {
       failedFingerprint = undefined; failedAttempts = 0;
@@ -208,17 +218,17 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
       let retiring: Promise<void> | undefined;
       if (previous?.trust !== undefined && narrows(previous.trust, trust)) {
         active = undefined;
-        retiring = drainOld(previous).catch(() => { if (!stopped) reloadFailed(); });
+        retiring = drainOld(previous).catch((error: unknown) => { if (!stopped) reloadFailed(error); });
       }
       try {
         let candidate: Generation;
         try { candidate = await create(trust); }
-        catch {
+        catch (error) {
           if (!stopped) {
             failedAttempts = trust.fingerprint === failedFingerprint ? failedAttempts + 1 : 1;
             failedFingerprint = trust.fingerprint;
             retryAt = Date.now() + Math.min(candidateRetryMaxMs, candidateRetryInitialMs * 2 ** (failedAttempts - 1));
-            reloadFailed("candidate_verification_failed");
+            reloadFailed(error, "candidate_verification_failed");
           }
           return;
         }
@@ -226,7 +236,7 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
         active = candidate; event("activated"); reloadRecovered();
         failedFingerprint = undefined; failedAttempts = 0;
         if (previous !== undefined && retiring === undefined) await drainOld(previous);
-      } catch { if (!stopped) reloadFailed(); }
+      } catch (error) { if (!stopped) reloadFailed(error); }
       finally {
         if (retiring !== undefined) await retiring;
       }

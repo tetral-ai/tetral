@@ -163,6 +163,47 @@ func TestCopyExecutorProviderErrorMessageIsSafe(t *testing.T) {
 	if !errors.As(err, &copyErr) || copyErr.Kind != "head_destination_failed" {
 		t.Fatalf("error = %T %v; want head_destination_failed CopyError", err, err)
 	}
+	if copyErr.RecordedCause() != provider.err {
+		t.Fatalf("recorded cause = %v; want the blob store's error", copyErr.RecordedCause())
+	}
+}
+
+// The race that a destination head after a duplicate copy cannot settle
+// keeps that head's error for the record, next to the duplicate.
+func TestCopyExecutorUnresolvedDuplicateRaceKeepsTheHeadError(t *testing.T) {
+	ctx := context.Background()
+	inner := blob.NewFakeBlobStore()
+	action := testCopyAction()
+	if err := inner.Put(ctx, action.SourceKey, bytes.NewReader([]byte("canonical bytes")), int64(len("canonical bytes"))); err != nil {
+		t.Fatalf("put canonical: %v", err)
+	}
+	headFailure := errors.New("blob store connection reset")
+	race := &failingSecondHeadBlobStore{duplicateRaceBlobStore: duplicateRaceBlobStore{inner: inner}, key: action.DestinationKey, err: headFailure}
+	_, err := (CopyExecutor{Blob: race}).CopyIfNeeded(ctx, action)
+	var copyErr *CopyError
+	if !errors.As(err, &copyErr) || copyErr.Kind != "copy_race_unresolved" {
+		t.Fatalf("error = %T %v; want copy_race_unresolved CopyError", err, err)
+	}
+	if !errors.Is(copyErr.RecordedCause(), headFailure) {
+		t.Fatalf("recorded cause = %v; want the failed head's error", copyErr.RecordedCause())
+	}
+}
+
+type failingSecondHeadBlobStore struct {
+	duplicateRaceBlobStore
+	key   string
+	err   error
+	heads int
+}
+
+func (s *failingSecondHeadBlobStore) HeadObject(ctx context.Context, key string) (blob.ObjectMetadata, error) {
+	if key == s.key {
+		s.heads++
+		if s.heads == 2 {
+			return blob.ObjectMetadata{}, s.err
+		}
+	}
+	return s.duplicateRaceBlobStore.HeadObject(ctx, key)
 }
 
 func testCopyAction() Action {

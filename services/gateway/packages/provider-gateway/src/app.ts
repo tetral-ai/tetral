@@ -123,11 +123,12 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
         readyFlag = true;
         completeServiceColdStart();
         logWorkloadStarted(options.logger);
-      } catch {
+      } catch (error) {
         readyFlag = false;
         try { options.logger.error(startupFailureLogRecord({
           kind: "startup_error",
           message: "gateway service startup failed",
+          error,
           causeCategory,
         })); } catch { /* diagnostics do not replace startup failure */ }
         throw new Error("gateway service startup failed");

@@ -5,7 +5,8 @@
       "errors": {
         "runtime_failure": {
           "class": "approval_review_failure",
-          "message_safe": "approval reviewer failed"
+          "message_safe": "approval reviewer failed",
+          "cause": true
         }
       },
       "fields": {
@@ -13,6 +14,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -33,33 +35,40 @@
       "errors": {
         "durable_close_failed": {
           "class": "reviewer_lifecycle_failure",
-          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary",
+          "cause": true
         },
         "durable_close_rejected": {
           "class": "reviewer_lifecycle_failure",
-          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary",
+          "cause": true
         },
         "hot_close_failed": {
           "class": "reviewer_lifecycle_failure",
-          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary",
+          "cause": true
         },
         "hot_eviction_failed": {
           "class": "reviewer_lifecycle_failure",
-          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary",
+          "cause": true
         },
         "hot_release_failed": {
           "class": "reviewer_lifecycle_failure",
-          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary",
+          "cause": true
         },
         "quiescence_unconfirmed": {
           "class": "reviewer_lifecycle_failure",
-          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary"
+          "message_safe": "approval reviewer lifecycle did not reach its expected durable boundary",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "lifecycle.reason": "string",
@@ -79,37 +88,45 @@
       "errors": {
         "ack_mismatch": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         },
         "schema_mismatch": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         },
         "superseded": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         },
         "timeout": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         },
         "unavailable": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         },
         "unknown": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         },
         "unrepairable": {
           "class": "durable_settlement_failure",
-          "message_safe": "approval reviewer outcome was not durably acknowledged"
+          "message_safe": "approval reviewer outcome was not durably acknowledged",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -151,13 +168,15 @@
       "errors": {
         "invalid_tool_definition": {
           "class": "provider_tool_declaration",
-          "message_safe": "provider tool declaration rejected"
+          "message_safe": "provider tool declaration rejected",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -216,7 +235,8 @@
       "errors": {
         "runtime_binding_handoff_incomplete": {
           "class": "shutdown_error",
-          "message_safe": "Runtime binding release did not commit"
+          "message_safe": "Runtime binding release did not commit",
+          "cause": true
         }
       },
       "fields": {
@@ -225,6 +245,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.code": "string",
@@ -244,7 +265,8 @@
       "errors": {
         "runtime_checkpoint_expired": {
           "class": "shutdown_error",
-          "message_safe": "Runtime current step deadline exceeded"
+          "message_safe": "Runtime current step deadline exceeded",
+          "cause": true
         }
       },
       "fields": {
@@ -255,6 +277,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "kind": "string",
@@ -307,13 +330,15 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "failure.kind": "string",
@@ -328,18 +353,9 @@
     },
     "runtime_closeout_recovered": {
       "audience": "operators",
-      "errors": {
-        "runtime_closeout_recovered": {
-          "class": "runtime_closeout",
-          "message_safe": "runtime_closeout_recovered"
-        }
-      },
       "fields": {
         "closeout.active_count": "integer",
         "component": "string",
-        "error.class": "string",
-        "error.code": "string",
-        "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
         "operation": "string"
@@ -352,7 +368,8 @@
       "errors": {
         "runtime_closeout_stalled": {
           "class": "runtime_closeout",
-          "message_safe": "runtime_closeout_stalled"
+          "message_safe": "runtime_closeout_stalled",
+          "cause": true
         }
       },
       "fields": {
@@ -360,6 +377,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -373,15 +391,18 @@
       "errors": {
         "ack_mismatch": {
           "class": "runtime_closeout",
-          "message_safe": "runtime_closeout_unrepairable"
+          "message_safe": "runtime_closeout_unrepairable",
+          "cause": true
         },
         "schema_mismatch": {
           "class": "runtime_closeout",
-          "message_safe": "runtime_closeout_unrepairable"
+          "message_safe": "runtime_closeout_unrepairable",
+          "cause": true
         },
         "unrepairable": {
           "class": "runtime_closeout",
-          "message_safe": "runtime_closeout_unrepairable"
+          "message_safe": "runtime_closeout_unrepairable",
+          "cause": true
         }
       },
       "fields": {
@@ -390,6 +411,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -425,51 +447,63 @@
       "errors": {
         "authentication_rejected": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "binding_mismatch": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "identity_conflict": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "internal_failure": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "invalid_content": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "invalid_request": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "operation_rejected": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "operation_unavailable": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "resource_exhausted": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "runtime_not_accepting": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "runtime_process_mismatch": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         },
         "selected_pod_mismatch": {
           "class": "runtime_command_rejected",
-          "message_safe": "runtime command rejected"
+          "message_safe": "runtime command rejected",
+          "cause": true
         }
       },
       "fields": {
@@ -480,6 +514,7 @@
         "duration.ms": "number",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.code": "string",
@@ -522,13 +557,15 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -633,13 +670,15 @@
       "errors": {
         "runtime_process_report_failed": {
           "class": "dependency_error",
-          "message_safe": "runtime process report failed"
+          "message_safe": "runtime process report failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "failed.count": "integer",
@@ -665,19 +704,23 @@
       "errors": {
         "gateway_cancelled": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed"
+          "message_safe": "Gateway provider stream failed",
+          "cause": true
         },
         "gateway_protocol_error": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed"
+          "message_safe": "Gateway provider stream failed",
+          "cause": true
         },
         "gateway_stream_error": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed"
+          "message_safe": "Gateway provider stream failed",
+          "cause": true
         },
         "gateway_unavailable": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed"
+          "message_safe": "Gateway provider stream failed",
+          "cause": true
         }
       },
       "fields": {
@@ -686,6 +729,7 @@
         "duration.ms": "number",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -712,25 +756,30 @@
       "errors": {
         "gateway_cancelled": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed before opening"
+          "message_safe": "Gateway provider stream failed before opening",
+          "cause": true
         },
         "gateway_protocol_error": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed before opening"
+          "message_safe": "Gateway provider stream failed before opening",
+          "cause": true
         },
         "gateway_stream_error": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed before opening"
+          "message_safe": "Gateway provider stream failed before opening",
+          "cause": true
         },
         "gateway_unavailable": {
           "class": "gateway_client",
-          "message_safe": "Gateway provider stream failed before opening"
+          "message_safe": "Gateway provider stream failed before opening",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -793,13 +842,15 @@
       "errors": {
         "runtime_semantic_error": {
           "class": "runtime_contract_validation",
-          "message_safe": "runtime contract validation failed"
+          "message_safe": "runtime contract validation failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "message": "string",
@@ -821,13 +872,15 @@
       "errors": {
         "shutdown_active_run_settlement_failed": {
           "class": "shutdown_error",
-          "message_safe": "runtime pod shutdown active-run settlement failed"
+          "message_safe": "runtime pod shutdown active-run settlement failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "kind": "string",
@@ -842,13 +895,15 @@
       "errors": {
         "shutdown_drain_timeout": {
           "class": "shutdown_error",
-          "message_safe": "runtime pod shutdown drain timed out"
+          "message_safe": "runtime pod shutdown drain timed out",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "kind": "string",
@@ -863,17 +918,20 @@
       "errors": {
         "config_error": {
           "class": "config_error",
-          "message_safe": "configuration invalid"
+          "message_safe": "configuration invalid",
+          "cause": true
         },
         "startup_error": {
           "class": "startup_error",
-          "message_safe": "runtime pod startup failed"
+          "message_safe": "runtime pod startup failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "kind": "string",

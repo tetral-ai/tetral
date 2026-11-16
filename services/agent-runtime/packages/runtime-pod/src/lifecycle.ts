@@ -341,6 +341,7 @@ export class RuntimePodLifecycle {
         ...shutdownFailureLogRecord({
           event: "runtime_binding_handoff_incomplete",
           message: "Runtime binding release did not commit",
+          error,
         }),
         "workspace.id": scope.workspaceId,
         "session.id": scope.sessionId,
@@ -449,7 +450,7 @@ export class RuntimePodLifecycle {
             lastFailureLogged = Date.now();
             try {
               this.options.logger.error(
-                runtimeProcessReportFailureLogRecord({ failedCount }),
+                runtimeProcessReportFailureLogRecord({ failedCount, error }),
               );
             } catch {
               /* diagnostic isolation */
@@ -659,6 +660,7 @@ export class RuntimePodLifecycle {
           shutdownFailureLogRecord({
             event: "shutdown_active_run_settlement_failed",
             message: "runtime pod shutdown active-run settlement failed",
+            error,
           }),
         );
       } catch {

@@ -113,6 +113,11 @@ export interface RuntimeInterruptControlCommand
 	};
 }
 
+/** A failed result's error field, absent when no error is in hand. */
+function errorField(error: unknown): { readonly error?: unknown } {
+	return error === undefined ? {} : { error };
+}
+
 function interruptStateCommand(
 	command: RuntimeInterruptControlCommand,
 ): RuntimeInterruptCommandState {
@@ -160,6 +165,8 @@ export type InterruptControlResult =
 				| "context_load_failed";
 			readonly retryable?: boolean | undefined;
 			readonly errorCode?: string | number | undefined;
+			/** The error behind the failure, when there was one, for the command record. */
+			readonly error?: unknown;
 	  };
 
 /** Common applied, duplicate, conflict, or capacity result for hot control commands. */
@@ -176,6 +183,8 @@ export type RuntimeControlResult =
 			readonly ok: false;
 			readonly sessionId: string;
 			readonly reason: ControlRejectionReason;
+			/** The error behind the failure, when there was one, for the command record. */
+			readonly error?: unknown;
 	  };
 
 /** Result of admitting a task notification to the owning thread's serialized input queue. */
@@ -196,6 +205,8 @@ export type AcceptInputResult =
 			readonly sessionId: string;
 			readonly reason: SubAgentRejectionReason;
 			readonly retryable?: boolean | undefined;
+			/** The error behind the failure, when there was one, for the command record. */
+			readonly error?: unknown;
 	  };
 
 /** Result of a thread preload, interrupt, activation, or close operation. */
@@ -222,6 +233,8 @@ export type ThreadLifecycleResult =
 				| "thread_busy"
 				| "context_load_failed";
 			readonly retryable?: boolean | undefined;
+			/** The error behind the failure, when there was one, for the command record. */
+			readonly error?: unknown;
 	  };
 
 /** Observation result for joining a resident thread with an optional timeout. */
@@ -475,6 +488,8 @@ export interface RuntimeCloseoutEvent {
 		| "ack_mismatch"
 		| "unrepairable"
 		| undefined;
+	/** The writer error that left an unrepairable closeout, for its failure record. */
+	readonly error?: unknown;
 }
 
 /** Effective post-gate manifest state observed at the resident Session owner. */
@@ -986,14 +1001,19 @@ export function layer(
 				runtimeBindingToken: commandRuntimeBindingToken(command),
 			});
 
+			/** Runs a command on the thread's channel; `closed` answers a closed channel or a failed command with the error behind it. */
 			const submitThreadCommand = <CommandResult, ClosedResult>(
 				threadEntry: ThreadEntry,
 				command: Effect.Effect<CommandResult>,
-				closedResult: ClosedResult,
+				closed: (error: unknown) => ClosedResult,
 			): Effect.Effect<CommandResult | ClosedResult> =>
 				threadEntry.commandChannel
 					.submit(command)
-					.pipe(Effect.catchCause(() => Effect.succeed(closedResult)));
+					.pipe(
+						Effect.catchCause((cause) =>
+							Effect.succeed(closed(Cause.squash(cause))),
+						),
+					);
 
 			const removeThreadEntry = (
 				sessionEntry: SessionEntry,
@@ -1286,6 +1306,7 @@ export function layer(
 								event: "runtime_closeout_unrepairable",
 								activeCloseouts: stalledCloseoutCount(),
 								errorCode,
+								error: result.error,
 							});
 							return "unrepairable" as const;
 						}
@@ -1565,6 +1586,7 @@ export function layer(
 						| "context_load_failed"
 						| "thread_busy",
 					retryable?: boolean,
+					error?: unknown,
 				) => CommandResult,
 				startPendingWork = false,
 			): Effect.Effect<CommandResult> =>
@@ -1610,6 +1632,7 @@ export function layer(
 															? "local_session_capacity_exceeded"
 															: "context_load_failed",
 														installed.retryable,
+														installed.error,
 													);
 												}
 											}
@@ -1629,7 +1652,11 @@ export function layer(
 						yield* Deferred.succeed(prepared.installation.start, undefined);
 					}
 					const commandResult = yield* queued.value.pipe(
-						Effect.catchCause(() => Effect.succeed(unavailable("thread_busy"))),
+						Effect.catchCause((cause) =>
+							Effect.succeed(
+								unavailable("thread_busy", undefined, Cause.squash(cause)),
+							),
+						),
 					);
 					if (prepared.installation !== undefined) {
 						const installed = yield* Deferred.await(
@@ -1761,7 +1788,7 @@ export function layer(
 									: { reviewerExecutionToken }),
 							} as const;
 						}),
-					(reason, retryable) =>
+					(reason, retryable, error) =>
 						({
 							ok: false,
 							sessionId: command.sessionId,
@@ -1769,6 +1796,7 @@ export function layer(
 							...(reason === "context_load_failed" && retryable !== undefined
 								? { retryable }
 								: {}),
+							...errorField(error),
 						}) as AcceptInputResult,
 				);
 
@@ -1892,6 +1920,7 @@ export function layer(
 							ok: false,
 							sessionId,
 							reason: "context_load_failed",
+							error: settlement.error,
 						} as const;
 					}
 					if (settlement.type === "conflict") {
@@ -1972,10 +2001,11 @@ export function layer(
 										},
 									);
 								},
-								(reason) => ({
+								(reason, _retryable, error) => ({
 									ok: false,
 									sessionId,
 									reason: reason === "thread_busy" ? "control_busy" : reason,
+									...errorField(error),
 								}),
 							);
 						if (
@@ -2035,10 +2065,15 @@ export function layer(
 								}
 								return { type: result };
 							}),
-							{ type: "conflict" as const },
+							(error) => ({ type: "conflict" as const, error }),
 						);
 						if (admission.type === "conflict") {
-							return { ok: false, sessionId, reason: "control_busy" };
+							return {
+								ok: false,
+								sessionId,
+								reason: "control_busy",
+								...("error" in admission ? errorField(admission.error) : {}),
+							};
 						}
 						yield* Fiber.interrupt(runSlot.ownerFiber).pipe(
 							Effect.exit,
@@ -2126,7 +2161,8 @@ export function layer(
 							}
 							return settled;
 						}),
-						{ ok: false, sessionId, reason: "control_busy" } as const,
+						(error) =>
+							({ ok: false, sessionId, reason: "control_busy", error }) as const,
 					);
 					if (
 						((result.ok && "stale" in result) || reloadRequired) &&
@@ -2197,7 +2233,7 @@ export function layer(
 										applied: settlement.applied,
 									} as const;
 								}),
-							(reason) =>
+							(reason, _retryable, error) =>
 								({
 									ok: false,
 									sessionId,
@@ -2207,6 +2243,7 @@ export function layer(
 										: reason === "context_load_failed"
 											? "context_load_failed"
 											: "control_busy",
+									...errorField(error),
 								}) as RuntimeControlResult,
 							true,
 						);
@@ -2265,7 +2302,7 @@ export function layer(
 								applied: accepted === "applied",
 							} as const;
 						}),
-					(reason) => ({
+					(reason, _retryable, error) => ({
 						ok: false,
 						sessionId,
 						reason:
@@ -2274,6 +2311,7 @@ export function layer(
 								: reason === "context_load_failed"
 									? "context_load_failed"
 									: "control_busy",
+						...errorField(error),
 					}),
 				);
 
@@ -2849,6 +2887,7 @@ export function layer(
 										retryable: parsedLoadFailure.success
 											? parsedLoadFailure.data.retryable
 											: false,
+										error: Cause.squash(installExit.cause),
 									};
 							if (!result.ok) {
                 threadResult.threadEntry.runtimeThread.state.invalidateResidentState();
@@ -2961,6 +3000,7 @@ export function layer(
 										retryable: parsedLoadFailure.success
 											? parsedLoadFailure.data.retryable
 											: false,
+										error: Cause.squash(authorityExit.cause),
 									};
 								}
 							}
@@ -3060,7 +3100,7 @@ export function layer(
 						Effect.sync(() =>
 							threadEntry.runtimeThread.state.beginCooperativeCancel(),
 						),
-						undefined,
+						() => undefined,
 					);
 					yield* Fiber.interrupt(runSlot.ownerFiber).pipe(
 						Effect.exit,
@@ -3298,12 +3338,13 @@ export function layer(
 								applied: true,
 							} as const;
 						}),
-						{
+						(error) => ({
 							ok: false,
 							sessionId: command.sessionId,
 							sessionThreadId: command.sessionThreadId,
 							reason: "thread_busy",
-						} as const,
+							error,
+						}) as const,
 					);
 				});
 
@@ -3780,7 +3821,7 @@ export function layer(
 									runSlot.stopping = true;
 								}
 							}),
-							undefined,
+							() => undefined,
 						);
 					}
 					yield* Effect.all(

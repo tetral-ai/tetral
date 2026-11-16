@@ -44,11 +44,18 @@ type ListResult struct {
 
 type DiscoveryError struct {
 	Diagnostic string
+	// Cause is the error of the call the diagnostic was read from, when one
+	// was made.
+	Cause error
 }
 
 func (e DiscoveryError) Error() string {
-	return "mcp manifest discovery failed"
+	return "mcp manifest discovery failed: " + e.Diagnostic
 }
+
+// RecordedCause gives a failure record the error of the connector call, which
+// Error keeps out of the text a caller may be answered with.
+func (e DiscoveryError) RecordedCause() error { return e.Cause }
 
 type Tool struct {
 	Name            string
@@ -138,7 +145,7 @@ func classifyMCPManifestListError(err error, trailers metadata.MD) error {
 	values := trailers.Get(FailureKindMetadataKey)
 	if len(values) == 0 {
 		if code == codes.Unavailable || code == codes.DeadlineExceeded {
-			return DiscoveryError{Diagnostic: DiagnosticDiscoveryUnavailable}
+			return DiscoveryError{Diagnostic: DiagnosticDiscoveryUnavailable, Cause: err}
 		}
 		return err
 	}
@@ -147,13 +154,13 @@ func classifyMCPManifestListError(err error, trailers metadata.MD) error {
 	}
 	switch {
 	case code == codes.FailedPrecondition && values[0] == "credential_unavailable":
-		return DiscoveryError{Diagnostic: DiagnosticCredentialUnavailable}
+		return DiscoveryError{Diagnostic: DiagnosticCredentialUnavailable, Cause: err}
 	case code == codes.Unavailable && values[0] == "server_unavailable":
-		return DiscoveryError{Diagnostic: DiagnosticDiscoveryUnavailable}
+		return DiscoveryError{Diagnostic: DiagnosticDiscoveryUnavailable, Cause: err}
 	case code == codes.DeadlineExceeded && values[0] == "discovery_timeout":
-		return DiscoveryError{Diagnostic: DiagnosticDiscoveryUnavailable}
+		return DiscoveryError{Diagnostic: DiagnosticDiscoveryUnavailable, Cause: err}
 	case code == codes.FailedPrecondition && values[0] == "manifest_invalid":
-		return DiscoveryError{Diagnostic: DiagnosticInvalid}
+		return DiscoveryError{Diagnostic: DiagnosticInvalid, Cause: err}
 	default:
 		return err
 	}

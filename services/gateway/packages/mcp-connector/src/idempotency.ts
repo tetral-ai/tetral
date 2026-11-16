@@ -77,8 +77,9 @@ export type IdempotencyClaim =
 /** Signals that Connector cannot prove current MCP claim custody and must defer to reconciliation. */
 /** A lost commit ACK cannot authorize relinquishment or another external execution. */
 export class McpIdempotencyOutcomeUnknownError extends Error {
-  constructor() {
-    super("MCP commit outcome remains unknown");
+  /** `cause` is the last error of the commit attempts, for the record. */
+  constructor(options?: ErrorOptions) {
+    super("MCP commit outcome remains unknown", options);
   }
 }
 
@@ -253,7 +254,9 @@ export function serializePendingRunMcpToolResponse(stored: PendingStoredRunMcpTo
  * @throws When required response, attachment-reference, or observation fields have invalid shapes.
  */
 export function parseStoredRunMcpToolResponse(value: string): StoredRunMcpToolResponse {
-  const parsed = JSON.parse(value) as unknown;
+  let parsed: unknown;
+  // The parser's own error quotes the stored result, which is tool output.
+  try { parsed = JSON.parse(value); } catch { throw new Error("invalid stored MCP tool response"); }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("invalid stored MCP tool response");
   }

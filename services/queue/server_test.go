@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 
@@ -309,6 +310,19 @@ func TestQueueJobRunnerLeaseValidationAndOutcomeMapping(t *testing.T) {
 		t.Fatalf("lease from a quiescing scheduler = %v; want Unavailable", err)
 	}
 	store.jobRunnerErr = nil
+
+	// A lease that stopped after committed leases is recorded with the
+	// failure that stopped it.
+	var logs bytes.Buffer
+	stopped := NewServer(&recordingStore{jobRunnerResult: queue.LeaseJobRunnerJobsResult{RetryAfter: 250 * time.Millisecond, StopFailure: errors.New("connection reset by peer")}},
+		workloadtest.Logger(t, &logs, "queue", ""))
+	if _, err := stopped.LeaseJobRunnerJobs(context.Background(), valid()); err != nil {
+		t.Fatalf("a partial lease = %v; want its committed part answered", err)
+	}
+	if partial := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "queue.job_runner_lease.partial_failure"); len(partial) != 1 ||
+		partial[0]["error.code"] != "job_runner_lease_stopped" || partial[0]["error.message"] != "connection reset by peer" {
+		t.Fatalf("queue.job_runner_lease.partial_failure records = %v; want one with the stopping failure as its cause", partial)
+	}
 
 	for _, outcome := range []struct {
 		updated bool

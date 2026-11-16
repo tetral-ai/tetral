@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type VisibilityClient interface {
@@ -30,11 +32,11 @@ type ClientsetVisibilityClient struct {
 func NewInClusterVisibilityClient() (*ClientsetVisibilityClient, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, err
+		return nil, workload.WithoutPaths(err)
 	}
 	client, err := clientset.NewForConfig(config)
 	if err != nil {
-		return nil, err
+		return nil, workload.WithoutPaths(err, config.BearerTokenFile, config.CAFile)
 	}
 	return &ClientsetVisibilityClient{client: client}, nil
 }
@@ -369,7 +371,7 @@ func watchObjectError(object runtime.Object) error {
 		return nil
 	}
 	if status, ok := object.(*metav1.Status); ok {
-		return fmt.Errorf("kubernetes watch status %s", status.Reason)
+		return fmt.Errorf("kubernetes watch status %s: %s", status.Reason, status.Message)
 	}
 	return malformedWatchObjectError(object)
 }

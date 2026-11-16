@@ -129,6 +129,21 @@ pub struct ErrorSpec {
     /// `error.message`.
     #[serde(default)]
     pub cause: bool,
+    /// For a code without a cause, the source of the failure's only text.
+    #[serde(default)]
+    pub no_cause: Option<NoCauseSource>,
+}
+
+/// The sources whose text is never a cause: what the work of a Session
+/// produced, and what Engine answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoCauseSource {
+    CommandOutput,
+    ToolOutput,
+    McpServerResponse,
+    RemoteGitOutput,
+    EngineResponse,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +297,17 @@ fn check_event(event: &EventSpec) -> Result<(), CatalogueError> {
         if !codes.insert(error.code.as_str()) {
             return fail("an error code is declared twice");
         }
+        if error.cause == error.no_cause.is_some() {
+            return fail("an error does not declare exactly one of cause and no_cause");
+        }
+    }
+    let failure = event.level == EventLevel::Error
+        || event
+            .fields
+            .iter()
+            .any(|field| field.name.starts_with("error."));
+    if failure && event.errors.is_empty() {
+        return fail("an event at ERROR or with an error field declares no error");
     }
     Ok(())
 }
@@ -696,7 +722,22 @@ mod tests {
             json!({"name": "x", "level": "INFO", "fields": [{"name": "elapsed", "type": "ms"}]}),
             json!({"name": "x", "level": "INFO", "fields": [{"name": "kind", "type": "enum"}]}),
             json!({"name": "x", "level": "INFO", "fields": [{"name": "path", "type": "string"}]}),
+            json!({"name": "x", "level": "ERROR"}),
+            json!({"name": "x", "level": "WARN", "fields": [{"name": "error.os_code", "type": "integer"}]}),
+            json!({"name": "x", "level": "WARN", "errors": [
+                {"code": "c", "class": "k", "message_safe": "t"}]}),
+            json!({"name": "x", "level": "WARN", "errors": [
+                {"code": "c", "class": "k", "message_safe": "t", "cause": true, "no_cause": "engine_response"}]}),
+            json!({"name": "x", "level": "WARN", "errors": [
+                {"code": "c", "class": "k", "message_safe": "t", "no_cause": "our_own_code"}]}),
         ];
+        let mut accepted = base.clone();
+        accepted["events"].as_array_mut().unwrap().push(json!({
+            "name": "x", "level": "ERROR", "fields": [{"name": "error.os_code", "type": "integer"}],
+            "errors": [
+                {"code": "c", "class": "k", "message_safe": "t", "cause": true},
+                {"code": "d", "class": "k", "message_safe": "t", "no_cause": "engine_response"}]}));
+        Catalogue::parse(&accepted.to_string()).expect("an event that follows the rules");
         for case in cases {
             let mut document = base.clone();
             document["events"]

@@ -64,11 +64,8 @@ func (e *RequestEvents) Run(ctx context.Context) error {
 		}
 	}
 	return queue.RunListener(ctx, listener, computer.RequestEventChannel, onReady, func(payload string) { e.deliver(ctx, payload) }, func(err error) {
-		e.logger.WarnContext(ctx, "request_events.listener_disconnected",
-			slog.String("operation", "computer_hub.request_events"),
-			slog.String("error.class", "dependency_unavailable"),
-			slog.String("error.code", "notification_listener_disconnected"),
-			slog.String("error.message_safe", "request event listener disconnected"))
+		workload.WriteFailure(ctx, e.logger, "request_events.listener_disconnected", "notification_listener_disconnected", workload.CauseOf(err),
+			slog.String("operation", "computer_hub.request_events"))
 	})
 }
 

@@ -202,6 +202,10 @@ async fn budget_refusal_retries_without_an_edit_and_logs_once_per_episode() {
         .collect();
     assert_eq!(deferred.len(), 1);
     assert_eq!(deferred[0]["error.code"], "resource_exhausted");
+    assert_eq!(
+        deferred[0]["error.message"],
+        "the report does not fit the retained-report budget"
+    );
     assert_eq!(env.reports.reserved.load(Ordering::SeqCst), 0);
     env.reports.full.store(false, Ordering::SeqCst);
     env.advance(Duration::from_secs(1)).await;

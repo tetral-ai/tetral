@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -408,7 +408,7 @@ func newEnvironmentBuildHarness(t *testing.T) *environmentBuildHarness {
 	h := &environmentBuildHarness{t: t, admin: admin, now: time.Now().UTC().Truncate(time.Microsecond), artifacts: NewEnvironmentArtifactStore(client), provider: &buildSnapshotResponses{state: "building"}}
 	store := &environmentBuildQueueClock{PostgreSQLQueueStore: queue.NewPostgreSQLStore(client), now: func() time.Time { return h.now }}
 
-	h.queueServer = tetralqueue.NewServer(store, slog.New(slog.NewJSONHandler(&h.logs, nil)))
+	h.queueServer = tetralqueue.NewServer(store, workloadtest.Logger(t, &h.logs, "queue", "../queue/observability.json"))
 	h.enqueueBuild()
 	h.restart()
 	return h
@@ -446,7 +446,7 @@ func (h *environmentBuildHarness) restart() {
 		Queue: h.queueServer, Store: h.artifacts,
 		Providers: artifactProviderRegistry(h.t, &DaytonaAdapter{Artifacts: sandboxdriver.NewDaytonaArtifactBuilderForClient(h.provider, "test-image")}),
 		Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_execution_store", LeaseOwner: "build-test", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
-		Clock:     func() time.Time { return h.now }, Logger: slog.New(slog.NewJSONHandler(&h.logs, nil)),
+		Clock:     func() time.Time { return h.now }, Logger: workloadtest.Logger(h.t, &h.logs, ServiceName, ""),
 	}
 }
 

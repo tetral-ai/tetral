@@ -15,12 +15,13 @@ import type { DiscoveryFailureReason } from "./discovery.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpExecutionObservation } from "./logger.js";
 import { mcpPhaseCompletedLogRecord } from "./logger.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
+import type { FailureCause } from "@tetral/ts-observability";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerResolver, ResolvedMcpServer } from "./server-resolver.js";
 import { validateAdapter } from "./adapters/registry.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { McpConnectorError } from "./errors.js";
+import { McpConnectorError, mcpFailureCause } from "./errors.js";
 import type { McpCallToolResult } from "./formatter.js";
 import type { McpCredentialResolution, McpCredentialResolver } from "./credential.js";
 import {
@@ -79,6 +80,8 @@ export interface McpSDKClientOptions {
   readonly serverResolver: McpServerResolver;
   readonly onConnectionReady?: ((identity: McpIdentity, tools: readonly McpClientTool[], options: { readonly signal?: AbortSignal; readonly timeoutMs?: number }) => Promise<void>) | undefined;
   readonly onToolsListChanged: (input: McpIdentity) => Promise<void>;
+  /** The cause of a failed onToolsListChanged: the connector's own errors keep their text. */
+  readonly toolsListChangedFailureCause?: ((error: unknown) => FailureCause) | undefined;
   readonly logger?: Pick<McpConnectorLogger, "error"> & Partial<Pick<McpConnectorLogger, "info">> | undefined;
   readonly createClient?: ((identity: McpIdentity) => SDKClientLike) | undefined;
   readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined; readonly requestHeaders?: Readonly<Record<string, string>> | undefined }) => unknown) | undefined;
@@ -486,6 +489,7 @@ export class McpSDKClient implements McpClient {
                     mcpToolsListChangedFailureLogRecord(
                       identity,
                       "refresh_failed",
+                      mcpFailureCause(error),
                     ),
                   );
                 } catch {
@@ -498,12 +502,14 @@ export class McpSDKClient implements McpClient {
                 Promise.resolve().then(() =>
                   this.options.onToolsListChanged(identity),
                 ),
-              ).catch(() => {
+              ).catch((error: unknown) => {
                 try {
                   this.options.logger?.error(
                     mcpToolsListChangedFailureLogRecord(
                       identity,
                       "notify_failed",
+                      this.options.toolsListChangedFailureCause?.(error) ??
+                        mcpFailureCause(error, (own) => own instanceof McpDiscoveryError),
                     ),
                   );
                 } catch {
@@ -688,7 +694,7 @@ export function streamableHTTPTransportOptions(input: { readonly token?: string 
 }
 
 /** Builds a bounded structured error record for tool-list refresh or callback failure. */
-export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failure: ToolsListChangedFailure): McpLogRecord {
+export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failure: ToolsListChangedFailure, cause: FailureCause): McpLogRecord {
   const suffix = failure === "refresh_failed" ? "refresh_failed" : "notify_failed";
   return {
     event: `mcp_tools_list_changed_${suffix}`,
@@ -698,11 +704,7 @@ export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failu
     "workspace.id": identity.workspaceId,
     "session.id": identity.sessionId,
     "mcp.server.name": identity.mcpServerName,
-    ...semanticErrorFields({
-      errorClass: "mcp_connection_failed",
-      errorCode: "mcp_connection_failed",
-      messageSafe: `mcp tools/list_changed ${failure === "refresh_failed" ? "refresh" : "notify"} failed`,
-    }),
+    ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause }),
   };
 }
 
@@ -724,11 +726,7 @@ export function mcpDiscoveryPaginationFailureLogRecord(
     "mcp.discovery.failure_reason": reason,
     "mcp.discovery.pages": pages,
     "mcp.discovery.tool_count": toolCount,
-    ...semanticErrorFields({
-      errorClass: "mcp_connection_failed",
-      errorCode: "mcp_connection_failed",
-      messageSafe: "mcp discovery pagination failed",
-    }),
+    ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause: causeOf(`MCP tool discovery failed (${reason}).`) }),
   };
 }
 
@@ -816,7 +814,8 @@ function remaining(deadline: number, now: number): number {
 function projectTools(listed: ListToolsResult): readonly McpClientTool[] {
   return listed.tools.map(tool => ({name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema, enabled: (tool as typeof tool & {enabled?: boolean}).enabled}));
 }
-function authFailure(): McpConnectorError { return new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal"); }
+function authFailure(options?: ErrorOptions): McpConnectorError { return new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal", options); }
 function credentialFailure(material: McpCredentialResolution): McpConnectorError {
-  return !material.ok && material.error === "credential_required" ? new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal") : !material.ok && material.error === "refresh_unavailable" ? new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal") : authFailure();
+  const options = !material.ok && material.cause !== undefined ? { cause: material.cause } : undefined;
+  return !material.ok && material.error === "credential_required" ? new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal", options) : !material.ok && material.error === "refresh_unavailable" ? new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal", options) : authFailure(options);
 }

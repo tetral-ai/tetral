@@ -1306,16 +1306,14 @@ func normalizeProviderOAuthAuth(auth CredentialAuth) (CredentialAuth, error) {
 }
 
 func providerOAuthValidationError(providerID string, member string, message string) error {
-	workload.CurrentTelemetry().Logger().Debug("provider_credential_rejected",
+	rejected := &ValidationError{Message: message}
+	workload.WriteFailure(context.Background(), workload.CurrentTelemetry().Logger(), "provider_credential_rejected", "invalid_provider_oauth", workload.CauseOf(rejected),
 		"event.kind", "provider_credential_rejected",
 		"component", "vault",
 		"provider.id", providerID,
 		"validation.member", member,
-		"error.class", "validation",
-		"error.code", "invalid_provider_oauth",
-		"error.message_safe", "provider credential rejected",
 	)
-	return &ValidationError{Message: message}
+	return rejected
 }
 
 func providerOAuthExpiryHasExplicitZone(value string) bool {

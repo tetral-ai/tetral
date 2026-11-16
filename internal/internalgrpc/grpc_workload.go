@@ -56,8 +56,8 @@ type EnvReader interface {
 // RunGRPCWorkload validates internal-auth/listen config, opens the separate gRPC
 // and HTTP probe listeners, starts the authenticated internal gRPC server, and
 // runs the HTTP probe workload alongside it with shared graceful shutdown. Invalid
-// config and dependency bootstrap failures fail before serving and log redacted
-// startup failures. It returns nil only on a clean drain.
+// config and dependency bootstrap failures fail before serving, each with one
+// startup-failure record. It returns nil only on a clean drain.
 func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadParams) error {
 	runWorkload := params.RunWorkload
 	if runWorkload == nil {
@@ -109,12 +109,12 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	}
 	httpAddress := valueOrDefault(env.Getenv(params.HTTPListenEnvKey), params.HTTPListenDefault)
 	grpcAddress := valueOrDefault(env.Getenv(params.GRPCListenEnvKey), params.GRPCListenDefault)
-	grpcListener, err := listen("tcp", grpcAddress)
+	grpcListener, err := workload.ListenTCP(listen, grpcAddress)
 	if err != nil {
 		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseListener, err)
 	}
 	defer func() { _ = grpcListener.Close() }()
-	httpListener, err := listen("tcp", httpAddress)
+	httpListener, err := workload.ListenTCP(listen, httpAddress)
 	if err != nil {
 		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseListener, err)
 	}
@@ -219,15 +219,11 @@ func valueOrDefault(value string, fallback string) string {
 	return value
 }
 
-// logGRPCStartupFailure logs a redacted startup-failure line for the internal
-// gRPC workloads. A workload.ConfigError (bad audience, malformed allowlist)
-// classifies as error.class/error.code=config_error and emits its safe static
-// message in error.message_safe so operators can diagnose the misconfiguration;
-// that safe text also reaches the command's stderr line. Dependency failures
-// (TokenReview client construction, listener bind) stay class-only as
-// error.class/error.code=startup_error with no message field, because their text
-// may carry DSNs, tokens, or payloads. The shared workload helper guarantees this
-// is the same rule every workload applies.
+// logGRPCStartupFailure writes the startup-failure record of an internal gRPC
+// workload, as every workload does (workload.LogStartupFailure): a
+// workload.ConfigError (bad audience, malformed allowlist) is config_error,
+// any other failure (TokenReview client construction, listener bind) is
+// startup_error, and both carry the error as the record's cause.
 func logGRPCStartupFailure(serviceName string, logger *slog.Logger, cause workload.StartupFailureCause, err error) error {
 	return workload.LogStartupFailure(logger, serviceName, workload.WithStartupFailureCause(cause, err))
 }

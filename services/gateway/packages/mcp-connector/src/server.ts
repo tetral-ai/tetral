@@ -137,13 +137,14 @@ async function unary<Response>(
 
 function toServiceError(error: unknown): ServiceError {
   if (error instanceof GrpcStatusError) {
-    return serviceError(error.code, error.message, error.metadata);
+    return serviceError(error.code, error.message, error.metadata, error.cause);
   }
   return serviceError(status.INTERNAL, "mcp connector failed");
 }
 
-function serviceError(code: status, message: string, metadata = new Metadata()): ServiceError {
-  const error = new Error(message) as ServiceError;
+/** cause stays in this process: the gRPC record reads it, the caller gets only code, message and metadata. */
+function serviceError(code: status, message: string, metadata = new Metadata(), cause?: unknown): ServiceError {
+  const error = new Error(message, cause === undefined ? undefined : { cause }) as ServiceError;
   error.code = code;
   error.details = message;
   error.metadata = metadata;

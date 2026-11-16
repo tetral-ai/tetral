@@ -11,7 +11,7 @@ use protocol::connection::{
 };
 use protocol::id::Id;
 use protocol::tool::ProtocolVersion;
-use protocol::{Message, decode, encode};
+use protocol::{DecodeError, Message, decode, encode};
 
 #[cfg(target_os = "linux")]
 const OS: Os = Os::Linux;
@@ -86,16 +86,30 @@ fn startup(phases: StartupPhases) -> Startup {
 /// the failure and gives nothing to send.
 pub fn checked<M: Message>(message: &M, connection: &Id, message_id: &Id) -> Option<Vec<u8>> {
     let body = encode(message);
-    if decode::<M>(&body).is_ok() {
-        return Some(body);
+    match decode::<M>(&body) {
+        Ok(_) => Some(body),
+        Err(error) => {
+            sender_check_failed(connection, message_id, &error);
+            None
+        }
     }
+}
+
+/// Records a message of this CLI that its own decoder refused.
+pub(crate) fn sender_check_failed(connection: &Id, message_id: &Id, error: &DecodeError) {
+    // A schema error's text can quote the message, which may hold a
+    // Session's content, so only its kind is the cause.
+    let cause = match error {
+        DecodeError::Shape(_) => "the message does not match its schema".to_owned(),
+        other => other.to_string(),
+    };
     observe::error!(
         "protocol.sender_check_failed",
         connection.id = observe::Id(connection.as_str()),
         message.id = observe::Id(message_id.as_str()),
-        error.code = observe::Code("sender_check_failed")
+        error.code = observe::Code("sender_check_failed"),
+        error.message = observe::Cause::system(&cause)
     );
-    None
 }
 
 /// The connection deadline that an ACK grants, when the ACK is valid for the
@@ -181,5 +195,46 @@ mod tests {
         assert!(body.len() <= 65_536, "{}", body.len());
         let lost_changes = built.lost_changes.expect("kept entries");
         assert_eq!(&lost_changes[..], &kept[..2]);
+    }
+
+    #[test]
+    fn a_schema_refusal_of_its_own_message_is_recorded_by_kind_without_its_text() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let sinks = std::sync::Arc::new(observe::Sinks::new(
+            observe::Sink::spawn_stderr(Box::new(log.reopen().unwrap()), observe::registry()),
+            observe::FlushClock {
+                now: state::seams::now,
+                recheck: Duration::from_millis(1),
+            },
+        ));
+        let _records = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+            observe::RecordLayer::new(observe::Level::Warn, sinks.clone()),
+        ));
+        for (error, cause) in [
+            (
+                DecodeError::Shape("invalid type at content: \"SESSION-CONTENT\"".into()),
+                "the message does not match its schema".to_owned(),
+            ),
+            (
+                DecodeError::Rule("a ready names its own connection"),
+                DecodeError::Rule("a ready names its own connection").to_string(),
+            ),
+        ] {
+            sender_check_failed(&id("conn_a"), &id("c1"), &error);
+            sinks.flush(Duration::from_secs(2));
+            let text = std::fs::read_to_string(log.path()).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            assert_eq!(
+                (&record["event"], &record["error.message"]),
+                (
+                    &serde_json::json!("protocol.sender_check_failed"),
+                    &serde_json::json!(cause)
+                ),
+                "{record}"
+            );
+            assert!(!text.contains("SESSION-CONTENT"), "{text}");
+        }
     }
 }

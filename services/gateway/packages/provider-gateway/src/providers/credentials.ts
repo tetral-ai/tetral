@@ -95,7 +95,7 @@ export interface SessionProviderAuthRow {
 /** Result of fail-closed credential resolution for one provider request. */
 export type ProviderCredentialResolverResult =
   | { readonly ok: true; readonly credential: ResolvedProviderCredential }
-  | { readonly ok: false; readonly error: ProviderErrorInput };
+  | { readonly ok: false; readonly error: ProviderErrorInput; readonly cause?: unknown };
 
 /**
  * Credential material accepted by provider clients after catalog, binding, and
@@ -437,12 +437,18 @@ export class ProviderCredentialResolver {
     ) {
       return credentialUnavailable();
     }
+    let plaintext: Uint8Array;
+    try {
+      plaintext = await decryptAES256GCM(row.encryptedAuth, this.options.masterKeyHex);
+    } catch (error) {
+      return credentialUnavailable(error);
+    }
     let auth: SessionCredentialAuth;
     try {
-      const plaintext = await decryptAES256GCM(row.encryptedAuth, this.options.masterKeyHex);
       auth = JSON.parse(new TextDecoder().decode(plaintext)) as SessionCredentialAuth;
     } catch {
-      return credentialUnavailable();
+      // The parser's text can quote the credential.
+      return credentialUnavailable("the decrypted credential is not JSON");
     }
     if (auth.type !== row.credentialAuthType || auth.provider_id !== entry.providerId || auth.access_mode !== row.accessMode) {
       return credentialUnavailable();
@@ -561,11 +567,12 @@ function databaseBytes(value: unknown): Uint8Array {
   throw new Error("database bytea value is not bytes");
 }
 
-function credentialUnavailable(): ProviderCredentialResolverResult {
-  return failClosed("credential_unavailable", "The selected provider credential is not usable.");
+function credentialUnavailable(cause?: unknown): ProviderCredentialResolverResult {
+  const failed = failClosed("credential_unavailable", "The selected provider credential is not usable.");
+  return cause === undefined ? failed : { ...failed, cause };
 }
 
-function failClosed(code: string, message: string): ProviderCredentialResolverResult {
+function failClosed(code: string, message: string): Extract<ProviderCredentialResolverResult, { readonly ok: false }> {
   return {
     ok: false,
     error: normalizeProviderError({

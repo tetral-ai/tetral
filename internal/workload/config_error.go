@@ -1,26 +1,20 @@
 package workload
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 )
 
-// startupErrorClassConfig classifies a configuration-validation failure on a
-// workload startup path. Its safe static message is emitted to operators.
-const startupErrorClassConfig = "config_error"
+// A startup failure's error.code: config_error for a ConfigError, whose own
+// message also goes to startup.config_problem, and startup_error for every
+// other failure.
+const (
+	startupCodeConfig = "config_error"
+	startupCodeOther  = "startup_error"
+)
 
-// startupErrorClassConstant classifies every other startup failure (dependency
-// and bootstrap failures). It is emitted with a constant safe message because
-// such errors may embed DSNs, tokens, or provider payloads.
-const startupErrorClassConstant = "startup_error"
-const startupErrorMessageSafe = "startup failed"
-
-// configErrorMessageSafe is config_error's fixed text; the ConfigError's own
-// message, which names the variable, goes to startup.config_problem.
-const configErrorMessageSafe = "configuration invalid"
-
-// StartupFailureCause identifies the startup boundary that failed without
-// exposing dependency error text.
+// StartupFailureCause identifies the startup boundary that failed.
 type StartupFailureCause string
 
 const (
@@ -49,8 +43,7 @@ func WithStartupFailureCause(cause StartupFailureCause, err error) error {
 }
 
 // ConfigError marks a startup failure that came from parsing or validating an
-// env-derived configuration value. Its message is operator-safe and is the only
-// startup error text any workload emits to logs or stderr.
+// env-derived configuration value. Its message is operator-safe.
 //
 // Safety contract: the message MAY name configuration KEYS, expected formats,
 // and safe shape-validated derivations of a value (counts, file modes). It MUST
@@ -62,7 +55,8 @@ func WithStartupFailureCause(cause StartupFailureCause, err error) error {
 // standard, which masks a value by its shape rather than by keyword matching).
 // Producers are responsible for keeping the message static. Dependency and
 // bootstrap failures (database connect, schema init, TokenReview/Kubernetes
-// client construction) are NOT ConfigError and stay class-only.
+// client construction) are NOT ConfigError; their record carries the
+// dependency's error as its cause, shaped by WriteFailure.
 type ConfigError struct {
 	// Message is the static, operator-safe description of the misconfiguration.
 	Message string
@@ -89,43 +83,30 @@ func AsConfigError(err error) (*ConfigError, bool) {
 	return nil, false
 }
 
-// StartupFailureFields maps a startup error to the safe classification every
-// workload startup-failure line emits. A ConfigError yields class config_error
-// plus its safe message; any other error yields the constant startup_error with
-// a safe constant message so dependency error text never reaches logs.
-func StartupFailureFields(err error) (class string, message string, hasMessage bool) {
-	if configErr, ok := AsConfigError(err); ok {
-		return startupErrorClassConfig, configErr.Message, true
+// StartupFailureCode is the error.code of a startup failure: config_error
+// for a ConfigError and startup_error for any other error.
+func StartupFailureCode(err error) string {
+	if _, ok := AsConfigError(err); ok {
+		return startupCodeConfig
 	}
-	return startupErrorClassConstant, startupErrorMessageSafe, true
+	return startupCodeOther
 }
 
-// StartupFailureAttrs appends the contract error fields to a startup-failure log
-// line: error.class/error.code are config_error for a ConfigError and
-// startup_error otherwise, each with its fixed error.message_safe; a
-// ConfigError's own message goes to startup.config_problem. Callers pass the
-// line's other attributes as base and spread the result into Logger.Error, so
-// every workload startup-failure line classifies identically instead of carrying
-// a divergent copy.
-func StartupFailureAttrs(err error, base ...any) []any {
-	class, message, hasMessage := StartupFailureFields(err)
-	cause := startupFailureCause(err)
-	attrs := append([]any{
+// WriteStartupFailure writes event, a startup-failure record, for err: its
+// code is StartupFailureCode, its cause err's text, and it carries the
+// boundary that failed in startup.cause. base holds the record's other
+// fields.
+func WriteStartupFailure(logger *slog.Logger, event string, err error, base ...any) {
+	code := StartupFailureCode(err)
+	fields := append([]any{
 		slog.String("operation", "workload.startup"),
 		slog.String("event.kind", "startup_failed"),
 	}, base...)
-	attrs = append(attrs,
-		slog.String("startup.cause", string(cause)),
-		slog.String("error.class", class),
-		slog.String("error.code", class),
-	)
-	if class == startupErrorClassConfig {
-		return append(attrs, slog.String("error.message_safe", configErrorMessageSafe), slog.String("startup.config_problem", message))
+	fields = append(fields, slog.String("startup.cause", string(startupFailureCause(err))))
+	if configErr, ok := AsConfigError(err); ok {
+		fields = append(fields, slog.String("startup.config_problem", configErr.Message))
 	}
-	if hasMessage {
-		attrs = append(attrs, slog.String("error.message_safe", message))
-	}
-	return attrs
+	WriteFailure(context.Background(), logger, event, code, CauseOf(err), fields...)
 }
 
 func startupFailureCause(err error) StartupFailureCause {
@@ -151,8 +132,7 @@ func LogStartupFailure(logger *slog.Logger, component string, err error, base ..
 		slog.String("listener.state", "not started"),
 	}
 	attrs = append(attrs, base...)
-	logger.Error("startup.failed", StartupFailureAttrs(err, attrs...)...)
-	class, _, _ := StartupFailureFields(err)
-	failProcessColdStart(class)
+	WriteStartupFailure(logger, "startup.failed", err, attrs...)
+	failProcessColdStart(StartupFailureCode(err))
 	return err
 }

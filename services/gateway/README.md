@@ -1262,8 +1262,8 @@ wait or shutdown failure. Provider and MCP stop admission, join producers and li
 clients, and close SQL last under their shared absolute deadline. A rejected earlier close does not skip
 later resources. Programmatic callers retain the original run failure, or the
 first cleanup failure after a successful run. Executable and signal boundaries
-emit fixed safe phase/class records and exit nonzero on failure, without raw
-exception messages or stacks. Diagnostic faults add no stderr-flush wait;
+emit fixed phase/class records, with the failure's text as `error.message`
+and without stacks, and exit nonzero on failure. Diagnostic faults add no stderr-flush wait;
 business shutdown retains the same durable outcome when diagnostics fail.
 
 Provider request validation, caller denial and cancellation summaries use Info

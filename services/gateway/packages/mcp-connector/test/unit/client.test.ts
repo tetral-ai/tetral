@@ -1,6 +1,7 @@
 import { GITHUB_MCP_TOOLSETS_HEADER } from "../../src/adapters/github.js";
 import { registeredServer, fixtureServerResolver } from "../fixtures/registered-server.js";
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -114,9 +115,9 @@ describe("McpSDKClient", () => {
         "error.class": "mcp_connection_failed",
         "error.code": "mcp_connection_failed",
         "error.message_safe": `mcp tools/list_changed ${failure === "refresh_failed" ? "refresh" : "notify"} failed`,
+        "error.message": "MCP connection retries exhausted.",
       };
-      const record = mcpToolsListChangedFailureLogRecord(validIdentity(), failure);
-      expect(record).toMatchObject(expected);
+      const record = mcpToolsListChangedFailureLogRecord(validIdentity(), failure, causeOf(new Error("MCP connection retries exhausted.")));
       expect(serializedThroughSharedLogger(record)).toMatchObject({ ...expected, level: "ERROR" });
     }
   });
@@ -134,6 +135,7 @@ describe("McpSDKClient", () => {
       "mcp.discovery.tool_count": 42,
       "error.code": "mcp_connection_failed",
       "error.message_safe": "mcp discovery pagination failed",
+      "error.message": "MCP tool discovery failed (repeated_cursor).",
     });
     expect(serialized).not.toHaveProperty("mcp_server_name");
   });
@@ -485,7 +487,7 @@ describe("McpSDKClient", () => {
         }),
         refresh: async () => {
           refreshes += 1;
-          return { ok: false as const, error: "refresh_unavailable" as const };
+          return { ok: false as const, error: "refresh_unavailable" as const, cause: new Error("credential write unavailable") };
         },
       },
       onToolsListChanged: async () => undefined,
@@ -508,6 +510,7 @@ describe("McpSDKClient", () => {
     })).rejects.toMatchObject({
       code: "mcp_connection_failed",
       retryStatus: "terminal",
+      cause: new Error("credential write unavailable"),
     });
     expect(refreshes).toBe(1);
     expect(clients).toHaveLength(1);

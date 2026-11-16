@@ -104,13 +104,15 @@
       "errors": {
         "mcp_connection_failed": {
           "class": "mcp_connection_failed",
-          "message_safe": "mcp discovery pagination failed"
+          "message_safe": "mcp discovery pagination failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "mcp.discovery.failure_reason": "string",
@@ -182,29 +184,35 @@
       "errors": {
         "credential_unavailable": {
           "class": "mcp_manifest_discovery_failure",
-          "message_safe": "MCP manifest discovery failed."
+          "message_safe": "MCP manifest discovery failed.",
+          "cause": true
         },
         "discovery_timeout": {
           "class": "mcp_manifest_discovery_failure",
-          "message_safe": "MCP manifest discovery failed."
+          "message_safe": "MCP manifest discovery failed.",
+          "cause": true
         },
         "internal": {
           "class": "mcp_manifest_discovery_failure",
-          "message_safe": "MCP manifest discovery failed."
+          "message_safe": "MCP manifest discovery failed.",
+          "cause": true
         },
         "manifest_invalid": {
           "class": "mcp_manifest_discovery_failure",
-          "message_safe": "MCP manifest discovery failed."
+          "message_safe": "MCP manifest discovery failed.",
+          "cause": true
         },
         "server_unavailable": {
           "class": "mcp_manifest_discovery_failure",
-          "message_safe": "MCP manifest discovery failed."
+          "message_safe": "MCP manifest discovery failed.",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "mcp.failure.kind": "string",
@@ -236,27 +244,97 @@
     "mcp_manifest_notify_exhausted": {
       "audience": "operators",
       "errors": {
+        "aborted": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "already_exists": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
         "bridge_token_unavailable": {
           "class": "mcp_manifest_notify_failed",
-          "message_safe": "mcp manifest Bridge notification retries exhausted"
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
         },
         "bridge_unavailable": {
           "class": "mcp_manifest_notify_failed",
-          "message_safe": "mcp manifest Bridge notification retries exhausted"
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
         },
-        "grpc_14": {
+        "data_loss": {
           "class": "mcp_manifest_notify_failed",
-          "message_safe": "mcp manifest Bridge notification retries exhausted"
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
         },
-        "grpc_4": {
+        "deadline_exceeded": {
           "class": "mcp_manifest_notify_failed",
-          "message_safe": "mcp manifest Bridge notification retries exhausted"
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "failed_precondition": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "internal": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "invalid_argument": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "not_found": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "out_of_range": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "permission_denied": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "resource_exhausted": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "unauthenticated": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "unavailable": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "unimplemented": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
+        },
+        "unknown": {
+          "class": "mcp_manifest_notify_failed",
+          "message_safe": "mcp manifest Bridge notification retries exhausted",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "mcp.manifest_etag": "string",
@@ -414,13 +492,15 @@
       "errors": {
         "mcp_connection_failed": {
           "class": "mcp_connection_failed",
-          "message_safe": "mcp tools/list_changed notify failed"
+          "message_safe": "mcp tools/list_changed notify failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "mcp.server.name": "string",
@@ -436,13 +516,15 @@
       "errors": {
         "mcp_connection_failed": {
           "class": "mcp_connection_failed",
-          "message_safe": "mcp tools/list_changed refresh failed"
+          "message_safe": "mcp tools/list_changed refresh failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "mcp.server.name": "string",
@@ -458,63 +540,78 @@
       "errors": {
         "mcp_authentication_failed": {
           "class": "mcp_authentication_failed",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_claim_conflict": {
           "class": "mcp_claim_conflict",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_commit_failed": {
           "class": "mcp_commit_failed",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_connection_failed": {
           "class": "mcp_connection_failed",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_credential_required": {
           "class": "mcp_credential_required",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_custody_lost": {
           "class": "mcp_custody_lost",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_in_flight": {
           "class": "mcp_in_flight",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_internal_error": {
           "class": "mcp_internal_error",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_invalid_input": {
           "class": "mcp_invalid_input",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_not_ready": {
           "class": "mcp_not_ready",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_timeout": {
           "class": "mcp_timeout",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_tool_error": {
           "class": "mcp_tool_error",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "no_cause": "mcp_server_response"
         },
         "mcp_transport_failed": {
           "class": "mcp_transport_failed",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "mcp_unauthenticated": {
           "class": "mcp_unauthenticated",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         },
         "runtime_binding_token_rejected": {
           "class": "runtime_binding_token_rejected",
-          "message_safe": "MCP connector call failed."
+          "message_safe": "MCP connector call failed.",
+          "cause": true
         }
       },
       "fields": {
@@ -522,6 +619,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "mcp.credential.refresh_triggered": "boolean",
@@ -545,13 +643,15 @@
       "errors": {
         "config_error": {
           "class": "config_error",
-          "message_safe": "configuration invalid"
+          "message_safe": "configuration invalid",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "kind": "string",
@@ -567,13 +667,15 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "failed.count": "integer",

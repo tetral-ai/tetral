@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type sandboxQueueAuthorityLossError struct {
@@ -95,7 +97,9 @@ func logSandboxQueueAuthorityLost(logger *slog.Logger, job SandboxLifecycleJob, 
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "sandbox.queue.authority_lost", attrs...)
 }
 
-func logSandboxActivationAttemptCompleted(ctx context.Context, logger *slog.Logger, job SandboxLifecycleJob, outcome string, errorCode string, safeMessage string) {
+// logSandboxActivationAttemptCompleted records how an attempt ended; cause is
+// what ended a retried or failed one.
+func logSandboxActivationAttemptCompleted(ctx context.Context, logger *slog.Logger, job SandboxLifecycleJob, outcome string, errorCode string, cause error) {
 	if logger == nil {
 		return
 	}
@@ -115,11 +119,12 @@ func logSandboxActivationAttemptCompleted(ctx context.Context, logger *slog.Logg
 		slog.Int64("duration.ms", activationAttemptDuration(ctx).Milliseconds()),
 	)
 	if errorCode != "" {
-		attrs = append(attrs,
-			slog.String("error.class", "sandbox_activation_error"),
-			slog.String("error.code", errorCode),
-			slog.String("error.message_safe", boundedProviderLogMessage(safeMessage)),
-		)
+		fields := make([]any, len(attrs))
+		for i, attr := range attrs {
+			fields[i] = attr
+		}
+		workload.WriteFailure(context.Background(), logger, event, errorCode, workload.CauseOf(cause), fields...)
+		return
 	}
 	logger.LogAttrs(context.Background(), level, event, attrs...)
 }

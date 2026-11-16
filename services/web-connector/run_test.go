@@ -95,7 +95,7 @@ func TestRunOpensSeparateListenersAndStopsCleanlyOnCancellation(t *testing.T) {
 	}
 }
 
-func TestRunListenerStartupFailuresAreSafe(t *testing.T) {
+func TestRunListenerStartupFailuresRecordTheBindError(t *testing.T) {
 	for _, name := range []string{"grpc", "metrics"} {
 		t.Run(name, func(t *testing.T) {
 			occupied, err := net.Listen("tcp", "127.0.0.1:0")
@@ -127,13 +127,11 @@ func TestRunListenerStartupFailuresAreSafe(t *testing.T) {
 			if err == nil {
 				t.Fatal("occupied listener was admitted")
 			}
-			for _, field := range []string{`"event.kind":"startup_failed"`, `"startup.cause":"listener"`, `"error.class":"startup_error"`, `"error.message_safe":"startup failed"`, `"startup.cause_category":"` + name + `"`} {
+			for _, field := range []string{`"event.kind":"startup_failed"`, `"startup.cause":"listener"`, `"error.class":"startup_error"`, `"error.message_safe":"startup failed"`, `"startup.cause_category":"` + name + `"`,
+				`"error.message":"listen tcp ` + address + `: bind: address already in use"`} {
 				if !strings.Contains(logs.String(), field) {
-					t.Fatalf("missing safe startup field %s", field)
+					t.Fatalf("missing startup field %s in %s", field, logs.String())
 				}
-			}
-			if strings.Contains(logs.String(), address) || strings.Contains(logs.String(), err.Error()) {
-				t.Fatal("raw bind failure leaked")
 			}
 			if opened != "" {
 				listener, err := net.Listen("tcp", opened)

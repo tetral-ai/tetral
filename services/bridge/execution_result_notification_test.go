@@ -19,6 +19,7 @@ import (
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
@@ -681,6 +682,8 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "reconnect")
+	logs := &lockedBuffer{}
+	store.Logger = workloadtest.Logger(t, logs, ServiceNameBridgeAPI, "")
 	listener := &gatedExecutionResultReconnect{
 		delegate: queue.PostgreSQLNotificationListener{Client: store.Client, Operation: "agentruntimebridge.listen_tool_execution_result"},
 		reached:  make(chan struct{}), resume: make(chan struct{}),
@@ -740,6 +743,16 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 		catchUp := tracer.entriesSQL(awaitTraceVerificationRead)
 		if gap := catchUp[kill].at.Sub(relisten[kill-1].at); gap > 2*time.Second {
 			t.Fatalf("catch-up read after reconnect %d came %s after LISTEN; want prompt", kill, gap)
+		}
+	}
+	// Each disconnect is recorded with the driver's error as its cause.
+	disconnected := workloadtest.Find(workloadtest.Records(t, []byte(logs.String())), "bridge.execution_result_listener.disconnected")
+	if len(disconnected) != 2 {
+		t.Fatalf("bridge.execution_result_listener.disconnected records = %v; want one per disconnect", disconnected)
+	}
+	for _, record := range disconnected {
+		if record["error.code"] != "notification_listener_endpoint_transport" || record["error.message"] != "FATAL: terminating connection due to administrator command (SQLSTATE 57P01)" {
+			t.Fatalf("bridge.execution_result_listener.disconnected = %v; want the driver's error as its cause", record)
 		}
 	}
 	var listenBackends int

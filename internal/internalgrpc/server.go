@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -139,10 +138,9 @@ func forceStopAndJoin(server *grpc.Server, cfg Config) error {
 		}
 		return nil
 	case <-timer.C:
-		cfg.Logger.Error("internal.grpc.cancellation_join_timeout",
+		workload.WriteFailure(context.Background(), cfg.Logger, "internal.grpc.cancellation_join_timeout", "cancellation_join_timeout",
+			workload.CauseOf(errors.New("handlers still running when the cancellation budget ended")),
 			"operation", "internal.grpc.shutdown", "event.kind", "shutdown", "component", "internal-grpc",
-			"error.class", "shutdown_error", "error.code", "cancellation_join_timeout",
-			"error.message_safe", "gRPC handlers outlived the cancellation budget",
 			"duration.ms", time.Since(started).Milliseconds())
 		<-stopped
 		if cfg.Metrics != nil {
@@ -207,15 +205,11 @@ func listenerFor(cfg Config) (net.Listener, error) {
 	if cfg.Listener != nil {
 		return cfg.Listener, nil
 	}
-	listen := cfg.Listen
-	if listen == nil {
-		listen = net.Listen
-	}
 	address := cfg.ListenAddress
 	if address == "" {
 		address = ":9090"
 	}
-	return listen("tcp", address)
+	return workload.ListenTCP(cfg.Listen, address)
 }
 
 // authUnaryInterceptor and authStreamInterceptor own each call's recording:
@@ -231,20 +225,20 @@ func authUnaryInterceptor(cfg Config) grpc.UnaryServerInterceptor {
 		defer span.End()
 		token, err := auth.TokenFromIncomingContext(ctx)
 		if err != nil {
-			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, err, time.Since(started))
 			return nil, err
 		}
 		identity, err := cfg.Authenticator.Authenticate(ctx, token)
 		if err != nil {
-			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), err, time.Since(started))
 			return nil, err
 		}
 		if err := authorizeMethod(cfg, identity, info.FullMethod); err != nil {
-			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), err, time.Since(started))
 			return nil, err
 		}
 		response, err := handler(auth.ContextWithIdentity(ctx, identity), req)
-		logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+		logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), err, time.Since(started))
 		return response, err
 	}
 }
@@ -256,16 +250,16 @@ func authStreamInterceptor(cfg Config) grpc.StreamServerInterceptor {
 		defer span.End()
 		token, err := auth.TokenFromIncomingContext(ctx)
 		if err != nil {
-			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", codes.Unauthenticated, err, time.Since(started))
 			return err
 		}
 		identity, err := cfg.Authenticator.Authenticate(ctx, token)
 		if err != nil {
-			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, "", status.Code(err), err, time.Since(started))
 			return err
 		}
 		if err := authorizeMethod(cfg, identity, info.FullMethod); err != nil {
-			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+			logBoundary(ctx, span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), err, time.Since(started))
 			return err
 		}
 		wrapped := &identityServerStream{
@@ -274,7 +268,7 @@ func authStreamInterceptor(cfg Config) grpc.StreamServerInterceptor {
 			ctx:          auth.ContextWithIdentity(ctx, identity),
 		}
 		err = handler(srv, wrapped)
-		logBoundary(withFields(ctx, wrapped.requestFields()), span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), time.Since(started))
+		logBoundary(withFields(ctx, wrapped.requestFields()), span, cfg.Logger, cfg.Metrics, info.FullMethod, identity.ServiceAccount.String(), status.Code(err), err, time.Since(started))
 		return err
 	}
 }
@@ -336,7 +330,7 @@ func MetricsUnaryInterceptor(metrics *workload.GRPCMetrics) grpc.UnaryServerInte
 		started := time.Now()
 		response, err := handler(ctx, req)
 		if metrics != nil {
-			metrics.ObserveGRPCRequest(info.FullMethod, status.Code(err).String(), time.Since(started))
+			metrics.ObserveGRPCRequest(info.FullMethod, statusName(status.Code(err)), time.Since(started))
 		}
 		return response, err
 	}
@@ -347,7 +341,7 @@ func MetricsStreamInterceptor(metrics *workload.GRPCMetrics) grpc.StreamServerIn
 		started := time.Now()
 		err := handler(srv, stream)
 		if metrics != nil {
-			metrics.ObserveGRPCRequest(info.FullMethod, status.Code(err).String(), time.Since(started))
+			metrics.ObserveGRPCRequest(info.FullMethod, statusName(status.Code(err)), time.Since(started))
 		}
 		return err
 	}
@@ -364,7 +358,7 @@ func recoveryUnaryInterceptor(logger *slog.Logger, metrics *workload.GRPCMetrics
 				}
 				if logger != nil {
 					elapsed := time.Since(started)
-					logger.Error("internal.grpc.recovered",
+					workload.WriteFailure(ctx, logger, "internal.grpc.recovered", "internal_error", workload.CauseOf(fmt.Errorf("panic: %v", recovered)),
 						slog.String("operation", "internal.grpc.request"),
 						slog.String("event.kind", "panic"),
 						slog.String("component", "internal-grpc"),
@@ -373,9 +367,6 @@ func recoveryUnaryInterceptor(logger *slog.Logger, metrics *workload.GRPCMetrics
 						slog.Int64("duration.ms", elapsed.Milliseconds()),
 						slog.Bool("retryable", false),
 						slog.Bool("terminal", true),
-						slog.String("error.class", "panic"),
-						slog.String("error.code", "internal_error"),
-						slog.String("error.message_safe", "internal gRPC error"),
 					)
 				}
 				response = nil
@@ -397,7 +388,7 @@ func recoveryStreamInterceptor(logger *slog.Logger, metrics *workload.GRPCMetric
 				}
 				if logger != nil {
 					elapsed := time.Since(started)
-					logger.Error("internal.grpc.recovered",
+					workload.WriteFailure(stream.Context(), logger, "internal.grpc.recovered", "internal_error", workload.CauseOf(fmt.Errorf("panic: %v", recovered)),
 						slog.String("operation", "internal.grpc.request"),
 						slog.String("event.kind", "panic"),
 						slog.String("component", "internal-grpc"),
@@ -406,9 +397,6 @@ func recoveryStreamInterceptor(logger *slog.Logger, metrics *workload.GRPCMetric
 						slog.Int64("duration.ms", elapsed.Milliseconds()),
 						slog.Bool("retryable", false),
 						slog.Bool("terminal", true),
-						slog.String("error.class", "panic"),
-						slog.String("error.code", "internal_error"),
-						slog.String("error.message_safe", "internal gRPC error"),
 					)
 				}
 				err = status.Error(codes.Internal, "internal gRPC error")
@@ -460,35 +448,31 @@ func (s *identityServerStream) requestFields() []slog.Attr {
 	return s.fields
 }
 
-func logBoundary(ctx context.Context, span *workload.Span, logger *slog.Logger, metrics *workload.GRPCMetrics, method string, caller string, code codes.Code, elapsed time.Duration) {
+func logBoundary(ctx context.Context, span *workload.Span, logger *slog.Logger, metrics *workload.GRPCMetrics, method string, caller string, code codes.Code, err error, elapsed time.Duration) {
 	if metrics != nil {
-		metrics.ObserveGRPCRequest(method, code.String(), elapsed)
+		metrics.ObserveGRPCRequest(method, statusName(code), elapsed)
 	}
-	span.SetString("rpc.grpc.status_name", code.String())
+	span.SetString("rpc.grpc.status_name", statusName(code))
 	if code != codes.OK {
-		span.SetFailure("grpc_error", strings.ToLower(code.String()))
+		span.SetFailure("grpc_error", StatusCodeName(code))
 	}
 	if logger != nil {
-		attrs := []slog.Attr{
+		fields := []any{
 			slog.String("operation", "internal.grpc.request"),
 			slog.String("event.kind", "grpc_request"),
 			slog.String("component", "internal-grpc"),
 			slog.String("grpc.method", method),
-			slog.String("grpc.code", code.String()),
+			slog.String("grpc.code", statusName(code)),
 			slog.String("caller.service_account", caller),
 			slog.Int64("duration.ms", elapsed.Milliseconds()),
 		}
-		if code != codes.OK {
-			retryable := retryableInternalGRPCCode(code)
-			attrs = append(attrs,
-				slog.Bool("retryable", retryable),
-				slog.Bool("terminal", !retryable),
-				slog.String("error.class", "grpc_error"),
-				slog.String("error.code", strings.ToLower(code.String())),
-				slog.String("error.message_safe", "internal gRPC request failed"),
-			)
+		if code == codes.OK {
+			logger.Log(ctx, slog.LevelDebug, "internal.grpc.request", fields...)
+			return
 		}
-		logger.LogAttrs(ctx, slog.LevelDebug, "internal.grpc.request", attrs...)
+		retryable := retryableInternalGRPCCode(code)
+		fields = append(fields, slog.Bool("retryable", retryable), slog.Bool("terminal", !retryable))
+		workload.WriteFailure(ctx, logger, "internal.grpc.request", StatusCodeName(code), workload.CauseOf(err), fields...)
 	}
 }
 

@@ -195,13 +195,14 @@ impl Owner {
                     self.report_delivery.attempts.insert(id, ids);
                     self.report_delivery.refused = false;
                 }
-                Err(_) => {
+                Err(refused) => {
                     if !self.report_delivery.refused {
                         observe::warn!(
                             "drive.report_deferred",
                             session.id = observe::Id(self.session_id.as_str()),
                             connection.id = observe::Id(binding.connection_id.as_str()),
-                            error.code = observe::Code("resource_exhausted")
+                            error.code = observe::Code("resource_exhausted"),
+                            error.message = observe::Cause::system(&refused.to_string())
                         );
                     }
                     self.report_delivery.refused = true;

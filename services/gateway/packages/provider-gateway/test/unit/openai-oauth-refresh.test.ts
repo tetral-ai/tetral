@@ -277,11 +277,13 @@ describe("OpenAI OAuth refresh boundary", () => {
       }),
     });
 
-    await expect(writer.refreshOpenAIOAuthCredential({
+    const refreshed = await writer.refreshOpenAIOAuthCredential({
       workspaceId: "wksp_1",
       credential: expiredCredential(),
       abortSignal: signalFactory(),
-    })).resolves.toEqual({ ok: false, error: "credential_required" });
+    });
+    // The issuer call's own abort is the cause the refusal carries to its record.
+    expect(refreshed).toEqual({ ok: false, error: "credential_required", cause: observedSignal?.reason });
     expect(observedSignal?.aborted).toBe(true);
     expect(sql.updateCount).toBe(0);
   });

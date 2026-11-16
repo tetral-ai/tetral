@@ -45,6 +45,12 @@ async fn a_failed_commit_state_transaction_records_its_drive_and_initiating_trac
         assert_eq!(failure[field], value, "{field}: {failure}");
     }
     assert!(
+        failure["error.message"]
+            .as_str()
+            .is_some_and(|cause| cause.ends_with("storage failure")),
+        "{failure}"
+    );
+    assert!(
         session
             .tables()
             .await
@@ -90,6 +96,13 @@ async fn a_failed_background_file_write_records_identity_without_an_instruction_
     assert_eq!(failures[0]["session.id"], "sess_background");
     assert_eq!(failures[0]["drive.id"], support::DRIVE);
     assert_eq!(failures[0]["binding.id"], "bind_a");
+    assert!(
+        failures[0]["error.message"]
+            .as_str()
+            .is_some_and(|cause| cause.ends_with("storage failure")),
+        "{:?}",
+        failures[0]
+    );
     assert!(failures[0].get("trace_id").is_none());
     db.close().await.unwrap();
 }

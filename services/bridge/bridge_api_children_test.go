@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -419,6 +421,8 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	}
 	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	var logs bytes.Buffer
+	store.Logger = workloadtest.Logger(t, &logs, ServiceNameBridgeAPI, "")
 	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	request := &bridgev1.AdmitChildInterruptRequest{
 		Scope: scope, SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
@@ -464,6 +468,19 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	}
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: operationID}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("AwaitChildInterrupt parked interrupt = %v; want invalid-custody FailedPrecondition", err)
+	}
+	// Each refusal is recorded under its gRPC status, with the refusal as its cause.
+	var recorded [][3]any
+	for _, record := range workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "thread_control_failed") {
+		recorded = append(recorded, [3]any{record["stage"], record["error.code"], record["error.message"]})
+	}
+	if want := [][3]any{
+		{"admission", "already_exists", "rpc error: code = AlreadyExists desc = child interrupt idempotency conflict"},
+		{"delivery", "failed_precondition", "rpc error: code = FailedPrecondition desc = child interrupt control operation is unknown"},
+		{"delivery", "failed_precondition", "rpc error: code = FailedPrecondition desc = child interrupt control operation is unknown"},
+		{"delivery", "failed_precondition", "rpc error: code = FailedPrecondition desc = child interrupt inbox status is invalid"},
+	}; !reflect.DeepEqual(recorded, want) {
+		t.Fatalf("thread_control_failed records = %v; want %v", recorded, want)
 	}
 }
 

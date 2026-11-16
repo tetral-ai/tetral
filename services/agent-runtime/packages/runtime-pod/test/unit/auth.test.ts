@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import {
   authenticateRuntimeCaller,
   buildOutboundBearerMetadata,
   KubernetesTokenReviewClient,
+  validateKubernetesTokenReviewReviewerMaterial,
 } from "../../src/auth.js";
 import type { BunTokenReviewRequestInit, RuntimeTokenReviewClient } from "../../src/auth.js";
 
@@ -100,6 +102,8 @@ describe("Runtime Pod gRPC auth", () => {
         for (const forbidden of ["token", "secret", "kubernetes.default.svc", "TokenReview", "kube object dump", "raw request body", "sk-provider-key"]) {
           expect(result.message).not.toContain(forbidden);
         }
+        // A review that could not be made gives its error to the record.
+        expect(result.cause).toBe(scenario.reviewError);
       }
     }
   });
@@ -232,3 +236,22 @@ class RecordingTokenReviewClient implements RuntimeTokenReviewClient {
     return this.response;
   }
 }
+
+describe("auth file reads", () => {
+  test("a file the auth cannot read is the cause of its error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auth-files-"));
+    const present = join(dir, "present");
+    await writeFile(present, "token\n", { mode: 0o600 });
+    const missing = join(dir, "missing");
+    // The mounted path stays out of the cause.
+    for (const [read, cause] of [
+      [() => buildOutboundBearerMetadata({ tokenPath: missing }), "service account token unavailable: ENOENT: no such file or directory, open"],
+      [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }), "service account token unavailable: ENOENT: no such file or directory, open"],
+      [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }), "kubernetes api ca material unavailable: ENOENT: no such file or directory, open"],
+      [() => new KubernetesTokenReviewClient({ apiServerUrl: "https://127.0.0.1:1", reviewerTokenPath: present, apiServerCaCertPath: missing }).createTokenReview({ token: "caller", audiences: [] }), "ENOENT: no such file or directory, open"],
+    ] as const) {
+      const failure = await read().then(() => undefined, (error: unknown) => error);
+      expect(causeOf(failure).text).toBe(cause);
+    }
+  });
+});

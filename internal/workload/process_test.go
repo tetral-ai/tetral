@@ -124,7 +124,17 @@ func runProcessTestChild(t *testing.T, mode string) {
 	if mode == "throw" || mode == "blocked" {
 		sink = processTestSink(mode)
 	}
-	owner := workload.NewProcessLogger(sink, "test-process", "test", "test", workload.DefaultDiagnosticConfig())
+	// A hosted service writes its failure records under its own table.
+	service := "test-process"
+	switch {
+	case strings.HasPrefix(mode, "web"):
+		service = webconnector.ServiceName
+	case strings.HasPrefix(mode, "queue"):
+		service = "queue"
+	case strings.HasPrefix(mode, "runner"):
+		service = jobrunner.ServiceNameJobRunner
+	}
+	owner := workload.NewProcessLogger(sink, service, "test", "test", workload.DefaultDiagnosticConfig())
 	err := workload.RunProcess(func(ctx context.Context) error {
 		defer owner.CloseWithBudget()
 		workload.ConfigureProcessShutdown(ctx, 5*time.Second, owner)
@@ -177,8 +187,8 @@ func runProcessTestChild(t *testing.T, mode string) {
 				callCtx := metadata.NewOutgoingContext(context.WithoutCancel(ctx), metadata.Pairs("authorization", "Bearer fixture"))
 				_, _ = providergatewayv1.NewProviderGatewayServiceClient(conn).RunWeb(callCtx, &providergatewayv1.RunWebRequest{})
 			}()
-			return webconnector.Run(ctx, webconnector.Config{GRPCAddress: "rpc", MetricsAddress: "127.0.0.1:0", DrainTimeout: 2 * time.Second, CancelJoinTimeout: 3 * time.Second}, &webconnector.Service{}, webconnector.NewMetrics(), webconnector.RuntimeConfig{Logger: owner.Logger, Authenticator: processWebAuthenticator{hold: hold}, Listen: func(network, address string) (net.Listener, error) {
-				if address == "rpc" {
+			return webconnector.Run(ctx, webconnector.Config{GRPCAddress: "rpc.test:0", MetricsAddress: "127.0.0.1:0", DrainTimeout: 2 * time.Second, CancelJoinTimeout: 3 * time.Second}, &webconnector.Service{}, webconnector.NewMetrics(), webconnector.RuntimeConfig{Logger: owner.Logger, Authenticator: processWebAuthenticator{hold: hold}, Listen: func(network, address string) (net.Listener, error) {
+				if address == "rpc.test:0" {
 					return listener, nil
 				}
 				return net.Listen(network, address)

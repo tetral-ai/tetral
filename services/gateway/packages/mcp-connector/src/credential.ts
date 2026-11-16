@@ -18,6 +18,7 @@ import type { SQLSource } from "@tetral/ts-dbconnect";
 
 import { createHash } from "node:crypto";
 import { normalizeMcpEndpoint } from "./adapters/registry.js";
+import { fromEngineDependency } from "./errors.js";
 import type { ResolvedMcpServer } from "./server-resolver.js";
 export { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
 import { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
@@ -76,11 +77,13 @@ export interface McpCredentialResolver {
 /**
  * Fail-closed result of resolving registered MCP authentication material. Success
  * carries the bearer token for transport injection, its hash for connection
- * identity, and whether this call performed a durable refresh.
+ * identity, and whether this call performed a durable refresh. A failure
+ * carries the connector's own error behind it, when there was one, for the
+ * failure record.
  */
 export type McpCredentialResolution =
   | { readonly ok: true; readonly mode: "bearer"; readonly token: string; readonly tokenHash: string; readonly vaultId: string; readonly credentialId: string; readonly refreshTriggered?: boolean | undefined }
-  | { readonly ok: false; readonly error: McpCredentialError };
+  | { readonly ok: false; readonly error: McpCredentialError; readonly cause?: unknown };
 
 /**
  * Bounded categories for selection, decryption, expiry, and locked-refresh
@@ -209,7 +212,7 @@ export class SQLMcpCredentialResolver implements McpCredentialResolver {
     readonly mcpServerName: string;
     readonly resolvedServer: ResolvedMcpServer;
   }): Promise<readonly McpCredentialMatchedRow[]> {
-    return await this.sqlSource.withSQL(async (sql) => {
+    return await fromEngineDependency(() => this.sqlSource.withSQL(async (sql) => {
       const adapter = input.resolvedServer.adapter;
       if (adapter === undefined) {
         return [];
@@ -244,7 +247,7 @@ export class SQLMcpCredentialResolver implements McpCredentialResolver {
         }
       }
       return matched;
-    });
+    }));
   }
 
   private async resolveMatchedCredential(input: {
@@ -264,12 +267,18 @@ export class SQLMcpCredentialResolver implements McpCredentialResolver {
     if (row === undefined || row.encrypted_auth === undefined || row.encrypted_auth === null) {
       return fail("undecryptable");
     }
+    let plaintext: Uint8Array;
+    try {
+      plaintext = await decryptAES256GCM(databaseBytes(row.encrypted_auth), this.masterKeyHex);
+    } catch (error) {
+      return fail("undecryptable", error);
+    }
     let auth: CredentialAuth;
     try {
-      const plaintext = await decryptAES256GCM(databaseBytes(row.encrypted_auth), this.masterKeyHex);
       auth = JSON.parse(new TextDecoder().decode(plaintext)) as CredentialAuth;
     } catch {
-      return fail("undecryptable");
+      // The parser's text can quote the credential.
+      return fail("undecryptable", new Error("the decrypted credential is not JSON"));
     }
     if (!endpointMatches(auth.mcp_server_url ?? "", adapter.endpoint)) {
       return fail("undecryptable");
@@ -329,8 +338,8 @@ function oauthRefreshAction(auth: CredentialAuth, now: Date, force: boolean): "u
   return "use";
 }
 
-function fail(error: McpCredentialError): McpCredentialResolution {
-  return { ok: false, error };
+function fail(error: McpCredentialError, cause?: unknown): McpCredentialResolution {
+  return cause === undefined ? { ok: false, error } : { ok: false, error, cause };
 }
 
 function useToken(token: string, row: Pick<McpCredentialSQLRow, "id" | "vault_id">): McpCredentialResolution {

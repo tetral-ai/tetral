@@ -72,7 +72,8 @@ impl Drop for SocketOwnership {
             observe::warn!(
                 "server.socket_cleanup_failed",
                 error.os_code = error.raw_os_error().unwrap_or(0),
-                error.code = observe::Code("socket_cleanup_failed")
+                error.code = observe::Code("socket_cleanup_failed"),
+                error.message = observe::Cause::system(&error.to_string())
             );
         }
         // The lock field is dropped only after this cleanup returns.
@@ -230,5 +231,66 @@ pub(crate) async fn keep_socket_fresh(socket: PathBuf, first: Duration, interval
         let _ = rustix::fs::utimensat(CWD, &socket, &now, AtFlags::SYMLINK_NOFOLLOW);
         next = state::seams::now() + interval;
         state::seams::count("socket.touched");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+
+    #[test]
+    fn a_socket_name_that_cannot_be_removed_is_recorded_with_the_system_error() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(paths::RUN)).unwrap();
+        let root = StateRoot::new(home.path().as_os_str()).unwrap();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let sinks = Arc::new(observe::Sinks::new(
+            observe::Sink::spawn_stderr(Box::new(log.reopen().unwrap()), observe::registry()),
+            observe::FlushClock {
+                now: state::seams::now,
+                recheck: Duration::from_millis(1),
+            },
+        ));
+        let _records = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+            observe::RecordLayer::new(observe::Level::Warn, sinks.clone()),
+        ));
+        // A directory where the socket was: unlinking it fails with an error
+        // other than NotFound.
+        let socket = home.path().join("socket");
+        std::fs::create_dir(&socket).unwrap();
+        let fault = std::fs::remove_file(&socket).unwrap_err();
+        let mut ownership = SocketOwnership::new(lock::acquire(&root).unwrap());
+        ownership.socket = Some(socket);
+        drop(ownership);
+        sinks.flush(Duration::from_secs(2));
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 1, "{records:?}");
+        let record = &records[0];
+        assert_eq!(
+            (
+                &record["event"],
+                &record["error.code"],
+                &record["error.message"],
+                &record["error.os_code"]
+            ),
+            (
+                &serde_json::json!("server.socket_cleanup_failed"),
+                &serde_json::json!("socket_cleanup_failed"),
+                &serde_json::json!(fault.to_string()),
+                &serde_json::json!(fault.raw_os_error().unwrap())
+            ),
+            "{record}"
+        );
+        // The lock is released after the cleanup.
+        lock::acquire(&root).unwrap();
     }
 }

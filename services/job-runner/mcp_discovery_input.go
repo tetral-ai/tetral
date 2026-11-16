@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/workload"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
@@ -212,7 +214,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) discoverUserInputMCP(ctx context.Contex
 				diagnostic = mcpmanifest.DiagnosticDiscoveryUnavailable
 			}
 			if s.Logger != nil {
-				s.Logger.Error("MCP input discovery attempt failed", "event.kind", "mcp_input_discovery_failed",
+				workload.WriteFailure(ctx, s.Logger, "mcp_input_discovery_failed", "operation_failed", workload.CauseOf(err), "event.kind", "mcp_input_discovery_failed",
 					"workspace.id", job.WorkspaceID, "session.id", job.SessionID, "runtime_input.id", job.RuntimeInputID,
 					"mcp.server.name", toolset.MCPServerName, "mcp.failure.kind", diagnostic, "attempt", attempt.number)
 			}
@@ -340,7 +342,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) finishMCPDiscoveryFailure(ctx context.C
 		return nil
 	}
 	if s.Logger != nil {
-		s.Logger.Error("MCP discovery exhausted; input settled without execution", "event.kind", "mcp_input_discovery_exhausted",
+		workload.WriteFailure(ctx, s.Logger, "mcp_input_discovery_exhausted", "operation_failed",
+			workload.CauseOf(fmt.Errorf("MCP discovery attempts exhausted with %s; the input settled without execution", diagnostic)), "event.kind", "mcp_input_discovery_exhausted",
 			"workspace.id", job.WorkspaceID, "session.id", job.SessionID, "runtime_input.id", job.RuntimeInputID,
 			"mcp.server.name", toolset.MCPServerName, "mcp.failure.kind", diagnostic)
 	}

@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -77,7 +77,7 @@ func TestDaytonaAdapterExposesCreateCapacityAsProvedNotStarted(t *testing.T) {
 	}}
 	lifecycle := sandboxdriver.NewDaytonaLifecycleProviderForClient(sdkClient, time.Minute)
 	var logs bytes.Buffer
-	adapter := &DaytonaAdapter{Lifecycle: lifecycle, Logger: slog.New(slog.NewJSONHandler(&logs, nil))}
+	adapter := &DaytonaAdapter{Lifecycle: lifecycle, Logger: workloadtest.Logger(t, &logs, ServiceName, "")}
 	outcome := adapter.Activate(context.Background(), ActivationRequest{
 		Kind: ActivationCreate,
 		Setup: sandbox.SandboxSetup{
@@ -95,6 +95,7 @@ func TestDaytonaAdapterExposesCreateCapacityAsProvedNotStarted(t *testing.T) {
 	for _, want := range []string{
 		`"provider.name":"daytona"`, `"provider.status_code":400`, `"error.code":"quota_exceeded"`,
 		`"error.message_safe":"sandbox provider operation failed"`,
+		`"error.message":"sandbox provider capacity is unavailable"`,
 		`"provider.failure_detail":"sandbox provider capacity is unavailable"`,
 	} {
 		if !strings.Contains(logs.String(), want) {
@@ -134,9 +135,10 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 			assertDaytonaCapacityLogFields(t, providerRecord, map[string]any{
 				"provider.name": "daytona", "provider.status_code": float64(400),
 				"error.code": "quota_exceeded", "error.message_safe": "sandbox provider operation failed",
+				"error.message":           "sandbox provider capacity is unavailable",
 				"provider.failure_detail": "sandbox provider capacity is unavailable",
 			})
-			attemptRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "event", "sandbox_activation_attempt_completed")
+			attemptRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "event", "sandbox.activation.attempt_completed")
 			assertDaytonaCapacityLogFields(t, attemptRecord, map[string]any{
 				"provider.name": "daytona", "outcome": "retry", "error.code": "quota_exceeded",
 				"error.message_safe":  "sandbox activation will be retried",
@@ -360,7 +362,7 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	sdkClient := &scriptedDaytonaLifecycleClient{createErrors: append([]error{}, createErrors...)}
 	lifecycle := sandboxdriver.NewDaytonaLifecycleProviderForClient(sdkClient, time.Minute)
 	logs := &bytes.Buffer{}
-	logger := slog.New(slog.NewJSONHandler(logs, nil))
+	logger := workloadtest.Logger(t, logs, ServiceName, "")
 	adapter := &DaytonaAdapter{
 		Lifecycle: lifecycle,
 		Resolver:  lifecycle,

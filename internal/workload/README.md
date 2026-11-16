@@ -10,6 +10,11 @@ spaces and default only exact empty values.
 
 ## Listener and request lifetime
 
+A listen address is a host (empty, an IP or a DNS name) and a decimal port
+(`ListenTCP`). Any other value, a named port included, is refused as a
+configuration error that quotes nothing of it, since the value may be a secret
+pasted into the wrong setting.
+
 `Run` closes request admission when shutdown begins and marks readiness as
 shutting down. A late startup callback cannot restore readiness. Already
 admitted HTTP handlers retain their request contexts during the configured
@@ -59,7 +64,8 @@ listed ranges fail startup without echoing their supplied value.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | an OTLP/gRPC collector URL; empty exports no span |
 
 Severity describes operational significance; a semantic failure retains
-`error.class`, `error.code`, and `error.message_safe` independently of severity.
+`error.class`, `error.code`, and `error.message_safe` independently of severity,
+and is rate-limited at every level, `DEBUG` included.
 Healthy high-frequency polling and authenticated gRPC completions use Debug.
 First degradation and final failures remain visible at their owning severity.
 Repeated warnings, errors, and marked failures aggregate by stable event/reason,
@@ -103,7 +109,9 @@ by their business boundary.
 `NewProcessLogger` owns one worker and a nonblocking queue of 64 bounded records.
 Production commands install that logger as the process default for library
 records and close it after business listeners and resources. `Close(ctx)` flushes
-bounded suppression summaries and waits only within the caller's budget;
+bounded suppression summaries, waits for the queued records to be written, and
+then gives the span export what remains of the caller's budget, so a collector
+that never answers cannot cost a record queued before the close;
 `CloseWithBudget` supplies a one-second diagnostic budget. Excess records drop
 under backpressure. A generic injected `io.Writer` cannot be canceled: if its
 write never returns, the single worker may remain blocked after Close returns.
@@ -133,9 +141,10 @@ the same names and semantics; `integration/static` fails any other `slog`
 package-level call or TypeScript `console` call in service code.
 
 - **Records.** One JSON object per line on stderr with the fields above. A
-  failure adds `error.class`, `error.code` and `error.message_safe`, the fixed
-  text its event declares for that code, never an error's own text. A duration
-  is an integer `_ms` field from a monotonic clock. A string over 1,024 bytes
+  failure adds `error.class`, `error.code`, `error.message_safe`, the fixed
+  text its event declares for that code, and `error.message`, its cause, where
+  the code has one ([Failure records](#failure-records)). A duration is an
+  integer `_ms` field from a monotonic clock. A string over 1,024 bytes
   becomes `[TRUNCATED]`; control characters become spaces.
 - **Correlation.** `WithFields(ctx, ...)` adds correlation fields (the
   workspace, Session, thread, request, tool call, task, message, connection,
@@ -155,6 +164,60 @@ package-level call or TypeScript `console` call in service code.
   tool input or output, command line, environment value, file content or drive
   file path; or an email address, name or other personal attribute.
 
+### Failure records
+
+A failure record is one at `ERROR` or with any `error.*` field. It is written
+only through `WriteFailure(ctx, logger, event, code, cause, fields...)`, or by
+`Observation.EndHandled`, which calls it; the class and the safe text come
+from the event's declaration of the code, never from the caller.
+
+- **Cause.** `error.message` is the failure's cause in the words of whatever
+  failed: `CauseOf(err)`. Its text comes only from the component's own code,
+  the operating system, a linked library (its view of PostgreSQL, the
+  Kubernetes API, NATS or a Controller's HTTP endpoint included) or a helper
+  process the component starts, before that helper starts Session work. An
+  error that keeps the cause it wraps out of its own text, because that text
+  is answered to a caller, hands it to the record through `RecordedCause`.
+- **Paths.** A configured or mounted path never reaches a cause. A site that
+  reads such a file (a token, a CA, a key or certificate, a credential file,
+  the data directory) passes its error through `WithoutPaths(err, paths...)`,
+  which leaves out of the error's text the path of every file system error it
+  wraps and each path it is given, as a library may quote one in its own
+  words; `errors.Is` and `errors.As` still see the error.
+- **No cause.** The output of a command, a tool, an MCP server, a model, a web
+  backend or a remote Git server, and the message of a CLI report, are never
+  a cause. A failure whose only text is of that kind is written with
+  `NoCause` and its record names the tool, the size or the exit code instead.
+- **Declaration.** Each code of an event declares exactly one of
+  `"cause": true` and `"no_cause": "<source>"`, the source being
+  `command_output`, `tool_output`, `mcp_server_response`, `model_response`,
+  `web_backend_response`, `remote_git_output` or `cli_report`. A table whose
+  code declares neither, both or another source is refused when it is
+  registered.
+- **Shaping.** The entry keeps of each URL in a cause its scheme, host and
+  path, and drops its userinfo and query; turns each control character into a
+  space; and keeps the first 1,024 UTF-8 bytes, cut at a character boundary
+  and followed by `[TRUNCATED]`. The TypeScript library shapes a cause with
+  the same function, and both are tested with the rows of
+  [`cause-shaping.json`](../ts-observability/test-support/cause-shaping.json).
+- **Checks.** In a test binary the writer fails on a failure record that did
+  not come through the entry, on a code its event does not declare, on a
+  cause for a code declared without one, on a missing cause for a code
+  declared with one, and on a failure through the entry on an event the
+  service does not declare, whatever level is set. It fails as for an undeclared
+  event: a panic on a new goroutine ends the binary, so a site that recovers
+  panics around its records cannot hide it, and the message names the event,
+  the code, the rule and the file and line that wrote the record. Production writes
+  `diagnostic.invalid_event` for a record outside the entry (`reason`
+  `failure_outside_entry`) and for an undeclared code
+  (`undeclared_error_code`), and follows the declaration otherwise: it drops
+  a cause the code declares it has not, and writes a record that lacks its
+  cause as it is. A service without a table writes the code and the cause it
+  is given.
+- **Tests.** A test that reads a failure record builds its logger with
+  `workloadtest.Logger`, so the record passes these checks, and asserts
+  `error.message` against the cause it injected, or its absence.
+
 ### Declarations
 
 Each component declares its events, operations, metric families and span
@@ -171,7 +234,8 @@ operation: a test binary fails at once, production writes
 `diagnostic.invalid_event`. `Registry` creates a metric family only from its
 declaration: the type, label names and buckets (`request`, `long` or a list)
 come from the table, the code gives the name, help text and label order, and a
-sample whose label value is outside a declared values list is dropped. An
+sample whose label value is outside a declared values list is dropped;
+`Histogram.Show` makes a series exist at zero before its first sample. An
 undeclared name, or one declared with another type or other labels, fails a
 test binary and in production gives a handle that records nothing. Collectors
 and metric text a service writes by hand are checked by the inventory test
@@ -253,7 +317,8 @@ time for the stored durations. Callers omit unchanged and replayed transitions.
 Spans and trace IDs always exist; an OTLP/gRPC exporter to
 `OTEL_EXPORTER_OTLP_ENDPOINT` exists only when it is set, fed by a 2,048-span
 queue that refuses a span when full and counts it in
-`tetral_diagnostic_spans_dropped_total`. W3C `traceparent` is the only
+`tetral_diagnostic_spans_dropped_total`. A flush of that export returns once
+every span ended before it has been exported, or when its context ends. W3C `traceparent` is the only
 propagator; the sampler is parent-based with root ratio
 `TETRAL_TRACE_SAMPLE_RATIO`. A developer API request starts a new trace and an
 incoming `traceparent` becomes only its link; an internal gRPC call continues

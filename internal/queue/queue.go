@@ -1587,15 +1587,15 @@ func payloadStringArray(raw map[string]json.RawMessage, key string, allowEmpty b
 	return values, nil
 }
 
+// knownKinds are the kinds the Queue admits and leases.
+var knownKinds = []string{
+	KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindEnvironmentBuild, KindEnvironmentReadyFanout,
+	KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
+	KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup, KindSandboxMemoryProjection, KindSandboxBackgroundCommand, KindSandboxBackgroundReconcile,
+}
+
 func isKnownKind(kind string) bool {
-	switch kind {
-	case KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindEnvironmentBuild, KindEnvironmentReadyFanout,
-		KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
-		KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup, KindSandboxMemoryProjection, KindSandboxBackgroundCommand, KindSandboxBackgroundReconcile:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(knownKinds, kind)
 }
 
 // IsJobRunnerKind reports the five kinds that direct Job Runner leasing

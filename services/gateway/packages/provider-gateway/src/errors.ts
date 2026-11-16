@@ -15,8 +15,9 @@ export class GrpcStatusError extends Error {
   constructor(
     readonly code: status,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "GrpcStatusError";
   }
 }

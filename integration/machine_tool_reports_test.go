@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -643,11 +644,18 @@ func TestReportsForOtherInstructionsChangeNothing(t *testing.T) {
 // A rejection settles its own call once, as rejected with its code and
 // message, and leaves the connection and other tasks alone: a
 // resource_exhausted rejection of a new call while another task runs settles
-// the new call, is logged as tool.report_rejected, and the running task's
+// the new call, each report of it is logged as tool.report_rejected, and the running task's
 // terminal report still ends it; a heartbeat afterwards is accepted.
+//
+// The rejection's message is the CLI's text: with every record written at
+// DEBUG, the hub's and the process's, none holds the message's marker.
 func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
-	lines := &lockedBuffer{}
-	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration", Logger: workload.NewLogger(lines, "integration", "test", "unit")})))
+	const marker = "MARKER_REPORT"
+	process := &lockedBuffer{}
+	debug := workload.DefaultDiagnosticConfig()
+	debug.Level = slog.LevelDebug
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration",
+		Logger: workload.NewLoggerWithConfig(process, "integration", "test", "unit", debug)})))
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
@@ -656,9 +664,10 @@ func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
 	stream.acked(execution(stream.connectionID, "report_running", original, "running", 1, execEnvelope("running", running, "")), "report_running")
 	use, _ := s.admitted(computerID, "make test")
 	refused, _ := stream.execute()
-	stream.acked(rejection(stream.connectionID, "report_rejected", refused, string(protocol.RejectionResourceExhausted)), "report_rejected")
+	stream.acked(reportJSON(stream.connectionID, "report_rejected", refused,
+		`"kind":"execution","phase":"rejected","error":{"code":"resource_exhausted","message":"refused: `+marker+`"}`), "report_rejected")
 	if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "rejected" ||
-		record["code"] != "resource_exhausted" || record["message"] != "refused: resource_exhausted" {
+		record["code"] != "resource_exhausted" || record["message"] != "refused: "+marker {
 		t.Fatalf("rejected call = %s %v; want rejected with the CLI's code and message", state, record)
 	}
 	stream.acked(rejection(stream.connectionID, "report_rejected_again", refused, string(protocol.RejectionResourceExhausted)), "report_rejected_again")
@@ -673,17 +682,21 @@ func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
 		RequestMessageID: instance.HeartbeatMessageID(stream.connectionID, 1), HeartbeatSeq: 1}); err != nil || response.Status != http.StatusOK {
 		t.Fatalf("heartbeat after the rejection = %d %s, %v; want the connection live", response.Status, response.Body, err)
 	}
-	var warned []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(lines.String()), "\n") {
-		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) == nil && record["event"] == "tool.report_rejected" {
-			warned = append(warned, record)
+	// Each of the two rejection reports is logged. Its only text is the
+	// CLI's, so the record has no cause.
+	warned := diagnosticRecords(t, &f.hubLogs, "tool.report_rejected")
+	addr := addressOf(refused)
+	if len(warned) != 2 {
+		t.Fatalf("tool.report_rejected records = %v; want one per rejection report", warned)
+	}
+	for _, record := range warned {
+		if record["level"] != "WARN" || record["error.code"] != "resource_exhausted" || record["instance.id"] != stream.cli.InstanceID ||
+			record["connection.id"] != stream.connectionID || record["session.id"] != s.id || record["task.id"] != addr.taskID || record["error.message"] != nil {
+			t.Fatalf("tool.report_rejected record = %v; want the rejection's, without a cause", record)
 		}
 	}
-	addr := addressOf(refused)
-	if len(warned) != 1 || warned[0]["level"] != "WARN" || warned[0]["error.code"] != "resource_exhausted" || warned[0]["instance.id"] != stream.cli.InstanceID ||
-		warned[0]["connection.id"] != stream.connectionID || warned[0]["session.id"] != s.id || warned[0]["task.id"] != addr.taskID {
-		t.Fatalf("tool.report_rejected records = %v; want one for the rejection", warned)
+	if logs := f.hubLogs.String() + process.String(); strings.Contains(logs, marker) {
+		t.Fatalf("a record holds the rejection's message: %s", logs)
 	}
 }
 
@@ -711,8 +724,6 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 // binding_unavailable writes none. Neither code is logged as
 // tool.report_rejected.
 func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *testing.T) {
-	lines := &lockedBuffer{}
-	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration", Logger: workload.NewLogger(lines, "integration", "test", "unit")})))
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
@@ -744,11 +755,8 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 			t.Fatalf("%d session errors in %s; want only the sandbox error", n, session.id)
 		}
 	}
-	for _, line := range strings.Split(strings.TrimSpace(lines.String()), "\n") {
-		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) == nil && record["event"] == "tool.report_rejected" {
-			t.Fatalf("tool.report_rejected logged for %v; want none", record["error.code"])
-		}
+	if logged := diagnosticRecords(t, &f.hubLogs, "tool.report_rejected"); len(logged) != 0 {
+		t.Fatalf("tool.report_rejected logged %v; want none", logged)
 	}
 }
 
@@ -898,6 +906,7 @@ func TestAwaitToolCallEndsOnItsNoticeOnAnyBridgePod(t *testing.T) {
 // received and lasts wall_time_ms, with queued, drive_wait, run and sync laid
 // end to end from its start, and the settlement's span tool.settle; the
 // report reaches a hub server other than the one that sent the instruction.
+// A refused admission's span carries the refusal's gRPC status as its code.
 func TestToolReportSpansFollowTheReportedMetrics(t *testing.T) {
 	spans := tracetest.NewInMemoryExporter()
 	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration", SyncExporter: spans, SampleRatio: 1})))
@@ -947,6 +956,27 @@ func TestToolReportSpansFollowTheReportedMetrics(t *testing.T) {
 	}
 	if _, ok := byName["tool.settle"]; !ok {
 		t.Fatal("no tool.settle span in the admission's trace")
+	}
+
+	const refusedTraceID = "5cf92f3577b34da6a3ce929d0e0e4737"
+	refused := metadata.AppendToOutgoingContext(f.ctx, "traceparent", "00-"+refusedTraceID+"-00f067aa0ba902b7-01")
+	if _, err := f.runtime.AdmitToolCall(refused, &bridgev1.AdmitToolCallRequest{Scope: s.scope, ToolUseEventId: s.use(protocol.ToolExecCommand, "machine_tool"), ComputerId: computerID,
+		Tool: protocol.ToolExecCommand, InputJson: `{"cmd":"ls","justification":"why"}`, SandboxPolicyJson: disabledNetworkPolicy}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("admission with an unknown input member: %v; want InvalidArgument", err)
+	}
+	code := ""
+	for _, span := range spans.GetSpans() {
+		if span.SpanContext.TraceID().String() != refusedTraceID || span.Name != "tool.admit" {
+			continue
+		}
+		for _, attribute := range span.Attributes {
+			if attribute.Key == "error.code" {
+				code = attribute.Value.AsString()
+			}
+		}
+	}
+	if code != "invalid_argument" {
+		t.Fatalf("the refused admission's span has error.code %q; want invalid_argument", code)
 	}
 }
 

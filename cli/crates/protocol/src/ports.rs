@@ -126,16 +126,19 @@ pub trait ReportListener: Send + Sync {
 
 /// Why the Report outbox did not admit a report. The submission and its
 /// encoded body have been released; nothing was sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ReportAdmissionError {
     /// A new tool result did not fit the local retained-report budget.
+    #[error("the report does not fit the retained-report budget")]
     ResourceExhausted,
     /// A tool-list report is over its endpoint's byte limit, measured as
     /// the complete compact JSON with the outbox's common fields.
+    #[error("the report is over its endpoint's byte limit")]
     ReportTooLarge,
     /// A tool-list report holds more than
     /// [`MAX_REPORT_VALUES`](crate::strict::MAX_REPORT_VALUES) JSON values,
     /// counted over the complete JSON with the outbox's common fields.
+    #[error("the report holds more JSON values than a report may")]
     ReportTooComplex,
 }
 

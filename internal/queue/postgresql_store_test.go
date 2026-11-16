@@ -1038,6 +1038,22 @@ func TestPostgreSQLStoreLeaseReturnsProducerTraceAndObservesOneQueueWait(t *test
 			telemetry := workload.NewTelemetry(workload.TelemetryOptions{Service: "queue", SampleRatio: 1})
 			t.Cleanup(workload.InstallTelemetry(telemetry))
 			store.ObserveQueueWaitIn(telemetry.Registry())
+			// Before any lease, a scrape shows every kind's wait at zero.
+			shown := map[string]float64{}
+			unleased, _ := telemetry.Registry().Collector()(context.Background())
+			for _, sample := range unleased {
+				if sample.Name == "queue_jobs_queue_wait_seconds_count" && len(sample.Labels) == 1 {
+					shown[sample.Labels[0].Value] = sample.Value
+				}
+			}
+			for _, kind := range knownKinds {
+				if count, ok := shown[kind]; !ok || count != 0 {
+					t.Fatalf("queue wait series before the first lease = %v; want every kind at zero, %s is not", shown, kind)
+				}
+			}
+			if len(shown) != len(knownKinds) {
+				t.Fatalf("queue wait series before the first lease = %v; want the %d kinds only", shown, len(knownKinds))
+			}
 			ctx, want := context.Background(), ""
 			if row.traced {
 				var producer *workload.Span

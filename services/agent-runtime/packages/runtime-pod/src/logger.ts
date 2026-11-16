@@ -26,6 +26,7 @@ import type {
 } from "@tetral/ts-observability";
 import {
 	createTetralJsonLogger,
+	causeOf,
 	semanticErrorFields,
 	serviceDeclarations,
 } from "@tetral/ts-observability";
@@ -142,6 +143,8 @@ export function recordCheckpointReconstructionFailure(
 		readonly sessionId: string;
 		readonly sessionThreadId: string;
 	},
+	// The Runtime's own refusal of the facts.
+	refusal: unknown,
 ): void {
 	try {
 		logger?.error({
@@ -154,6 +157,13 @@ export function recordCheckpointReconstructionFailure(
 			"thread.id": identity.sessionThreadId,
 			"reconstruction.phase": "cold_checkpoint",
 			"failure.kind": "invalid_durable_facts",
+			...semanticErrorFields({
+				errorCode: "operation_failed",
+				cause: causeOf(new Error("the durable facts of the Thread do not form a cold checkpoint", {
+					// A schema's refusal quotes the keys of the facts; the Runtime's own names only the rule.
+					cause: refusal instanceof Error && refusal.name === "ZodError" ? "the durable facts do not match their schema" : refusal,
+				})),
+			}),
 		});
 	} catch {
 		// Durable context handling is authoritative; diagnostics are fail-open.
@@ -183,6 +193,10 @@ export function recordContextLoadParseFailure(
 			"workspace.id": identity.workspaceId,
 			"session.id": identity.sessionId,
 			"thread.id": identity.sessionThreadId,
+			...semanticErrorFields({
+				errorCode: "operation_failed",
+				cause: causeOf(`the Bridge's context projection was rejected at ${phase} (${reason})`),
+			}),
 		});
 	} catch {
 		// Durable context rejection is authoritative; diagnostics are fail-open.
@@ -218,8 +232,8 @@ export function createJsonLogger(options: JsonLoggerOptions): TetralDiagnosticLo
 
 /**
  * Builds a startup failure record. A configuration failure carries the fixed safe message and names
- * the problem, which never holds a supplied value, in `startup.config_problem`; adapter startup
- * failures collapse to a fixed message.
+ * the problem, which never holds a supplied value, in `startup.config_problem`; an adapter startup
+ * failure carries a fixed safe message and the adapter's error as its cause.
  */
 export function startupFailureLogRecord(input: {
 	readonly kind: "config_error" | "startup_error";
@@ -247,9 +261,8 @@ export function startupFailureLogRecord(input: {
 			? { "startup.cause_class": startupCauseClass(input.cause) }
 			: { "startup.config_problem": input.message }),
 		...semanticErrorFields({
-			errorClass: input.kind,
 			errorCode: input.kind,
-			messageSafe: input.kind === "config_error" ? "configuration invalid" : safeMessage,
+			cause: causeOf(input.kind === "config_error" ? input.message : (input.cause ?? safeMessage)),
 		}),
 	};
 }
@@ -285,9 +298,8 @@ export function providerToolDeclarationRejectedLogRecord(
 		"tool.family": event.family,
 		"validation.member": event.validationMember,
 		...semanticErrorFields({
-			errorClass: "provider_tool_declaration",
 			errorCode: "invalid_tool_definition",
-			messageSafe: "provider tool declaration rejected",
+			cause: causeOf(`a ${event.declarationKind} tool declaration is invalid at ${event.validationMember}`),
 		}),
 	};
 }
@@ -379,7 +391,8 @@ function startupCauseClass(cause: unknown): string {
 
 /**
  * Builds a typed shutdown failure record for checkpoint expiry, an incomplete binding handoff,
- * active-run settlement failure or drain timeout.
+ * active-run settlement failure or drain timeout. Its cause is `error` when the failure has one,
+ * otherwise `message`.
  */
 export function shutdownFailureLogRecord(input: {
 	readonly event:
@@ -388,6 +401,7 @@ export function shutdownFailureLogRecord(input: {
 		| "shutdown_active_run_settlement_failed"
 		| "shutdown_drain_timeout";
 	readonly message: string;
+	readonly error?: unknown;
 }): RuntimePodLogRecord {
 	return {
 		event: input.event,
@@ -397,9 +411,8 @@ export function shutdownFailureLogRecord(input: {
 		kind: "shutdown_error",
 		message: input.message,
 		...semanticErrorFields({
-			errorClass: "shutdown_error",
 			errorCode: input.event,
-			messageSafe: input.message,
+			cause: causeOf(input.error === undefined || input.error === null ? input.message : new Error(input.message, { cause: input.error })),
 		}),
 	};
 }
@@ -410,6 +423,7 @@ export function shutdownFailureLogRecord(input: {
  */
 export function runtimeProcessReportFailureLogRecord(input: {
 	readonly failedCount: number;
+	readonly error: unknown;
 }): RuntimePodLogRecord {
 	return {
 		event: "runtime_process_report_failed",
@@ -418,19 +432,18 @@ export function runtimeProcessReportFailureLogRecord(input: {
 		component: "agent-runtime",
 		message: "runtime process report failed",
 		"failed.count": input.failedCount,
-		...semanticErrorFields({
-			errorClass: "dependency_error",
-			errorCode: "runtime_process_report_failed",
-			messageSafe: "runtime process report failed",
-		}),
+		...semanticErrorFields({ errorCode: "runtime_process_report_failed", cause: causeOf(input.error) }),
 	};
 }
 
-/** Builds one bounded closeout alarm, recovery, or unrepairable-release record. */
+/**
+ * Builds one bounded closeout alarm, recovery, or unrepairable-release record. The alarm and the
+ * unrepairable release are failures; the recovery is not.
+ */
 export function runtimeCloseoutLogRecord(
 	input: RuntimeCloseoutEvent,
 ): RuntimePodLogRecord {
-	return {
+	const record = {
 		event: input.event,
 		"event.kind": input.event,
 		operation: "runtime_closeout",
@@ -440,10 +453,17 @@ export function runtimeCloseoutLogRecord(
 		...(input.errorCode !== undefined
 			? { "closeout.error_code": input.errorCode }
 			: {}),
+	};
+	if (input.event === "runtime_closeout_recovered") return record;
+	const statement =
+		input.event === "runtime_closeout_stalled"
+			? `${input.activeCloseouts} closeouts have not been durably acknowledged`
+			: `a closeout was released without a durable acknowledgement (${input.errorCode ?? "unrepairable"})`;
+	return {
+		...record,
 		...semanticErrorFields({
-			errorClass: "runtime_closeout",
 			errorCode: input.errorCode ?? input.event,
-			messageSafe: input.event,
+			cause: causeOf(input.error === undefined ? statement : new Error(statement, { cause: input.error })),
 		}),
 	};
 }
@@ -493,9 +513,8 @@ export function runtimeTerminalSettlementLogRecord(
 		"retry.status": "terminal",
 		"settlement.outcome": input.settlementOutcome,
 		...semanticErrorFields({
-			errorClass: "runtime_contract_validation",
 			errorCode: "runtime_semantic_error",
-			messageSafe: "runtime contract validation failed",
+			cause: causeOf("runtime contract validation terminated the Thread"),
 		}),
 	};
 }

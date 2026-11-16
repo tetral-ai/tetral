@@ -456,8 +456,7 @@ skills, memory projection, and repository checkout separately.
 Failed workspace consumer cycles emit one `sandbox.queue.consume.failed` warning
 per cycle, including failures before a job is leased. It records the operation,
 Sandbox component, a fixed error class (`database_permission_denied` for SQLSTATE
-`42501`), and the next retry delay. It omits raw error text and database
-diagnostics. Existing polling backoff and wake behavior govern retries; normal
+`42501`), the next retry delay, and the cycle's error as `error.message`. Existing polling backoff and wake behavior govern retries; normal
 shutdown cancellation emits no failure warning.
 
 Tool SDK failures additionally carry `provider.operation` (the failed SDK

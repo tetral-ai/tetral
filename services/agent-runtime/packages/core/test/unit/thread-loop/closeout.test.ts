@@ -630,6 +630,30 @@ describe("ThreadLoop", () => {
 			error: { code: "ack_mismatch" },
 		});
 	});
+	test("failed-run closeout of a checkpoint that cannot be read keeps the read error", async () => {
+		const loader = new RecordingContextLoader([], { type: "empty" });
+		const session = new ThreadRuntime("sesn_failed_closeout_unreadable");
+		const unreadable = new Error("the resident checkpoint cannot be read");
+		session.state.threadTurnTransition = () => {
+			throw unreadable;
+		};
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				return yield* threadLoop.closeFailedRun(
+					session,
+					new Error("defect"),
+					testRunCustody(),
+				);
+			}).pipe(Effect.provide(runtimeThreadLoopLayer(loader))),
+		);
+		expect(result).toMatchObject({
+			type: "unrepairable",
+			error: { code: "schema_mismatch" },
+		});
+		expect(result.type === "unrepairable" ? (result.error as { cause?: unknown }).cause : undefined).toBe(unreadable);
+	});
+
 	test("a stale CommitInputs receipt discards hot state without terminal declaration writes", async () => {
 		const session = new ThreadRuntime("sesn_stale_commit_receipt");
 		const input = acceptedInput("rin_stale_commit_receipt", session.sessionId);

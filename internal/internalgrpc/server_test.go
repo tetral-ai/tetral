@@ -14,6 +14,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -25,9 +26,9 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// newTestLogger captures JSON log lines into buffer through the production handler.
-func newTestLogger(buffer *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buffer, &slog.HandlerOptions{Level: slog.LevelDebug})).With(slog.String("service.name", "test-service"))
+// newTestLogger captures the records the boundary writes, DEBUG included.
+func newTestLogger(t *testing.T, buffer *bytes.Buffer) *slog.Logger {
+	return workloadtest.Logger(t, buffer, "test-service", "")
 }
 
 // assertNothingAboveDebug checks that the boundary left a failed call's
@@ -111,7 +112,7 @@ func TestInternalGRPCRecordsHandlerFailuresOnlyAtDebug(t *testing.T) {
 		client, cleanup := newInternalGRPCClient(t, Config{
 			ServiceName:   "test-service",
 			Authenticator: &allowingAuthenticator{},
-			Logger:        newTestLogger(&buffer),
+			Logger:        newTestLogger(t, &buffer),
 			Metrics:       workload.NewGRPCMetrics("queue"),
 			Register: func(server *grpc.Server) {
 				registerTestService(server, func(context.Context) error { return status.Error(code, "handler failed") })
@@ -124,8 +125,9 @@ func TestInternalGRPCRecordsHandlerFailuresOnlyAtDebug(t *testing.T) {
 		if status.Code(err) != code {
 			t.Fatalf("call error = %v; want %s", err, code)
 		}
-		if !strings.Contains(output, `"grpc.code":"`+code.String()+`"`) {
-			t.Fatalf("no DEBUG call record for %s: %s", code, output)
+		if !strings.Contains(output, `"grpc.code":"`+code.String()+`"`) || !strings.Contains(output, `"error.code":"`+StatusCodeName(code)+`"`) ||
+			!strings.Contains(output, `"error.message":"rpc error: code = `+code.String()+` desc = handler failed"`) {
+			t.Fatalf("no DEBUG call record with its code and cause for %s: %s", code, output)
 		}
 		assertNothingAboveDebug(t, output)
 	}
@@ -138,7 +140,7 @@ func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
 		Authenticator: &allowingAuthenticator{},
-		Logger:        newTestLogger(&buffer),
+		Logger:        newTestLogger(t, &buffer),
 		Metrics:       metrics,
 		Register: func(server *grpc.Server) {
 			registerTestService(server, func(ctx context.Context) error {
@@ -185,6 +187,7 @@ func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 		`"terminal":true`,
 		`"error.class":"grpc_error"`,
 		`"error.code":"unimplemented"`,
+		`"error.message":"rpc error: code = Unimplemented desc = not implemented"`,
 		`"error.message_safe":"internal gRPC request failed"`,
 		`"duration.ms":`,
 	} {
@@ -202,7 +205,7 @@ func TestInternalGRPCOKBoundaryLogOmitsFailureClassification(t *testing.T) {
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
 		Authenticator: &allowingAuthenticator{},
-		Logger:        slog.New(slog.NewJSONHandler(&buffer, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Logger:        newTestLogger(t, &buffer),
 		Register: func(server *grpc.Server) {
 			registerTestService(server, func(context.Context) error { return nil })
 		},
@@ -241,7 +244,7 @@ func TestInternalGRPCAuthorizesMethodBeforeDispatchAndLogsSafely(t *testing.T) {
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
 		Authenticator: &allowingAuthenticator{},
-		Logger:        newTestLogger(&buffer),
+		Logger:        newTestLogger(t, &buffer),
 		MethodAuthorizer: func(identity auth.Identity, method string) error {
 			if identity.ServiceAccount.String() != "runtime/agent" {
 				t.Fatalf("identity = %s; want runtime/agent", identity.ServiceAccount.String())
@@ -283,7 +286,8 @@ func TestInternalGRPCAuthorizesMethodBeforeDispatchAndLogsSafely(t *testing.T) {
 		`"retryable":false`,
 		`"terminal":true`,
 		`"error.class":"grpc_error"`,
-		`"error.code":"permissiondenied"`,
+		`"error.code":"permission_denied"`,
+		`"error.message":"rpc error: code = PermissionDenied desc = method not allowed"`,
 		`"error.message_safe":"internal gRPC request failed"`,
 	} {
 		if !strings.Contains(logOutput, want) {
@@ -331,7 +335,7 @@ func TestInternalGRPCRecoveryCoversAuthenticatorPanics(t *testing.T) {
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
 		Authenticator: panicAuthenticator{},
-		Logger:        newTestLogger(&buffer),
+		Logger:        newTestLogger(t, &buffer),
 		Register: func(server *grpc.Server) {
 			registerTestService(server, func(context.Context) error { return nil })
 		},
@@ -347,9 +351,6 @@ func TestInternalGRPCRecoveryCoversAuthenticatorPanics(t *testing.T) {
 	if strings.Contains(logOutput, "panic-token-sentinel") {
 		t.Fatalf("recovery log leaked bearer token: %s", logOutput)
 	}
-	if strings.Contains(logOutput, "auth panic with raw token material") {
-		t.Fatalf("recovery log leaked panic text: %s", logOutput)
-	}
 	for _, want := range []string{
 		`"msg":"internal.grpc.recovered"`,
 		`"operation":"internal.grpc.request"`,
@@ -362,6 +363,7 @@ func TestInternalGRPCRecoveryCoversAuthenticatorPanics(t *testing.T) {
 		`"terminal":true`,
 		`"error.class":"panic"`,
 		`"error.code":"internal_error"`,
+		`"error.message":"panic: auth panic with raw token material"`,
 		`"error.message_safe":"internal gRPC error"`,
 	} {
 		if !strings.Contains(logOutput, want) {
@@ -598,7 +600,7 @@ func TestInternalGRPCForcedStopJoinsAfterCancellationBudget(t *testing.T) {
 				runErr = Run(ctx, Config{
 					ServiceName: "test-forced-join", Authenticator: &allowingAuthenticator{}, Listener: listener,
 					ShutdownTimeout: 5 * time.Millisecond, CancelJoinTimeout: joinBudget,
-					Logger: slog.New(slog.NewJSONHandler(observation, nil)),
+					Logger: workload.NewLogger(observation, "test-forced-join", "test", "unit"),
 					Register: func(server *grpc.Server) {
 						registerTestService(server, func(ctx context.Context) error {
 							close(entered)
@@ -668,7 +670,7 @@ type joinBudgetLogWriter struct {
 }
 
 func (w *joinBudgetLogWriter) Write(p []byte) (int, error) {
-	if bytes.Contains(p, []byte(`"error.code":"cancellation_join_timeout"`)) {
+	if bytes.Contains(p, []byte(`"error.code":"cancellation_join_timeout"`)) && bytes.Contains(p, []byte(`"error.message":"handlers still running when the cancellation budget ended"`)) {
 		w.once.Do(func() { close(w.reported) })
 	}
 	return len(p), nil

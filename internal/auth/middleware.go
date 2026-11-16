@@ -63,6 +63,9 @@ type AuditEvent struct {
 	RuleRevision     int64
 	IdentityRevision int64
 	GrantRevision    int64
+	// Err is the error behind a failed decision; a recorder takes it as the
+	// record's cause.
+	Err error
 }
 
 // AuditRecorder receives public-safe auth events.
@@ -101,8 +104,9 @@ func MiddlewareWithAudit(authenticator Authenticator, errorWriter ErrorWriter, r
 			provided := r.Header.Get("x-api-key")
 			path := safeAuditPath(r)
 			if provided == "" {
-				recordAuthEvent(ctx, recorder, AuditEvent{RequestID: id, Method: r.Method, Path: path, Result: "failure"})
-				errorWriter(w, r, &AuthenticationError{Message: "missing x-api-key header"})
+				missing := &AuthenticationError{Message: "missing x-api-key header"}
+				recordAuthEvent(ctx, recorder, AuditEvent{RequestID: id, Method: r.Method, Path: path, Result: "failure", Err: missing})
+				errorWriter(w, r, missing)
 				return
 			}
 			principal, err := authenticator.Authenticate(ctx, provided)
@@ -112,11 +116,11 @@ func MiddlewareWithAudit(authenticator Authenticator, errorWriter ErrorWriter, r
 			if err != nil {
 				var authErr *AuthenticationError
 				if errors.As(err, &authErr) {
-					recordAuthEvent(ctx, recorder, AuditEvent{RequestID: id, Method: r.Method, Path: path, Result: "failure"})
+					recordAuthEvent(ctx, recorder, AuditEvent{RequestID: id, Method: r.Method, Path: path, Result: "failure", Err: authErr})
 					errorWriter(w, r, authErr)
 					return
 				}
-				recordAuthEvent(ctx, recorder, AuditEvent{RequestID: id, Method: r.Method, Path: path, Result: "error", ErrorType: safeErrorType(err)})
+				recordAuthEvent(ctx, recorder, AuditEvent{RequestID: id, Method: r.Method, Path: path, Result: "error", ErrorType: safeErrorType(err), Err: err})
 				errorWriter(w, r, err)
 				return
 			}

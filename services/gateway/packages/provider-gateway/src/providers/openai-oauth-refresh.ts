@@ -37,7 +37,7 @@ export const MAX_FOLLOWED_REDIRECTS = 0;
 /** Outcome returned to the provider client after checking or rotating OAuth material. */
 export type OpenAIOAuthCredentialRefreshResult =
   | { readonly ok: true; readonly credential: ResolvedSessionOAuthCredential }
-  | { readonly ok: false; readonly error: "credential_required" };
+  | { readonly ok: false; readonly error: "credential_required"; readonly cause?: unknown };
 
 /** Refresh boundary consumed by the provider client registry. */
 export interface OpenAIOAuthCredentialRefreshWriter {
@@ -166,8 +166,8 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
           return await this.readFreshCommittedCredential(sql, input.workspaceId, input.credential);
         }
         return result;
-      } catch {
-        return { ok: false, error: "credential_required" };
+      } catch (error) {
+        return { ok: false, error: "credential_required", cause: error };
       }
     });
   }
@@ -223,7 +223,12 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
 
   private async decryptAuth(encryptedAuth: Uint8Array): Promise<StoredProviderOAuthAuth> {
     const plaintext = await decryptAES256GCM(encryptedAuth, this.options.masterKeyHex);
-    return JSON.parse(new TextDecoder().decode(plaintext)) as StoredProviderOAuthAuth;
+    try {
+      return JSON.parse(new TextDecoder().decode(plaintext)) as StoredProviderOAuthAuth;
+    } catch {
+      // The parser's text can quote the credential.
+      throw new Error("the decrypted credential is not JSON");
+    }
   }
 
   private async refreshWithIssuer(
@@ -239,18 +244,14 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
       grant_type: "refresh_token",
       refresh_token: refreshToken,
     });
-    let response: Response;
-    try {
-      response = await this.fetchImpl(OpenAICodexOAuthTokenEndpoint, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body,
-        signal: abortSignal,
-        redirect: "manual",
-      });
-    } catch {
-      return undefined;
-    }
+    // A request that fails throws its transport error to the refresh's record.
+    const response = await this.fetchImpl(OpenAICodexOAuthTokenEndpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+      signal: abortSignal,
+      redirect: "manual",
+    });
     if (response.status >= 300 && response.status <= 399) {
       try {
         await response.body?.cancel();

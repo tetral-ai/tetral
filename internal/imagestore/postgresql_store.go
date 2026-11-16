@@ -99,6 +99,8 @@ func Resolve(ctx context.Context, tx *dbconnect.Tx, blobs blob.BlobStore, ws wor
 // or upload entries it could not release.
 type CollectResult struct {
 	Deleted, Failed int
+	// FirstFailure is the error of the first item counted in Failed.
+	FirstFailure error
 }
 
 // CollectExpired deletes at most limit rows past lifetime, across
@@ -159,20 +161,27 @@ func CollectExpired(ctx context.Context, client *dbconnect.Client, blobs blob.Bl
 		}
 		if err != nil {
 			result.Failed++
+			if result.FirstFailure == nil {
+				result.FirstFailure = err
+			}
 			continue
 		}
 		result.Deleted += int(deleted)
 	}
-	failed, err := releaseDueUploads(ctx, client, blobs, limit)
+	failed, firstFailure, err := releaseDueUploads(ctx, client, blobs, limit)
 	result.Failed += failed
+	if result.FirstFailure == nil {
+		result.FirstFailure = firstFailure
+	}
 	return result, err
 }
 
 // releaseDueUploads releases at most limit upload entries past check_after,
 // across Workspaces, oldest first, each in a transaction of its Workspace
 // under its content's lock that deletes the entry and the blob no row or
-// other entry names. It returns how many it could not release.
-func releaseDueUploads(ctx context.Context, client *dbconnect.Client, blobs blob.BlobStore, limit int) (int, error) {
+// other entry names. It returns how many it could not release and the first
+// of their errors.
+func releaseDueUploads(ctx context.Context, client *dbconnect.Client, blobs blob.BlobStore, limit int) (int, error, error) {
 	type due struct{ workspaceID, uploadID, hash string }
 	var dues []due
 	err := client.WithTx(ctx, "imagestore.due_uploads", nil, func(tx *dbconnect.Tx) error {
@@ -195,9 +204,10 @@ func releaseDueUploads(ctx context.Context, client *dbconnect.Client, blobs blob
 		return rows.Err()
 	})
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	failed := 0
+	var firstFailure error
 	for _, d := range dues {
 		err := client.WithWorkspaceTx(ctx, d.workspaceID, "imagestore.release_upload", func(tx *dbconnect.Tx) error {
 			if err := lockContent(ctx, tx, d.workspaceID, d.hash); err != nil {
@@ -209,13 +219,16 @@ func releaseDueUploads(ctx context.Context, client *dbconnect.Client, blobs blob
 			return releaseBlob(ctx, tx, blobs, d.workspaceID, d.hash)
 		})
 		if ctx.Err() != nil {
-			return failed, ctx.Err()
+			return failed, firstFailure, ctx.Err()
 		}
 		if err != nil {
 			failed++
+			if firstFailure == nil {
+				firstFailure = err
+			}
 		}
 	}
-	return failed, nil
+	return failed, firstFailure, nil
 }
 
 // DeleteSession deletes every row of sessionID and the blob of each of its

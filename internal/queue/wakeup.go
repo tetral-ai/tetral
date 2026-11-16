@@ -13,6 +13,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const (
@@ -284,13 +285,10 @@ type notificationListenerFailure struct {
 
 func logNotificationListenerFailure(logger *slog.Logger, consumerClass string, err error) {
 	failure := classifyNotificationListenerFailure(err)
-	logger.Warn("queue.notification_listener.disconnected",
+	workload.WriteFailure(context.Background(), logger, "queue.notification_listener.disconnected", "notification_listener_"+failure.category, workload.CauseOf(err),
 		slog.String("operation", "queue.notification_listener"),
 		slog.String("event.kind", "listener_disconnected"),
 		slog.String("consumer.class", consumerClass),
-		slog.String("error.class", "queue_notification_listener_error"),
-		slog.String("error.code", "notification_listener_"+failure.category),
-		slog.String("error.message_safe", "queue notification listener disconnected"),
 		slog.Bool("retryable", failure.retryable),
 		slog.Bool("terminal", false),
 	)

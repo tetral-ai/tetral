@@ -113,15 +113,6 @@ func (f *machineTools) computerRow(computerID string) map[string]any {
 	return f.row(`SELECT association_state, execution_state, connection_id, binding_id FROM computers WHERE id=$1`, computerID)
 }
 
-// captureLogs installs telemetry whose records go to the returned buffer;
-// it must run before newMachineTools, whose hubs take its logger.
-func captureLogs(t *testing.T) *lockedBuffer {
-	lines := &lockedBuffer{}
-	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration",
-		Logger: workload.NewLogger(lines, "integration", "test", "unit")})))
-	return lines
-}
-
 // idle ends s's turn, so the developer may change its computers.
 func (s *toolSession) idle() {
 	s.f.t.Helper()
@@ -344,7 +335,6 @@ func TestALostCloseIsCompletedByTheNextConnection(t *testing.T) {
 // writes nothing and is logged with its reason; a close lost with its
 // connection has its entries written from the instance's next ready.
 func TestLostChangesWriteOneErrorEach(t *testing.T) {
-	logs := captureLogs(t)
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
@@ -401,7 +391,7 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	}
 	requireIgnored := func(want ...map[string]any) {
 		t.Helper()
-		got := diagnosticRecords(t, logs, "client.lost_changes_ignored")
+		got := diagnosticRecords(t, &f.hubLogs, "client.lost_changes_ignored")
 		if len(got) != len(want) {
 			t.Fatalf("ignored entries = %v; want %v", got, want)
 		}
@@ -444,7 +434,6 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 // A ready's entry naming another instance's close writes nothing, the ready
 // is accepted, and the entry is logged with no Session or binding.
 func TestAReadyLogsEntriesOfOtherInstances(t *testing.T) {
-	logs := captureLogs(t)
 	f := newMachineTools(t)
 	stranger := f.session()
 	strangerComputer, strangerStream := stranger.preparedUserComputer("desktop")
@@ -458,7 +447,7 @@ func TestAReadyLogsEntriesOfOtherInstances(t *testing.T) {
 	if errs := f.sessionErrors(stranger.id); len(errs) != 0 {
 		t.Fatalf("errors = %v; want none", errs)
 	}
-	ignored := diagnosticRecords(t, logs, "client.lost_changes_ignored")
+	ignored := diagnosticRecords(t, &f.hubLogs, "client.lost_changes_ignored")
 	if len(ignored) != 1 || ignored[0]["reason"] != "unknown_instruction" || ignored[0]["request.message.id"] != strangerClose.Envelope.MessageID ||
 		ignored[0]["connection.id"] != next.connectionID || ignored[0]["message.id"] != "ready_"+next.connectionID ||
 		ignored[0]["session.id"] != "" || ignored[0]["binding.id"] != "" {

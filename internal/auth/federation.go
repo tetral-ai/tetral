@@ -36,6 +36,14 @@ func (p VerifiedAssertion) Subject() string      { return p.subject }
 func (p VerifiedAssertion) ExpiresAt() time.Time { return p.expiresAt }
 
 // UnavailableError indicates a failed dependency rather than rejected identity.
-type UnavailableError struct{}
+// Its text is what a caller is answered; the dependency's own error reaches
+// only the failure record.
+type UnavailableError struct{ cause error }
+
+// Unavailable is the failure of a dependency with the error it failed with.
+func Unavailable(cause error) *UnavailableError { return &UnavailableError{cause: cause} }
 
 func (*UnavailableError) Error() string { return "authentication unavailable" }
+
+// RecordedCause is the dependency's error.
+func (e *UnavailableError) RecordedCause() error { return e.cause }

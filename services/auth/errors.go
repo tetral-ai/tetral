@@ -29,6 +29,9 @@ type errorDetail struct {
 
 func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	status, errorType, message := classifyAuthError(err)
+	if status >= http.StatusInternalServerError {
+		httpapi.NoteRequestFailure(r, err)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorResponse{

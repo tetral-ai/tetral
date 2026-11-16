@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"testing"
 )
 
@@ -24,39 +23,37 @@ func (h *serverDiagnosticHandler) Handle(_ context.Context, r slog.Record) error
 }
 func (h *serverDiagnosticHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *serverDiagnosticHandler) WithGroup(string) slog.Handler      { return h }
-func TestHTTPServerDiagnosticsClassifyAndBoundWithoutRawText(t *testing.T) {
-
+func TestHTTPServerDiagnosticsClassifyBoundAndCarryTheServerText(t *testing.T) {
 	var output bytes.Buffer
 	writer := &httpServerDiagnostics{logger: NewLogger(&output, "diagnostic-test", "local", "unit")}
-	inputs := []string{"http: TLS handshake error from fixture-private-address: fixture-secret-cert", "http: panic serving fixture-private-address: fixture-secret-body", "fixture-unexpected-server-message: fixture-secret-query"}
-	for _, input := range inputs {
+	rows := []struct{ input, phase, level, class, code, cause string }{
+		{"http: TLS handshake error from 203.0.113.9:41234: remote error: tls: bad certificate", "tls_handshake", "WARN", "transport_error", "tls_handshake_failed", "http: TLS handshake error: remote error: tls: bad certificate"},
+		{"http: panic serving 203.0.113.9:41234: runtime error: index out of range\ngoroutine 7 [running]:", "handler_panic", "ERROR", "panic", "internal_error", "http: panic serving: runtime error: index out of range"},
+		{"http: Accept error: accept tcp: too many open files; retrying in 5ms", "http_server", "ERROR", "internal_error", "http_server_failed", "http: Accept error: accept tcp: too many open files; retrying in 5ms"},
+	}
+	for _, row := range rows {
 		for range 100 {
-			n, err := writer.Write([]byte(input))
-			if err != nil || n != len(input) {
+			n, err := writer.Write([]byte(row.input))
+			if err != nil || n != len(row.input) {
 				t.Fatal("diagnostics changed server behavior")
 			}
 		}
 	}
 	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))
-	if len(lines) != 3 {
+	if len(lines) != len(rows) {
 		t.Fatalf("unbounded diagnostics: %d records", len(lines))
 	}
-	expected := []string{"tls_handshake", "handler_panic", "http_server"}
 	for i, line := range lines {
-		if strings.Contains(string(line), "fixture") {
-			t.Fatal("raw server diagnostic escaped")
-		}
 		var record map[string]any
 		if err := json.Unmarshal(line, &record); err != nil {
 			t.Fatal(err)
 		}
-		if record["phase"] != expected[i] {
-			t.Fatalf("phase %v want %q", record["phase"], expected[i])
-		}
-		if i == 1 && (record["level"] != "ERROR" || record["error.class"] != "panic" || record["error.code"] != "internal_error") {
-			t.Fatal("panic failure classification lost")
+		row := rows[i]
+		if record["phase"] != row.phase || record["level"] != row.level || record["error.class"] != row.class || record["error.code"] != row.code || record["error.message"] != row.cause {
+			t.Fatalf("record = %v; want %+v", record, row)
 		}
 	}
+	inputs := []string{rows[0].input}
 	failing := &httpServerDiagnostics{logger: slog.New(&serverDiagnosticHandler{panicOnWrite: true})}
 	if _, err := failing.Write([]byte(inputs[0])); err != nil {
 		t.Fatal("throwing diagnostic sink escaped")

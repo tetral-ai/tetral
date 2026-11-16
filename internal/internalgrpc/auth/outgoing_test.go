@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +33,9 @@ func TestServiceAccountTokenCredentialsFailClosedWithSafeErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "bearer") {
 		t.Fatalf("error leaks token-shaped text: %v", err)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error = %v; want the token file's own error for the failure record", err)
 	}
 }
 

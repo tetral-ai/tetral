@@ -257,6 +257,7 @@ func (r *APIKeyUsageRecorder) flush(ctx context.Context) {
 	batch, cancel := context.WithTimeout(ctx, apiKeyUsageBatchDeadline)
 	defer cancel()
 	failed := 0
+	var lastFailure error
 	for i, item := range work {
 		if r.beforeTransaction != nil {
 			r.beforeTransaction(batch)
@@ -274,6 +275,7 @@ func (r *APIKeyUsageRecorder) flush(ctx context.Context) {
 				return
 			}
 			failed++
+			lastFailure = err
 			if written {
 				r.droppedUnconfirmed.Add(1)
 			} else {
@@ -286,7 +288,7 @@ func (r *APIKeyUsageRecorder) flush(ctx context.Context) {
 		}
 	}
 	if failed > 0 && r.logger != nil {
-		r.logger.Warn("auth.api_key_usage.failed", "phase", "api_key_usage", "error.class", "dependency_unavailable", "error.code", "auth_api_key_usage_unavailable", "error.message_safe", "api key usage update unavailable", "failed.count", failed)
+		workload.WriteFailure(ctx, r.logger, "auth.api_key_usage.failed", "auth_api_key_usage_unavailable", workload.CauseOf(lastFailure), "phase", "api_key_usage", "failed.count", failed)
 	}
 }
 

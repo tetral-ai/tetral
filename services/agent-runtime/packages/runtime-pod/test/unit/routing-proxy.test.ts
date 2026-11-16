@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
 import { hardenedRoutingSecretsReady, waitForRoutingProxy } from "../../src/routing-proxy.js";
 
 const leaf = { name: "sds.tetral.runtime.direct_leaf.update_success", value: 1 };
@@ -86,6 +87,16 @@ describe("routing proxy startup gate", () => {
         300,
       ),
     ).rejects.toThrow("Runtime routing proxy readiness deadline exceeded");
+  });
+
+  test("the last failed probe is the cause of a missed deadline", async () => {
+    const closed = stubProxy({ ready: true });
+    proxies.splice(0).forEach((proxy) => proxy.stop(true));
+    const unreachable = await waitForRoutingProxy("standard-routed", closed, 300).catch((error: unknown) => error);
+    expect(causeOf(unreachable).text).toMatch(/^Runtime routing proxy readiness deadline exceeded: .+/);
+    const statsUnreachable = { readiness: stubProxy({ ready: true }).readiness, stats: closed.stats };
+    const unreadStats = await waitForRoutingProxy("hardened", statsUnreachable, 300).catch((error: unknown) => error);
+    expect(causeOf(unreadStats).text).toMatch(/^Runtime routing proxy readiness deadline exceeded: .+/);
   });
 
   test("an unready proxy blocks startup until the deadline", async () => {

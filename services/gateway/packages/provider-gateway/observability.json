@@ -5,17 +5,20 @@
       "errors": {
         "provider_stream_error": {
           "class": "provider_transport_failure",
-          "message_safe": "provider stream made no semantic progress"
+          "message_safe": "provider stream made no semantic progress",
+          "cause": true
         },
         "provider_timeout": {
           "class": "provider_timeout",
-          "message_safe": "provider stream watchdog expired"
+          "message_safe": "provider stream watchdog expired",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "model.id": "string",
@@ -39,7 +42,8 @@
       "errors": {
         "web_not_served_here": {
           "class": "runtime_error",
-          "message_safe": "web execution is served by the web-connector port"
+          "message_safe": "web execution is served by the web-connector port",
+          "cause": true
         }
       },
       "fields": {
@@ -47,6 +51,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.method": "string",
@@ -58,17 +63,25 @@
     "platform_provider_key_quarantined": {
       "audience": "operators",
       "errors": {
+        "provider_error": {
+          "class": "provider_error",
+          "message_safe": "platform provider key quarantined",
+          "cause": true
+        },
         "provider_key_unavailable": {
           "class": "provider_error",
-          "message_safe": "platform provider key quarantined"
+          "message_safe": "platform provider key quarantined",
+          "cause": true
         },
         "provider_plan_required": {
           "class": "provider_error",
-          "message_safe": "platform provider key quarantined"
+          "message_safe": "platform provider key quarantined",
+          "cause": true
         },
         "provider_quota_exhausted": {
           "class": "provider_error",
-          "message_safe": "platform provider key quarantined"
+          "message_safe": "platform provider key quarantined",
+          "cause": true
         }
       },
       "fields": {
@@ -76,6 +89,7 @@
         "credential.origin": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -90,13 +104,15 @@
       "errors": {
         "credential_reload": {
           "class": "preview_unavailable",
-          "message_safe": "preview credential reload failed"
+          "message_safe": "preview credential reload failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -123,29 +139,35 @@
       "errors": {
         "connection_lost": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "credential_reload": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "flush_failed": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "shutdown": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "unavailable": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -174,49 +196,60 @@
       "errors": {
         "connection_lost": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "credential_reload": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "encoding": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "event_identities": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "flush_failed": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "frame_bytes": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "queue_bytes": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "queue_frames": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "shutdown": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         },
         "unavailable": {
           "class": "preview_unavailable",
-          "message_safe": "best-effort preview stopped"
+          "message_safe": "best-effort preview stopped",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "model_request.id": "string",
@@ -249,93 +282,115 @@
     "provider_request_streamed": {
       "audience": "operators",
       "errors": {
-        "1": {
+        "canceled": {
           "class": "grpc_status",
-          "message_safe": "provider request failed"
-        },
-        "16": {
-          "class": "grpc_status",
-          "message_safe": "provider request failed"
-        },
-        "3": {
-          "class": "grpc_status",
-          "message_safe": "provider request failed"
-        },
-        "7": {
-          "class": "grpc_status",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "duplicate_attachment": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "invalid_argument": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_attachment": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_binding": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_identifier": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_limits": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_model": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_output_schema": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_provider_context": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_provider_context_item": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_request_kind": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_request_shape": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_start_event_id": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_system_segment": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "invalid_tool_definition": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "permission_denied": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_unavailable": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "too_many_attachments": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "unauthenticated": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "unsupported_model_variant": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "unsupported_output_contract": {
           "class": "request_validation",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         }
       },
       "fields": {
@@ -344,6 +399,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.method": "string",
@@ -365,93 +421,160 @@
     "provider_request_streamed_failed": {
       "audience": "operators",
       "errors": {
-        "13": {
+        "aborted": {
           "class": "grpc_status",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
-        "14": {
+        "already_exists": {
           "class": "grpc_status",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "attachment_unavailable": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "context_overflow": {
           "class": "provider_http_rejection",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "credential_required": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "credential_unavailable": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "data_loss": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "deadline_exceeded": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "failed_precondition": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "internal": {
           "class": "runtime_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "not_found": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "out_of_range": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_cancelled": {
           "class": "provider_transport_failure",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_configuration_invalid": {
           "class": "provider_configuration",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_error": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_key_unavailable": {
           "class": "provider_http_rejection",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_metadata_limit_exceeded": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_plan_required": {
           "class": "provider_http_rejection",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_quota_exhausted": {
           "class": "provider_http_rejection",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_rate_limited": {
           "class": "provider_http_rejection",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_request_failed": {
           "class": "provider_http_rejection",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_request_invalid": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_stream_error": {
           "class": "provider_transport_failure",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_stream_limit_exceeded": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_timeout": {
           "class": "provider_transport_failure",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "provider_unavailable": {
           "class": "provider_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "resource_exhausted": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         },
         "stream_incomplete": {
           "class": "runtime_error",
-          "message_safe": "provider request failed"
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "unavailable": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "unimplemented": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
+        },
+        "unknown": {
+          "class": "grpc_status",
+          "message_safe": "provider request failed",
+          "cause": true
         }
       },
       "fields": {
@@ -460,6 +583,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.method": "string",
@@ -483,13 +607,15 @@
       "errors": {
         "provider_stream_incomplete": {
           "class": "provider_stream",
-          "message_safe": "provider stream ended with incomplete fragments"
+          "message_safe": "provider stream ended with incomplete fragments",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "model.id": "string",
@@ -513,17 +639,20 @@
       "errors": {
         "config_error": {
           "class": "config_error",
-          "message_safe": "configuration invalid"
+          "message_safe": "configuration invalid",
+          "cause": true
         },
         "startup_error": {
           "class": "startup_error",
-          "message_safe": "gateway service startup failed"
+          "message_safe": "gateway service startup failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "kind": "string",
@@ -540,13 +669,15 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "failed.count": "integer",

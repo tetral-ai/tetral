@@ -213,7 +213,8 @@ func validateToolCall(a ToolCallAdmission) (admittedCall, error) {
 	}
 	input, err := protocol.CompactToolInput(a.Tool, []byte(a.InputJSON))
 	if err != nil {
-		return admittedCall{}, status.Errorf(codes.InvalidArgument, "tool input is invalid: %v", err)
+		// The decoder's text can quote the model's input, which no record holds.
+		return admittedCall{}, status.Error(codes.InvalidArgument, "tool input does not match the tool's input schema")
 	}
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(input, &members); err != nil {

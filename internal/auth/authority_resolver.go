@@ -24,7 +24,7 @@ type RequestAuthenticator struct{ Resolver *AuthorityResolver }
 
 func (a *RequestAuthenticator) AuthenticateRequest(ctx context.Context, r CredentialRequest) (Principal, error) {
 	if a == nil || a.Resolver == nil {
-		err := &UnavailableError{}
+		err := Unavailable(errors.New("no authority resolver is configured"))
 		RecordDecision(ctx, "admission", err, AuditEvent{})
 		return Principal{}, err
 	}
@@ -69,7 +69,7 @@ func HasConnectionKey(r CredentialRequest) bool {
 // credential, or none, is rejected without a lookup.
 func (a *RequestAuthenticator) AuthenticateConnection(ctx context.Context, r CredentialRequest) (Principal, error) {
 	if a == nil || a.Resolver == nil {
-		err := &UnavailableError{}
+		err := Unavailable(errors.New("no authority resolver is configured"))
 		RecordDecision(ctx, "admission", err, AuditEvent{})
 		return Principal{}, err
 	}
@@ -468,7 +468,7 @@ func authenticationDependencyError(err error) error {
 	if errors.As(err, &denied) || errors.As(err, &validation) || errors.As(err, &unavailable) {
 		return err
 	}
-	return &UnavailableError{}
+	return Unavailable(err)
 }
 
 // ExchangeError exposes only typed identity failures or safe dependency failure.

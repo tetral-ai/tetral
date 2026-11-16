@@ -3,12 +3,14 @@ package computerhub
 import (
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func TestFirstClientMessageRejectsCrossRouteReplay(t *testing.T) {
@@ -95,6 +97,18 @@ func TestClientDependencyFailureDoesNotAcceptFirstMessage(t *testing.T) {
 			decodeJSON(t, response.Body, &body)
 			if body.Type != "error" || body.Error.Type != "api_error" || body.Error.Message != "the connection store is unavailable" {
 				t.Fatalf("dependency body = %s", response.Body)
+			}
+			// The answer names the store; the request's failure record names
+			// what failed in it. A heartbeat is a quiet request and is not recorded.
+			if tc.route == "ready" {
+				var failed []map[string]any
+				waitUntil(t, func() bool {
+					failed = workloadtest.Find(workloadtest.Records(t, []byte(f.logs.String())), "http.request.failed")
+					return len(failed) == 1
+				})
+				if cause, _ := failed[0]["error.message"].(string); failed[0]["error.code"] != "server_error" || !strings.Contains(cause, "postgresql runtime client: ") || !strings.Contains(cause, " operation=computer_hub.client_ready: ") {
+					t.Fatalf("failure record = %v; want the statement's error as its cause", failed[0])
+				}
 			}
 			if after := f.connectionRow(stream.connectionID); !reflect.DeepEqual(before, after) {
 				t.Fatalf("dependency failure changed connection: before=%v after=%v", before, after)

@@ -293,8 +293,9 @@ func buildHTTPHandler(readiness *workload.Readiness, eventRouter http.Handler) h
 	})
 }
 
-// logStartupFailure logs a redacted startup-failure line. Config parsing errors
-// use safe static messages; dependency/bootstrap errors remain class-only.
+// logStartupFailure writes the startup-failure record: config_error for a
+// config parsing error, startup_error for a dependency or bootstrap error,
+// each with the error as its cause.
 func logStartupFailure(logger *slog.Logger, err error) error {
 	return workload.LogStartupFailure(logger, "event-stream", err)
 }

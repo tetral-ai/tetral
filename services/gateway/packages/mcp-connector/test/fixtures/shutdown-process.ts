@@ -12,6 +12,7 @@ import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import type { McpConnectorServiceShell } from "../../src/service.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 import { commandEnv, commandFixture } from "./command-process.js";
+import { createJsonLogger } from "../../src/logger.js";
 const [sink = "normal", trigger = "SIGTERM", mode = "held"] =
   process.argv.slice(2);
 const credentialMode = mode.startsWith("credential-");
@@ -46,10 +47,10 @@ Object.assign(process.env, commandEnv(), {
 });
 const emit = (event: string) =>
   process.stdout.write(JSON.stringify({ event, at: Date.now() }) + "\n");
-const observe = (record: Record<string, unknown>) => {
+const observe = () => {
   if (sink === "throw") throw new Error("synthetic diagnostic sink failure");
-  if (sink === "normal") process.stderr.write(JSON.stringify(record) + "\n");
 };
+const written = createJsonLogger({ write: (line) => { process.stderr.write(line); } });
 let release!: () => void, entered!: () => void;
 const held = new Promise<void>((resolve) => {
   release = resolve;
@@ -86,7 +87,7 @@ Object.assign(sql, {
 await runProcessEntry((processBoundary) =>
   runMcpConnectorCommand({
     processBoundary,
-    logger: { info: observe, error: observe },
+    logger: sink === "normal" ? written : { info: observe, error: observe },
     sql,
     schemaVerifier: async () => undefined,
     reviewerMaterialValidator: async () => undefined,

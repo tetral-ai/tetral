@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/drive"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -41,7 +42,7 @@ func RunDrives(ctx context.Context, client *dbconnect.Client, blobs blob.BlobSto
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				logDriveCleanupFailed(ctx, logger, found)
+				logDriveCleanupFailed(ctx, logger, found, err)
 				failed++
 			}
 		}
@@ -120,17 +121,14 @@ func discoverDueBlobWorkspaces(ctx context.Context, client *dbconnect.Client, af
 	return page, err
 }
 
-func logDriveCleanupFailed(ctx context.Context, logger *slog.Logger, failed discoveredDrive) {
+func logDriveCleanupFailed(ctx context.Context, logger *slog.Logger, failed discoveredDrive, err error) {
 	if logger == nil {
 		return
 	}
-	logger.ErrorContext(ctx, "drive.cleanup_failed",
+	workload.WriteFailure(ctx, logger, "drive.cleanup_failed", "drive_cleanup_failed", workload.CauseOf(err),
 		slog.String("operation", "cleanup.drives"),
 		slog.String("component", ServiceName),
 		slog.String("workspace.id", failed.workspaceID),
 		slog.String("drive.id", failed.driveID),
-		slog.String("error.class", "dependency_unavailable"),
-		slog.String("error.code", "drive_cleanup_failed"),
-		slog.String("error.message_safe", "drive cleanup failed"),
 	)
 }

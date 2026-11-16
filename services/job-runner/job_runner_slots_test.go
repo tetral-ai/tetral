@@ -1,6 +1,7 @@
 package jobrunner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -176,10 +178,16 @@ func TestAcquireAndDispatchReleasesJobsObservedAfterAcquisitionClosed(t *testing
 		onLease:              func(int) { closeAcquisition() },
 	}
 	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer, AcquisitionContext: acquisition, Config: JobRunnerConfig{MaxJobs: 1}}
+	var logs bytes.Buffer
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer, AcquisitionContext: acquisition, Config: JobRunnerConfig{MaxJobs: 1},
+		Logger: workloadtest.Logger(t, &logs, ServiceNameJobRunner, "")}
 	result, err := runner.AcquireAndDispatch(context.Background())
 	if !errors.Is(err, ErrJobRunnerAcquisitionClosed) || result.Dispatched != 0 || result.Released != 0 {
 		t.Fatalf("acquisition after closure = %+v/%v; want no dispatch and a failed release", result, err)
+	}
+	if failures := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "job_runner.release_unstarted.failed"); len(failures) != 1 ||
+		failures[0]["error.code"] != "release_unstarted_failed" || failures[0]["error.message"] != "queue unavailable" {
+		t.Fatalf("job_runner.release_unstarted.failed records = %v; want one with the Queue's error as its cause", failures)
 	}
 	if err := runner.JoinDispatched(context.Background()); err != nil || len(deliverer.jobs) != 0 {
 		t.Fatalf("join = %v with %d deliveries; want none", err, len(deliverer.jobs))

@@ -6,6 +6,7 @@ import { runRuntimePodCommand } from "../../src/command.js";
 import { BridgeRuntimeProcess } from "../../src/runtime-process.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import { commandEnv } from "./command-process.js";
+import { createJsonLogger } from "../../src/logger.js";
 
 const [address, sink = "normal"] = process.argv.slice(2);
 if (!address) throw new Error("controlled Bridge address required");
@@ -23,14 +24,14 @@ Object.assign(process.env, commandEnv(), {
 });
 const emit = (event: string) =>
   process.stdout.write(JSON.stringify({ event, at: Date.now() }) + "\n");
-const observe = (record: Record<string, unknown>) => {
+const observe = () => {
   if (sink === "throw") throw new Error("synthetic diagnostic sink failure");
-  if (sink === "normal") process.stderr.write(JSON.stringify(record) + "\n");
 };
+const written = createJsonLogger({ write: (line) => { process.stderr.write(line); } });
 await runProcessEntry((processBoundary) =>
   runRuntimePodCommand({
     processBoundary,
-    logger: { info: observe, error: observe },
+    logger: sink === "normal" ? written : { info: observe, error: observe },
     dependencyBuilder: async ({ config, logger }) => {
       const runtimeProcess = new BridgeRuntimeProcess(crypto.randomUUID(), {
         address,

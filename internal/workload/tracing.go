@@ -121,14 +121,17 @@ func (t *tracing) droppedSpans() uint64 {
 type boundedSpanProcessor struct {
 	exporter sdktrace.SpanExporter
 	queue    chan sdktrace.ReadOnlySpan
-	dropped  atomic.Uint64
-	stop     chan struct{}
-	done     chan struct{}
-	once     sync.Once
+	// flushes carries each ForceFlush to the worker, which closes the
+	// request's channel once every span queued before it is exported.
+	flushes chan chan struct{}
+	dropped atomic.Uint64
+	stop    chan struct{}
+	done    chan struct{}
+	once    sync.Once
 }
 
 func newBoundedSpanProcessor(exporter sdktrace.SpanExporter) *boundedSpanProcessor {
-	p := &boundedSpanProcessor{exporter: exporter, queue: make(chan sdktrace.ReadOnlySpan, spanQueueCapacity), stop: make(chan struct{}), done: make(chan struct{})}
+	p := &boundedSpanProcessor{exporter: exporter, queue: make(chan sdktrace.ReadOnlySpan, spanQueueCapacity), flushes: make(chan chan struct{}), stop: make(chan struct{}), done: make(chan struct{})}
 	go p.run()
 	return p
 }
@@ -160,6 +163,21 @@ func (p *boundedSpanProcessor) run() {
 		cancel()
 		batch = batch[:0]
 	}
+	// drain exports every span queued so far.
+	drain := func() {
+		for {
+			select {
+			case span := <-p.queue:
+				batch = append(batch, span)
+				if len(batch) == spanExportBatch {
+					flush()
+				}
+			default:
+				flush()
+				return
+			}
+		}
+	}
 	for {
 		select {
 		case span := <-p.queue:
@@ -169,19 +187,12 @@ func (p *boundedSpanProcessor) run() {
 			}
 		case <-timer.C:
 			flush()
+		case flushed := <-p.flushes:
+			drain()
+			close(flushed)
 		case <-p.stop:
-			for {
-				select {
-				case span := <-p.queue:
-					batch = append(batch, span)
-					if len(batch) == spanExportBatch {
-						flush()
-					}
-				default:
-					flush()
-					return
-				}
-			}
+			drain()
+			return
 		}
 	}
 }
@@ -196,7 +207,24 @@ func (p *boundedSpanProcessor) Shutdown(ctx context.Context) error {
 	return p.exporter.Shutdown(ctx)
 }
 
-func (p *boundedSpanProcessor) ForceFlush(context.Context) error { return nil }
+// ForceFlush returns once every span ended before the call is exported, or
+// when ctx ends.
+func (p *boundedSpanProcessor) ForceFlush(ctx context.Context) error {
+	flushed := make(chan struct{})
+	select {
+	case p.flushes <- flushed:
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-flushed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // Span is a span of the process tracer. Packages outside this one start,
 // annotate and end spans through it, so the tracing SDK has one owner.

@@ -5,15 +5,21 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func fixtureNATSCredentials(t *testing.T) NATSConfig {
@@ -158,4 +164,71 @@ func TestNATSSubscriberShutdownJoinsUnavailableConnect(t *testing.T) {
 		t.Fatal("late-created socket survived shutdown")
 	}
 	transport.Close()
+}
+
+func TestNATSSubscriberUnavailableRecordCarriesTheConnectError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+	var output lockedBuffer
+	config := fixtureNATSCredentials(t)
+	config.Servers = []string{"nats://" + address}
+	transport, err := NewNATSPreviewTransport(t.Context(), config, DefaultStreamConfig(), nil, workloadtest.Logger(t, &output, "event-stream", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(output.String(), "preview_subscriber_unavailable") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	transport.Close()
+	records := workloadtest.Find(workloadtest.Records(t, []byte(output.String())), "preview_subscriber_unavailable")
+	if len(records) != 1 {
+		t.Fatalf("preview_subscriber_unavailable records = %v; want one", records)
+	}
+	record := records[0]
+	if record["error.code"] != "connect_failed" {
+		t.Fatalf("error.code = %v; want connect_failed", record["error.code"])
+	}
+	if record["error.message"] != nats.ErrNoServers.Error() {
+		t.Fatalf("error.message = %v; want the connect error %q", record["error.message"], nats.ErrNoServers)
+	}
+}
+
+// A local file the subscriber cannot load fails startup with the file's own
+// error, which the startup failure record carries as its cause, without the
+// configured path.
+func TestNATSPreviewTransportStartupKeepsTheErrorOfAFileItCannotLoad(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, test := range []struct {
+		name   string
+		change func(*NATSConfig)
+	}{
+		{name: "user file", change: func(c *NATSConfig) { c.UserPath = missing }},
+		{name: "password file", change: func(c *NATSConfig) { c.PasswordPath = missing }},
+		{name: "TLS trust bundle", change: func(c *NATSConfig) { c.CAPath = missing }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := fixtureNATSCredentials(t)
+			config.Servers = []string{"tls://nats.test:4222"}
+			test.change(&config)
+			transport, err := NewNATSPreviewTransport(t.Context(), config, DefaultStreamConfig(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err == nil {
+				transport.Close()
+				t.Fatal("NewNATSPreviewTransport accepted a file that does not exist")
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("startup error = %v; want the file's own error", err)
+			}
+			if strings.Contains(err.Error(), missing) {
+				t.Fatalf("startup error %q names the configured path", err)
+			}
+			if code := workload.StartupFailureCode(err); code != "startup_error" {
+				t.Fatalf("startup failure code = %q; want startup_error", code)
+			}
+		})
+	}
 }

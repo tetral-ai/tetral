@@ -171,6 +171,7 @@ macro_rules! __record {
                     $crate::__private::RecordValue::code($value),
                     $crate::__private::RecordValue::is_cause($value),
                 )),*],
+                concat!(file!(), ":", line!()),
             );
         }
         $crate::__private::tracing::event!(

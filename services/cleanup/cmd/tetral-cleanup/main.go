@@ -180,16 +180,13 @@ func exportCleanupMetrics(
 	if err == nil || logger == nil {
 		return
 	}
-	logger.Error("cleanup.metrics_export.failed",
+	workload.WriteFailure(ctx, logger, "cleanup.metrics_export.failed", "cleanup_metrics_export_failed", workload.CauseOf(err),
 		slog.String("operation", "cleanup.metrics_export"),
 		slog.String("event.kind", "cleanup.metrics_export.failed"),
 		slog.String("component", tetralcleanup.ServiceName),
 		slog.Int64("duration.ms", time.Since(started).Milliseconds()),
 		slog.Bool("retryable", false),
 		slog.Bool("terminal", true),
-		slog.String("error.class", "metrics_export_error"),
-		slog.String("error.code", "cleanup_metrics_export_failed"),
-		slog.String("error.message_safe", "cleanup metrics export failed"),
 	)
 }
 

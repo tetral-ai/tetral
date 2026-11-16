@@ -1,4 +1,5 @@
 import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
 import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
 import { beginServiceColdStart, completeServiceColdStart, createDiagnosticStreamSink, createTelemetry, diagnosticMetricsText, endServiceColdStartPhase, failServiceColdStart, failServiceColdStartAtConfig, installTelemetry, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
@@ -26,7 +27,7 @@ import { createMcpConnectorHttpServer } from "./http-server.js";
 import { createJsonLogger, logWorkloadStarted, mcpConnectorDeclarations, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import { createMcpConnectorGrpcServer } from "./server.js";
-import { McpConnectorServiceShell } from "./service.js";
+import { McpConnectorServiceShell, connectorCause } from "./service.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { McpClient, McpManifestChangeNotifier } from "./service.js";
@@ -112,7 +113,7 @@ export async function runMcpConnectorCommand(options: {
           } catch (error) {
             if (!failed) firstFailure = error;
             failed = true;
-            report(processFailureLogRecord(step.phase, true));
+            report(processFailureLogRecord(step.phase, error, true));
           }
         }
       } finally {
@@ -163,7 +164,7 @@ export async function runMcpConnectorCommand(options: {
             return;
           const failed = event.kind === "reload_failed";
           try {
-            logger?.[failed ? "error" : "info"]({
+            const record = {
               event: failed
                 ? "transport.credential_reload_failed"
                 : "transport.credential_reload_recovered",
@@ -178,7 +179,9 @@ export async function runMcpConnectorCommand(options: {
                   ? "candidate_verification_failed"
                   : "invalid_generation",
               "failed.count": event.failedCount ?? 0,
-            });
+            };
+            if (failed) logger?.error({ ...record, ...semanticErrorFields({ errorCode: "operation_failed", cause: causeOf(event.error ?? "a replaced database pool did not close") }) });
+            else logger?.info(record);
           } catch {
             /* sink failure cannot alter SQL generation custody */
           }
@@ -242,6 +245,7 @@ export async function runMcpConnectorCommand(options: {
         onToolsListChanged: async (input) => {
           await service.handleToolsListChangedNotification(input);
         },
+        toolsListChangedFailureCause: connectorCause,
       });
     if (client instanceof McpSDKClient)
       closes.push({
@@ -349,7 +353,7 @@ export async function runMcpConnectorCommand(options: {
   } catch (error) {
     failed = true;
     failServiceColdStart("startup_error");
-    if (!failureReported) report(processFailureLogRecord(phase));
+    if (!failureReported) report(processFailureLogRecord(phase, error));
     throw error;
   } finally {
     releaseSignals?.();

@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -324,7 +325,7 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 		update := newSQLPause(usageUpdatePrefix, true, false)
 		pool := storagetest.OpenRuntimeRoleDBWithTracer(t, store.db, newSQLTrace(t, update))
 		var logs bytes.Buffer
-		r, _ := testUsageRecorder(pool, slog.New(slog.NewJSONHandler(&logs, nil)))
+		r, _ := testUsageRecorder(pool, workloadtest.Logger(t, &logs, "auth", "../../services/auth/observability.json"))
 		if _, err := NewAuthorityResolver(pool, workspace.DefaultID, r).AuthenticateKey(ctx, key.APIKey); err != nil {
 			t.Fatal(err)
 		}
@@ -365,7 +366,12 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 			t.Fatal("cancelled worker transaction committed usage")
 		}
 		requireUsageCounters(t, r, map[string]uint64{"unconfirmed": 1})
-		if strings.Count(logs.String(), `"failed.count":1`) != 1 {
+		// The cause is the expired deadline as the commit reports it: the
+		// context's error, unless database/sql's own rollback at the deadline
+		// ran first and the commit finds the transaction done.
+		expired := strings.Contains(logs.String(), `"error.message":"context deadline exceeded"`)
+		rolledBack := strings.Contains(logs.String(), `"error.message":"sql: transaction has already been committed or rolled back"`)
+		if strings.Count(logs.String(), `"failed.count":1`) != 1 || expired == rolledBack {
 			t.Fatalf("failure warning=%s", logs.String())
 		}
 	})
@@ -422,7 +428,7 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 			t.Fatal(err)
 		}
 		var logs bytes.Buffer
-		r, _ := testUsageRecorder(store.db, slog.New(slog.NewJSONHandler(&logs, nil)))
+		r, _ := testUsageRecorder(store.db, workloadtest.Logger(t, &logs, "auth", "../../services/auth/observability.json"))
 		ticks := make(chan time.Time)
 		r.ticks = ticks
 		var pauseBatch atomic.Bool
@@ -805,7 +811,7 @@ func TestAPIKeyUsageRecorderBounds(t *testing.T) {
 		}
 		trace := newSQLTrace(t)
 		var logs bytes.Buffer
-		r, clock := testUsageRecorder(storagetest.OpenRuntimeRoleDBWithTracer(t, store.db, trace), slog.New(slog.NewJSONHandler(&logs, nil)))
+		r, clock := testUsageRecorder(storagetest.OpenRuntimeRoleDBWithTracer(t, store.db, trace), workloadtest.Logger(t, &logs, "auth", "../../services/auth/observability.json"))
 		resolver := NewAuthorityResolver(store.db, workspace.DefaultID, r)
 		if _, err := resolver.AuthenticateKey(ctx, key.APIKey); err != nil {
 			t.Fatal(err)
@@ -838,12 +844,14 @@ func TestAPIKeyUsageRecorderBounds(t *testing.T) {
 		if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
 			t.Fatalf("expected exactly one failure warning: %v", err)
 		}
-		if record["msg"] != "auth.api_key_usage.failed" || record["failed.count"] != float64(1) || record["error.class"] != "dependency_unavailable" {
+		// The write waited on the held row past its deadline.
+		if record["msg"] != "auth.api_key_usage.failed" || record["failed.count"] != float64(1) || record["error.class"] != "dependency_unavailable" ||
+			record["error.message"] != "timeout: context deadline exceeded" {
 			t.Fatalf("failure warning=%v", record)
 		}
-		for _, secret := range []string{key.ID, string(workspace.DefaultID), key.APIKey, hex.EncodeToString(DigestAPIKey(key.APIKey)), "context deadline", "canceling statement"} {
+		for _, secret := range []string{key.ID, string(workspace.DefaultID), key.APIKey, hex.EncodeToString(DigestAPIKey(key.APIKey))} {
 			if strings.Contains(logs.String(), secret) {
-				t.Fatal("usage warning disclosed identity, credential or driver detail")
+				t.Fatal("usage warning disclosed identity or credential")
 			}
 		}
 	})

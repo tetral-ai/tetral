@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 type keyState struct {
@@ -278,10 +280,10 @@ func (b *JinaBackend) call(ctx context.Context, endpoint string, body any, heade
 				b.metrics.ObserveBackendCall(api, "tool_error")
 			}
 			if b.logger != nil {
-				b.logger.Warn("web.backend.unmatched_client_error",
+				// The backend's body is the rejection's only text and is not recorded.
+				workload.WriteFailure(ctx, b.logger, "web.backend.unmatched_client_error", "unmatched_client_error", workload.NoCause,
 					slog.String("operation", "web.backend.request"), slog.String("backend.api", api),
-					slog.String("backend.error.name", "unknown_client_error"), slog.Int("backend.error.status", response.StatusCode),
-					slog.String("error.class", "backend_error"), slog.String("error.code", "unmatched_client_error"), slog.String("error.message_safe", "web backend rejected the request"))
+					slog.String("backend.error.name", "unknown_client_error"), slog.Int("backend.error.status", response.StatusCode))
 			}
 			return BackendOutcome{Kind: BackendToolError, Message: "Web backend rejected the request."}
 		}

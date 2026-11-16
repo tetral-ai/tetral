@@ -29,9 +29,9 @@ pub fn read_with_limit(root: &StateRoot, max_bytes: usize) -> Result<Option<Vec<
 pub fn replace(root: &StateRoot, bytes: &[u8]) -> Result<(), IoFailure> {
     create_directory(root).map_err(|error| match error {
         CheckError::Io(failure) => failure,
-        other => IoFailure::new(
-            &root.join(paths::CREDENTIAL_DIRECTORY),
-            io::Error::new(io::ErrorKind::PermissionDenied, other),
+        CheckError::Unsafe { path, reason } => IoFailure::new(
+            &path,
+            io::Error::new(io::ErrorKind::PermissionDenied, reason.to_string()),
         ),
     })?;
     files::replace_observed(&root.join(paths::CREDENTIALS), bytes, || {

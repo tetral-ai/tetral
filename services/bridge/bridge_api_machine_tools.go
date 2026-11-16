@@ -10,6 +10,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -64,7 +65,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitToolCall(ctx context.Context, request *b
 			return &bridgev1.AdmitToolCallResponse{Outcome: &bridgev1.AdmitToolCallResponse_Stale{Stale: &bridgev1.ToolCallStale{}}}, nil
 		}
 		err = machineAdmissionError(ctx, err)
-		span.SetFailure("tool_admission_error", status.Code(err).String())
+		span.SetFailure("tool_admission_error", internalgrpc.StatusCodeName(status.Code(err)))
 		return nil, err
 	}
 	span.SetString("outcome", outcome.Outcome)

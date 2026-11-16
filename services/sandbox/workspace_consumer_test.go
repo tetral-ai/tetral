@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -231,13 +231,13 @@ func TestRunWorkspaceConsumerLoopResetsBackoffAfterActiveFailedPoll(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var output bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logger := workloadtest.Logger(t, &output, ServiceName, "")
 	polls := 0
 	var delays []time.Duration
 	err := runWorkspaceConsumerLoop(ctx, sandboxStaticWorkspaceLister{"ws_alpha"}, time.Second, func(context.Context, workspace.ID) (bool, error) {
 		polls++
 		if polls == 3 {
-			return true, fmt.Errorf("unsafe-token: %w", &pgconn.PgError{Code: "42501", Message: "unsafe-query", Detail: "unsafe-password"})
+			return true, fmt.Errorf("lease jobs: %w", &pgconn.PgError{Severity: "ERROR", Code: "42501", Message: "permission denied for table queue_jobs"})
 		}
 		return false, nil
 	}, nil, logger, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
@@ -255,9 +255,10 @@ func TestRunWorkspaceConsumerLoopResetsBackoffAfterActiveFailedPoll(t *testing.T
 		t.Fatalf("poll delays = %v; want active failure to reset backoff to %v", delays, want)
 	}
 	logText := output.String()
-	if strings.Count(logText, "\n") != 1 || !strings.Contains(logText, `"event.kind":"queue_consume_failed"`) ||
+	if strings.Count(logText, `"event":"sandbox.queue.consume.failed"`) != 1 || !strings.Contains(logText, `"event.kind":"queue_consume_failed"`) ||
 		!strings.Contains(logText, `"operation":"sandbox.queue.consume"`) || !strings.Contains(logText, `"error.class":"database_permission_denied"`) ||
-		!strings.Contains(logText, `"retry.delay.ms":1000`) || strings.Contains(logText, "unsafe-") {
+		!strings.Contains(logText, `"retry.delay.ms":1000`) ||
+		!strings.Contains(logText, `"error.message":"lease jobs: ERROR: permission denied for table queue_jobs (SQLSTATE 42501)"`) {
 		t.Fatalf("consumer failure log = %q", logText)
 	}
 }
@@ -266,7 +267,7 @@ func TestRunWorkspaceConsumerLoopBoundsIdleFailureLogsAndSuppressesShutdown(t *t
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var output bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logger := workloadtest.Logger(t, &output, ServiceName, "")
 	var delays []time.Duration
 	polls := 0
 	err := runWorkspaceConsumerLoop(ctx, sandboxStaticWorkspaceLister{"ws_alpha"}, time.Second, func(context.Context, workspace.ID) (bool, error) {
@@ -275,7 +276,7 @@ func TestRunWorkspaceConsumerLoopBoundsIdleFailureLogsAndSuppressesShutdown(t *t
 			cancel()
 			return false, ctx.Err()
 		}
-		return false, errors.New("private-provider-payload")
+		return false, errors.New("lease jobs: connection reset by peer")
 	}, nil, logger, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
 		delays = append(delays, delay)
 		return ctx.Err()
@@ -287,7 +288,8 @@ func TestRunWorkspaceConsumerLoopBoundsIdleFailureLogsAndSuppressesShutdown(t *t
 	if !reflect.DeepEqual(delays, want) {
 		t.Fatalf("failed-poll backoff = %v; want %v", delays, want)
 	}
-	if logText := output.String(); strings.Count(logText, "\n") != 7 || strings.Count(logText, `"error.class":"consumer_error"`) != 7 || strings.Contains(logText, "private-provider-payload") {
+	if logText := output.String(); strings.Count(logText, `"event":"sandbox.queue.consume.failed"`) != 7 || strings.Count(logText, `"error.class":"consumer_error"`) != 7 ||
+		strings.Count(logText, `"error.message":"lease jobs: connection reset by peer"`) != 7 {
 		t.Fatalf("failure/shutdown diagnostics: %q", logText)
 	}
 }

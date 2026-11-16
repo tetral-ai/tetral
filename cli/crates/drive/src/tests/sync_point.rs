@@ -257,6 +257,7 @@ async fn a_fault_is_listed_upload_pending_and_tried_again_only_at_the_next_cover
     );
     assert_eq!(fault["http.response.status_code"], 400, "{fault}");
     assert_eq!(fault["error.code"], "invalid_message", "{fault}");
+    assert!(fault.get("error.message").is_none(), "{fault}");
     assert_eq!(
         reasons(&faulted),
         [(session.machine_path("a"), NotSyncedReason::UploadPending)]

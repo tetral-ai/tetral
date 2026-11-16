@@ -111,6 +111,10 @@ async fn failed_writes_before_and_during_a_commit_cannot_contaminate_shared_cont
             .find(|line| line["event"] == "drive.cache_adoption_failed")
             .expect("integrity failure is recorded");
         assert_eq!(failure["error.code"], "content_integrity_failed");
+        assert_eq!(
+            failure["error.message"],
+            "accepted content does not match its hash and size"
+        );
         assert_eq!(failure["session.id"], "sess_a");
         assert_eq!(failure["drive.id"], support::DRIVE);
         assert_eq!(

@@ -991,6 +991,7 @@ fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
         ("log.type", "app"),
         ("error.code", "log_file_open_failed"),
         ("error.message_safe", "the log file could not be opened"),
+        ("error.message", "Not a directory (os error 20)"),
     ] {
         assert_eq!(failures[0][field], value, "{field}");
     }

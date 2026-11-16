@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -100,7 +101,9 @@ func (g *processGuard) arm() {
 		// ProcessLogger has a bounded nonblocking producer. A blocked or panicking
 		// sink cannot delay the exit; delivery of this final record is best effort.
 		if g.owner != nil {
-			g.owner.Logger.Error("workload.shutdown.incomplete", "operation", "workload.shutdown", "event.kind", "shutdown", "component", "workload", "error.class", "shutdown_error", "error.code", "process_shutdown_timeout", "duration.ms", time.Since(g.started).Milliseconds())
+			WriteFailure(context.Background(), g.owner.Logger, "workload.shutdown.incomplete", "process_shutdown_timeout",
+				CauseOf(fmt.Errorf("shutdown still running %s after it began; the process exits", g.budget)),
+				"operation", "workload.shutdown", "event.kind", "shutdown", "component", "workload", "duration.ms", time.Since(g.started).Milliseconds())
 		}
 		os.Exit(1)
 	})

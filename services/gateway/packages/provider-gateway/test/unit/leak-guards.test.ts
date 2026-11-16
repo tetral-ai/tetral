@@ -5,10 +5,9 @@ import { Metadata } from "@grpc/grpc-js";
 import {
   ProviderContextRole,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { createJsonLogger, startupFailureLogRecord } from "../../src/logger.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
-import { validProviderRequest } from "./fixtures.js";
+import { validProviderRequest, writtenLogs } from "./fixtures.js";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
 import type { GatewayAuthenticator } from "../../src/service.js";
 import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -28,13 +27,6 @@ const SentinelSecrets = [
 
 describe("Provider Gateway leak guards", () => {
   test("contract-level output channels do not expose sentinel credential material", async () => {
-    const logLines: string[] = [];
-    const logger = createJsonLogger({ write: (line) => logLines.push(line) });
-    logger.error(startupFailureLogRecord({
-      kind: "startup_error",
-      message: `provider startup failed with ${SentinelSecrets[0]}`,
-    }));
-
     const serviceLogs: unknown[] = [];
     const serviceRequest = validProviderRequest({
       model: { providerId: "openai", modelId: "gpt-5.5", variant: "" },
@@ -43,7 +35,7 @@ describe("Provider Gateway leak guards", () => {
       authenticator: okAuthenticator(),
       runtimeBindingTokenVerifier: { verify: () => true },
       ready: () => true,
-      logger: { info: (record) => serviceLogs.push(record), error: (record) => serviceLogs.push(record) },
+      logger: writtenLogs(serviceLogs),
       providerStreamer: {
         stream: async function* () {
           throw new Error(`raw provider body carried ${SentinelSecrets[4]}`);
@@ -65,7 +57,6 @@ describe("Provider Gateway leak guards", () => {
       await mock.close();
     }
 
-    expectNoSentinel("startup logs", logLines);
     expectNoSentinel("service logs", serviceLogs);
     expectNoSentinel("provider error payload", errorEvents);
     expectNoSentinel("provider stream events", providerEvents);

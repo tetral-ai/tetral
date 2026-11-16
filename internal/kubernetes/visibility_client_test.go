@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -456,7 +458,7 @@ func TestSyncAndWatchEndpointSliceFreshnessTimeoutStalesEndpointSlicesAndRestart
 func TestSyncAndWatchMarksWatchErrorsUnreadyLogsSafelyAndRestarts(t *testing.T) {
 	cfg := newVisibilityTestConfig(t)
 	var buffer lockedBuffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	pod := readyPod("runtime-a", "pod-uid-a")
 	client := newRecordingVisibilityClient()
 	client.pods = []corev1.Pod{pod}
@@ -476,8 +478,8 @@ func TestSyncAndWatchMarksWatchErrorsUnreadyLogsSafelyAndRestarts(t *testing.T) 
 		return snapshot.Ready && len(snapshot.Candidates) == 1
 	})
 
-	client.currentPodWatch().Error(&metav1.Status{Reason: metav1.StatusReasonForbidden, Message: "Secret bearer-token raw payload"})
-	client.currentEndpointSliceWatch().Error(&metav1.Status{Reason: metav1.StatusReasonForbidden, Message: "Secret bearer-token raw payload"})
+	client.currentPodWatch().Error(&metav1.Status{Reason: metav1.StatusReasonExpired, Message: "too old resource version: 41 (97)"})
+	client.currentEndpointSliceWatch().Error(&metav1.Status{Reason: metav1.StatusReasonExpired, Message: "too old resource version: 41 (97)"})
 	waitForCondition(t, "pod and endpointslice watch errors logged", func() bool {
 		output := buffer.String()
 		return strings.Contains(output, `"kubernetes.resource":"pods"`) &&
@@ -486,12 +488,8 @@ func TestSyncAndWatchMarksWatchErrorsUnreadyLogsSafelyAndRestarts(t *testing.T) 
 	if cache.Snapshot().Ready {
 		t.Fatal("cache ready after watch errors")
 	}
-	for _, forbidden := range []string{"bearer-token", "raw payload"} {
-		if strings.Contains(buffer.String(), forbidden) {
-			t.Fatalf("watch error log leaked %q: %s", forbidden, buffer.String())
-		}
-	}
-	for _, want := range []string{`"kubernetes.resource":"pods"`, `"kubernetes.resource":"endpointslices"`, `"kubernetes.status":"watch_error"`} {
+	for _, want := range []string{`"kubernetes.resource":"pods"`, `"kubernetes.resource":"endpointslices"`, `"kubernetes.status":"watch_error"`,
+		`"error.code":"watch_error"`, `"error.message":"kubernetes watch status Expired: too old resource version: 41 (97)"`} {
 		if !strings.Contains(buffer.String(), want) {
 			t.Fatalf("watch error log missing %s: %s", want, buffer.String())
 		}
@@ -904,5 +902,20 @@ func TestWatchHandlesStopJoinsContextBoundListRetry(t *testing.T) {
 	}
 	if !recorded.currentEndpointSliceWatch().IsStopped() {
 		t.Fatal("Stop returned before second watcher exited")
+	}
+}
+
+// A Pod's mounted service account that cannot be read fails the client with
+// the file system's error, without the mounted path.
+func TestInClusterVisibilityClientErrorLeavesOutTheMountedPath(t *testing.T) {
+	const mounted = "/var/run/secrets/kubernetes.io/serviceaccount"
+	if _, err := os.Stat(mounted); err == nil {
+		t.Skip("this host has an in-cluster service account")
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.test")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	_, err := NewInClusterVisibilityClient()
+	if err == nil || strings.Contains(err.Error(), mounted) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error = %v; want the file system's error without the mounted path", err)
 	}
 }

@@ -10,7 +10,7 @@
  * TypeScript observability package.
  */
 
-import { createTetralJsonLogger, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
+import { causeOf, createTetralJsonLogger, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
 import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord, UndeclaredNamePolicy } from "@tetral/ts-observability";
 import observabilityTable from "../observability.json";
 import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js";
@@ -49,9 +49,9 @@ export function createJsonLogger(options: {
 }
 
 /**
- * Builds the safe structured record emitted when startup configuration fails:
- * the fixed safe message, and the problem, which never holds a supplied value,
- * in `startup.config_problem`.
+ * Builds the record emitted when startup configuration fails: the problem,
+ * which never holds a supplied value, in `startup.config_problem` and as the
+ * failure's cause.
  */
 export function startupFailureLogRecord(input: { readonly kind: "config_error"; readonly message: string }): McpConnectorLogRecord {
   return {
@@ -62,7 +62,7 @@ export function startupFailureLogRecord(input: { readonly kind: "config_error"; 
     kind: input.kind,
     message: input.message,
     "startup.config_problem": input.message,
-    ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: "configuration invalid" }),
+    ...semanticErrorFields({ errorCode: input.kind, cause: causeOf(input.message) }),
   };
 }
 

@@ -92,7 +92,7 @@ func (p *TokenPruner) run(ctx context.Context, prune func(context.Context, int) 
 		p.mu.Unlock()
 		if logger != nil {
 			if err != nil && ctx.Err() == nil {
-				logger.Warn("auth.token_prune.failed", "phase", "token_prune", "error.class", "dependency_unavailable", "error.code", "auth_token_prune_unavailable", "error.message_safe", "expired token cleanup unavailable")
+				workload.WriteFailure(ctx, logger, "auth.token_prune.failed", "auth_token_prune_unavailable", workload.CauseOf(err), "phase", "token_prune")
 			} else if err == nil && recovered {
 				logger.Info("auth.token_prune.recovered", "phase", "token_prune", "recovery.event", "auth.token_prune.failed")
 			}

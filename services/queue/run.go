@@ -50,12 +50,12 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 		defer owner.CloseWithBudget()
 		logger = owner.Logger
 	}
-	grpcListener, err := listen("tcp", cfg.GRPCAddress)
+	grpcListener, err := workload.ListenTCP(listen, cfg.GRPCAddress)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = grpcListener.Close() }()
-	httpListener, err := listen("tcp", cfg.HTTPAddress)
+	httpListener, err := workload.ListenTCP(listen, cfg.HTTPAddress)
 	if err != nil {
 		return err
 	}

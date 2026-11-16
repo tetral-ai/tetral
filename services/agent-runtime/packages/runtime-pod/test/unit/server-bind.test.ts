@@ -16,7 +16,7 @@ describe("Runtime Pod server bind addresses", () => {
 		const logger = createTetralJsonLogger({ serviceName: "agent-runtime", write: () => acceptSink });
 		logger.info({ event: "http_diagnostic_probe" });
 		acceptSink = false;
-		logger.error({ event: "http_diagnostic_drop" });
+		logger.warn({ event: "http_diagnostic_drop" });
 		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), undefined, logger);
 		try {
 			const response = await fetch(new URL("/metrics", httpServer.url));

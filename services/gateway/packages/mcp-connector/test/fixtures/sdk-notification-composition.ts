@@ -4,7 +4,7 @@ import { mock } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Metadata, Server, ServerCredentials } from "@grpc/grpc-js";
+import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -83,12 +83,15 @@ mock.module("../../src/auth.js", () => ({
 const fixtureDir = await mkdtemp(join(tmpdir(), "mcp-notification-composition-"));
 const tokenPath = join(fixtureDir, "bridge-token");
 const bridgeRequests: McpManifestChangedRequest[] = [];
+const errorRecords: Record<string, unknown>[] = [];
 let serviceFromCommand: import("../../src/service.js").McpConnectorServiceShell | undefined;
 const bridgeServer = new Server();
 bridgeServer.addService(AgentRuntimeBridgeServiceService, {
   mcpManifestChanged: (call, callback) => {
     bridgeRequests.push(call.request);
-    callback(null, { committed: {} });
+    // A Bridge that refuses the notification makes the connector's own status error the notify failure.
+    if (process.env.FIXTURE_BRIDGE_REFUSES_NOTIFICATION === "1") callback({ code: status.PERMISSION_DENIED, details: "fixture refusal" } as never);
+    else callback(null, { committed: {} });
   },
 } as AgentRuntimeBridgeServiceServer);
 
@@ -98,6 +101,7 @@ try {
   Object.assign(process.env, validEnv(bridgePort, tokenPath));
 
   const { runMcpConnectorCommand } = await import("../../src/command.js");
+  const { createJsonLogger } = await import("../../src/logger.js");
   const sql = ((<T>(_strings: TemplateStringsArray): PromiseLike<T> => Promise.resolve([] as T)) as SchemaSQL & {
     close: () => Promise<void>;
   });
@@ -108,7 +112,7 @@ try {
     sql,
     schemaVerifier: async () => undefined,
     reviewerMaterialValidator: async () => undefined,
-    logger: { info: () => undefined, error: () => undefined },
+    logger: createJsonLogger({ write: (line) => { const record = JSON.parse(line) as Record<string, unknown>; if (record.level === "ERROR") errorRecords.push(record); } }),
     serverFactory: (service) => {
       serviceFromCommand = service;
       return {
@@ -129,13 +133,15 @@ try {
 
       await sdkServer.sendToolListChanged();
       await sdkServer.sendToolListChanged();
-      await until(() => bridgeRequests.length === 2);
+      await until(() => process.env.FIXTURE_BRIDGE_REFUSES_NOTIFICATION === "1"
+        ? errorRecords.some((record) => record.event === "mcp_tools_list_changed_notify_failed")
+        : bridgeRequests.length === 2);
       notificationListCalls = sdkListCalls - initialListCalls;
       return undefined as never;
     },
   });
 
-  process.stdout.write(`${JSON.stringify({ initialListCalls, notificationListCalls, bridgeRequests })}\n`);
+  process.stdout.write(`${JSON.stringify({ initialListCalls, notificationListCalls, bridgeRequests, errorRecords })}\n`);
 } finally {
   await sdkServer.close();
   bridgeServer.forceShutdown();

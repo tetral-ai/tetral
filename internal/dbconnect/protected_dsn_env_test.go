@@ -39,3 +39,29 @@ func TestOpenProtectedDSNFromEnvDoesNotFallbackToTestVariable(t *testing.T) {
 		t.Fatalf("diagnostic exposed the test variable: %q", err.Error())
 	}
 }
+
+// A DSN that does not parse is refused with a sentence that quotes none of it;
+// the other refusals of the administrative opener keep their own error.
+func TestOpenProtectedConfigKeepsTheErrorOfEachRefusal(t *testing.T) {
+	root := transporttest.Must(transporttest.NewAuthority("dbconnect-config"))
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, root.PEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, dsn, serverName, want string }{
+		{name: "a DSN that does not parse", dsn: "postgres://tetral:pa/ss%zz@db.test/tetral", serverName: "postgres.test", want: "protected PostgreSQL configuration is invalid"},
+		{name: "a socket endpoint", dsn: "postgres://tetral@/tetral?host=/var/run/postgresql", serverName: "postgres.test", want: "protected PostgreSQL requires a TCP endpoint"},
+		{name: "no server name", dsn: "postgres://tetral@db.test/tetral", serverName: "", want: "TLS expected server DNS name is required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config, owner, err := dbconnect.OpenProtectedConfig(context.Background(), test.dsn, caPath, test.serverName)
+			if err == nil {
+				_ = owner.Close()
+				t.Fatalf("OpenProtectedConfig = %v; want a refusal", config)
+			}
+			if err.Error() != test.want {
+				t.Fatalf("OpenProtectedConfig error = %q; want %q", err, test.want)
+			}
+		})
+	}
+}

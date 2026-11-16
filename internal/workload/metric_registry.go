@@ -219,6 +219,17 @@ func (h *Histogram) Observe(value float64, labelValues ...string) {
 	}
 }
 
+// Show makes the series of labelValues exist with no sample, so that a scrape
+// shows it at zero before its first observation.
+func (h *Histogram) Show(labelValues ...string) {
+	if h == nil {
+		return
+	}
+	h.registry.mu.Lock()
+	defer h.registry.mu.Unlock()
+	h.registry.seriesFor(h.family, labelValues)
+}
+
 // Collector renders every family in registration order, series sorted by
 // their label values.
 func (r *Registry) Collector() MetricsCollector {

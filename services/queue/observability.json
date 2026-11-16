@@ -54,6 +54,7 @@
         "db.sqlstate": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -63,7 +64,8 @@
       "errors": {
         "job_runner_lease_stopped": {
           "class": "queue_lease_error",
-          "message_safe": "queue job runner lease stopped after committed leases"
+          "message_safe": "queue job runner lease stopped after committed leases",
+          "cause": true
         }
       }
     },
@@ -93,6 +95,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "malformed.count": "integer",
@@ -104,7 +107,8 @@
       "errors": {
         "queue_retention_failed": {
           "class": "queue_maintenance_error",
-          "message_safe": "queue retention failed"
+          "message_safe": "queue retention failed",
+          "cause": true
         }
       }
     },
@@ -144,6 +148,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -153,7 +158,8 @@
       "errors": {
         "lease_reclaim_failed": {
           "class": "queue_maintenance_error",
-          "message_safe": "queue lease reclaim failed"
+          "message_safe": "queue lease reclaim failed",
+          "cause": true
         }
       }
     },
@@ -165,6 +171,7 @@
         "consumer.class": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -174,23 +181,28 @@
       "errors": {
         "notification_listener_authentication": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_endpoint_transport": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_permission": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_timeout": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_unknown": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         }
       }
     },
@@ -226,6 +238,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -235,7 +248,8 @@
       "errors": {
         "queue_retention_failed": {
           "class": "queue_maintenance_error",
-          "message_safe": "queue retention failed"
+          "message_safe": "queue retention failed",
+          "cause": true
         }
       }
     },
@@ -260,6 +274,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -269,7 +284,8 @@
       "errors": {
         "queue_retention_failed": {
           "class": "queue_maintenance_error",
-          "message_safe": "queue retention failed"
+          "message_safe": "queue retention failed",
+          "cause": true
         }
       }
     },
@@ -294,6 +310,7 @@
         "duration_ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "schema.step": "string",
@@ -303,51 +320,63 @@
       "errors": {
         "schema_ahead": {
           "class": "schema_ahead",
-          "message_safe": "postgresql schema is ahead of this binary"
+          "message_safe": "postgresql schema is ahead of this binary",
+          "cause": true
         },
         "schema_apply_failed": {
           "class": "schema_apply_failed",
-          "message_safe": "postgresql schema migration failed"
+          "message_safe": "postgresql schema migration failed",
+          "cause": true
         },
         "schema_behind": {
           "class": "schema_behind",
-          "message_safe": "postgresql schema is behind this binary"
+          "message_safe": "postgresql schema is behind this binary",
+          "cause": true
         },
         "schema_checksum_drift": {
           "class": "schema_checksum_drift",
-          "message_safe": "postgresql schema checksum does not match this binary"
+          "message_safe": "postgresql schema checksum does not match this binary",
+          "cause": true
         },
         "schema_history_duplicate": {
           "class": "schema_history_duplicate",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_history_gap": {
           "class": "schema_history_gap",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_history_malformed": {
           "class": "schema_history_malformed",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_lock_failed": {
           "class": "schema_lock_failed",
-          "message_safe": "postgresql schema migration lock failed"
+          "message_safe": "postgresql schema migration lock failed",
+          "cause": true
         },
         "schema_missing": {
           "class": "schema_missing",
-          "message_safe": "postgresql schema registry is missing"
+          "message_safe": "postgresql schema registry is missing",
+          "cause": true
         },
         "schema_operation_canceled": {
           "class": "schema_operation_canceled",
-          "message_safe": "postgresql schema operation was canceled"
+          "message_safe": "postgresql schema operation was canceled",
+          "cause": true
         },
         "schema_rls_drift": {
           "class": "schema_rls_drift",
-          "message_safe": "postgresql workspace isolation contract does not match this binary"
+          "message_safe": "postgresql workspace isolation contract does not match this binary",
+          "cause": true
         },
         "schema_unexpected_state": {
           "class": "schema_unexpected_state",
-          "message_safe": "postgresql schema is not empty and has no current identity"
+          "message_safe": "postgresql schema is not empty and has no current identity",
+          "cause": true
         }
       }
     },

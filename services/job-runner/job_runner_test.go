@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"reflect"
 	"slices"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
@@ -582,13 +582,17 @@ func TestJobRunnerFinalizationFailureLeavesQueueLeaseUnchanged(t *testing.T) {
 		result:      RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_busy"},
 		finalizeErr: errors.New("bridge finalization unavailable"),
 	}
-	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
+	var logs bytes.Buffer
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer, Logger: workloadtest.Logger(t, &logs, ServiceNameJobRunner, "")}
 
 	if err := acquireAndJoin(context.Background(), runner); err == nil {
 		t.Fatal("acquire and join succeeded; want Bridge finalization error")
 	}
 	if len(queueClient.transitions) != 0 {
 		t.Fatalf("queue transitions = %v; want none before Bridge ACK", queueClient.transitions)
+	}
+	if failed := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "job_runner.runtime_job.failed"); len(failed) != 1 || failed[0]["error.message"] != "bridge finalization unavailable" {
+		t.Fatalf("runtime job failure records = %v; want one carrying the finalization error", failed)
 	}
 }
 
@@ -1293,12 +1297,12 @@ func TestRunJobRunnerLoopLogsAcquisitionFailureWithSafeSharedFields(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runner := &JobRunner{
-		Queue:     pollFailingQueueClient{err: errors.New("raw queue connection string should not appear")},
+		Queue:     pollFailingQueueClient{err: errors.New("rpc error: code = Unavailable desc = connection refused")},
 		Deliverer: &recordingDeliverer{},
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- RunJobRunnerLoop(ctx, runner, slog.New(slog.NewJSONHandler(buffer, nil)), nil)
+		done <- RunJobRunnerLoop(ctx, runner, workloadtest.Logger(t, buffer, ServiceNameJobRunner, ""), nil)
 	}()
 	deadline := time.After(time.Second)
 	for !strings.Contains(buffer.String(), `"msg":"job_runner.acquisition_failed"`) {
@@ -1318,9 +1322,6 @@ func TestRunJobRunnerLoopLogsAcquisitionFailureWithSafeSharedFields(t *testing.T
 		t.Fatal("RunJobRunnerLoop did not stop after context cancellation")
 	}
 	logOutput := buffer.String()
-	if strings.Contains(logOutput, "raw queue connection string") {
-		t.Fatalf("job runner log leaked raw acquisition error: %s", logOutput)
-	}
 	for _, want := range []string{
 		`"msg":"job_runner.acquisition_failed"`,
 		`"operation":"job_runner.acquisition"`,
@@ -1330,6 +1331,7 @@ func TestRunJobRunnerLoopLogsAcquisitionFailureWithSafeSharedFields(t *testing.T
 		`"terminal":false`,
 		`"error.class":"job_runner_error"`,
 		`"error.code":"acquisition_failed"`,
+		`"error.message":"rpc error: code = Unavailable desc = connection refused"`,
 		`"error.message_safe":"job runner queue acquisition failed"`,
 	} {
 		if !strings.Contains(logOutput, want) {

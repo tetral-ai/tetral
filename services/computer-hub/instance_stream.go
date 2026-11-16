@@ -72,11 +72,8 @@ func (e *InstanceEvents) Run(ctx context.Context) error {
 		}
 	}
 	return queue.RunListener(ctx, listener, instance.EventChannel, onReady, func(payload string) { e.deliver(ctx, payload) }, func(err error) {
-		e.logger.WarnContext(ctx, "instance_events.listener_disconnected",
-			slog.String("operation", "computer_hub.instance_events"),
-			slog.String("error.class", "dependency_unavailable"),
-			slog.String("error.code", "notification_listener_disconnected"),
-			slog.String("error.message_safe", "instance event listener disconnected"))
+		workload.WriteFailure(ctx, e.logger, "instance_events.listener_disconnected", "notification_listener_disconnected", workload.CauseOf(err),
+			slog.String("operation", "computer_hub.instance_events"))
 	})
 }
 

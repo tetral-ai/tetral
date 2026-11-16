@@ -52,7 +52,7 @@ func TestTetralQueueCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"service.name":"queue"`,
 		`"component":"queue"`,
 		`"error.class":"config_error"`,
-		tetralqueue.EnvLeaseReclaimLimit,
+		`"error.message":"` + tetralqueue.EnvLeaseReclaimLimit + ` must be a positive integer"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)

@@ -332,7 +332,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		if err := json.Unmarshal(line, &event); err != nil {
 			t.Fatal(err)
 		}
-		if code, ok := event["error.code"].(string); ok {
+		if code, ok := event["error.code"].(string); ok && event["event"] != "diagnostic.suppressed" {
 			stage, _ := event["auth.stage"].(string)
 			events[code+":"+stage] = event
 		}
@@ -351,27 +351,32 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 			}
 		}
 	}
-	for code, want := range map[string]struct{ stage, result string }{
-		"auth_rule_invalid": {"rule", "invalid"}, "auth_assertion_invalid": {"assertion", "invalid"},
-		"auth_grant_denied": {"grant", "denied"}, "auth_admission_invalid": {"admission", "invalid"},
-		"auth_store_unavailable": {"rule", "unavailable"}, "auth_jwks_unavailable": {"assertion", "unavailable"},
+	for code, want := range map[string]struct{ stage, result, cause string }{
+		"auth_rule_invalid": {"rule", "invalid", "invalid credentials"}, "auth_assertion_invalid": {"assertion", "invalid", "invalid assertion"},
+		"auth_grant_denied": {"grant", "denied", "invalid credentials"}, "auth_admission_invalid": {"admission", "invalid", "invalid credentials"},
+		"auth_store_unavailable": {"rule", "unavailable", "authentication unavailable: sql: database is closed"},
+		"auth_jwks_unavailable":  {"assertion", "unavailable", "authentication unavailable: the issuer answered status 503"},
 	} {
 		event, ok := events[code+":"+want.stage]
 		// Store failure occurs through admission and exchange; process suppression
 		// partitions by fixed stage as well as safe code, not by identity/revision.
-		if !ok || event["auth.stage"] != want.stage || event["auth.result"] != want.result {
-			t.Fatalf("missing semantic diagnostic %s", code)
+		if !ok || event["auth.stage"] != want.stage || event["auth.result"] != want.result || event["error.message"] != want.cause {
+			t.Fatalf("diagnostic %s = %v; want stage %s, result %s, cause %q", code, event, want.stage, want.result, want.cause)
 		}
+	}
+	// The request's own failure record names what the 503 was answered for.
+	if event := events["server_error:"]; event == nil || event["event"] != "http.request.failed" || event["error.message"] != "authentication unavailable: sql: database is closed" {
+		t.Fatalf("request failure record = %v", event)
 	}
 	if !kinds[auth.IdentityHuman] || !kinds[auth.IdentityService] {
 		t.Fatal("successful exchanges lost truthful kind diagnostics")
 	}
-	if event := events["auth_store_unavailable:admission"]; event == nil || event["auth.result"] != "unavailable" {
-		t.Fatal("store admission diagnostic missing")
+	if event := events["auth_store_unavailable:admission"]; event == nil || event["auth.result"] != "unavailable" || event["error.message"] != "sql: database is closed" {
+		t.Fatalf("store admission diagnostic = %v", event)
 	}
-	for _, forbidden := range []string{issuer.URL, rule.ID, rule.OrganizationID, "identity_exchange_", "grant_exchange_", "tetral_at_", "selected-key", "database is closed"} {
+	for _, forbidden := range []string{issuer.URL, rule.ID, rule.OrganizationID, "identity_exchange_", "grant_exchange_", "tetral_at_", "selected-key"} {
 		if strings.Contains(diagnosticOutput.String(), forbidden) {
-			t.Fatal("authentication diagnostic leaked private request/store material")
+			t.Fatalf("authentication diagnostic holds %q", forbidden)
 		}
 	}
 

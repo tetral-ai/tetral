@@ -49,12 +49,12 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	if listen == nil {
 		listen = net.Listen
 	}
-	grpcListener, err := listen("tcp", cfg.GRPCAddress)
+	grpcListener, err := workload.ListenTCP(listen, cfg.GRPCAddress)
 	if err != nil {
 		return workload.LogStartupFailure(runtime.Logger, ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err), slog.String("startup.cause_category", "grpc"))
 	}
 	defer func() { _ = grpcListener.Close() }()
-	metricsListener, err := listen("tcp", cfg.MetricsAddress)
+	metricsListener, err := workload.ListenTCP(listen, cfg.MetricsAddress)
 	if err != nil {
 		return workload.LogStartupFailure(runtime.Logger, ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err), slog.String("startup.cause_category", "metrics"))
 	}

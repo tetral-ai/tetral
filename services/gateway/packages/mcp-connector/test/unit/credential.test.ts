@@ -9,6 +9,7 @@ import { SQLVaultMcpCredentialUpdatePath } from "../../src/credential-update-pat
 import type { McpCredentialRefreshWriter, McpOAuthRefreshFailureKind } from "../../src/credential-update-path.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { recordMcpOAuthRefreshCompleted } from "../../src/logger.js";
+import { mcpFailureCause } from "../../src/errors.js";
 
 type OwnerFetch = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => ReturnType<typeof fetch>;
 
@@ -187,6 +188,23 @@ describe("SQLMcpCredentialResolver", () => {
     expect(resolved).toEqual({ ok: false, error: "credential_required" });
   });
 
+  test("an undecryptable credential carries the error behind it, never the plaintext", async () => {
+    const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    for (const [name, encryptedAuth, cause] of [
+      ["short ciphertext", new Uint8Array([1]), "ciphertext is too short"],
+      ["plaintext not JSON", await encryptAES256GCM(new TextEncoder().encode("PLAINTEXT_CANARY {"), keyHex), "the decrypted credential is not JSON"],
+    ] as const) {
+      const resolver = new SQLMcpCredentialResolver(asyncSQL([{
+        id: "cred_broken", vault_id: "vlt_1", mcp_server_url: "https://api.githubcopilot.com/mcp/",
+        auth_public_json: publicAuthJSON("https://api.githubcopilot.com/mcp/"), encrypted_auth: encryptedAuth,
+      }]), keyHex);
+      const resolved = await resolver.resolve({
+        workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", resolvedServer: registeredServer(),
+      });
+      expect(resolved, name).toEqual({ ok: false, error: "undecryptable", cause: new Error(cause) });
+    }
+  });
+
   test("runs every MCP credential vector", async () => {
     const vectors = await loadMcpCredentialVectors();
     expect(vectors.cases).toHaveLength(10);
@@ -236,7 +254,7 @@ describe("SQLMcpCredentialResolver", () => {
           expect(refreshRequests, vector.name).toHaveLength(vector.expected.refresh_triggered ? 1 : 0);
           break;
         case "error":
-          expect(resolved, vector.name).toEqual({ ok: false, error: requireVectorError(vector.expected.error, vector.name) });
+          expect(resolved, vector.name).toMatchObject({ ok: false, error: requireVectorError(vector.expected.error, vector.name) });
           break;
       }
     }
@@ -380,8 +398,15 @@ describe("SQLMcpCredentialResolver", () => {
       });
       encryptSpy?.mockRestore();
       if (["storage", "transport", "timeout", "http_status", "response_shape", "encrypt", "write_back"].includes(failureKind)) {
-        expect(resolution, failureKind).toEqual({ ok: false, error: "refresh_unavailable" });
+        expect(resolution, failureKind).toMatchObject({ ok: false, error: "refresh_unavailable" });
       }
+      // The error behind the exit, where the connector had one, reaches the failure record.
+      const recordedCause = {
+        credential_state: undefined, configuration: undefined, storage: undefined, decrypt: "ciphertext is too short",
+        transport: "issuer unavailable", timeout: "MCP OAuth refresh timed out.", http_status: undefined,
+        response_shape: undefined, encrypt: "encryption unavailable", write_back: "credential write unavailable",
+      }[failureKind];
+      expect(resolution.ok ? undefined : (resolution.cause as Error | undefined)?.message, failureKind).toBe(recordedCause);
       expect(events, failureKind).toEqual([expect.objectContaining({ outcome: "failed", failureKind })]);
       expect(logRecords, failureKind).toEqual([expect.objectContaining({
         event: "mcp_oauth_refresh_completed",
@@ -396,6 +421,18 @@ describe("SQLMcpCredentialResolver", () => {
       "credential_state", "configuration", "storage", "decrypt", "transport",
       "timeout", "http_status", "response_shape", "encrypt", "write_back",
     ]);
+  });
+
+  test("a database that admits no work for the update owner is a cause the record takes in its own words", async () => {
+    const failure = new Error("database trust has expired");
+    const owner = new SQLVaultMcpCredentialUpdatePath({ withSQL: async () => { throw failure; } }, "00".repeat(32));
+    const error = await owner.refreshOAuthCredential({
+      workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github",
+      row: { id: "cred_1", vault_id: "vlt_1", mcp_server_url: "https://api.githubcopilot.com/mcp/", encrypted_auth: null },
+      vaultId: "vlt_1", credentialId: "cred_1", force: true,
+    }).catch((error: unknown) => error);
+    expect(error).toBe(failure);
+    expect(mcpFailureCause(error).text).toBe("database trust has expired");
   });
 
   test("refreshes expired OAuth credentials under the row lock and writes back rotated material", async () => {
@@ -549,7 +586,7 @@ describe("SQLMcpCredentialResolver", () => {
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
       mcpServerName: "github", resolvedServer: registeredServer(),
-    })).resolves.toEqual({ ok: false, error: "refresh_unavailable" });
+    })).resolves.toEqual({ ok: false, error: "refresh_unavailable", cause: new Error("MCP OAuth refresh timed out.") });
     expect(fetchSignal?.aborted).toBe(true);
     expect(MCP_REFRESH_HTTP_TIMEOUT_MS).toBe(10_000);
   });
@@ -605,7 +642,7 @@ describe("SQLMcpCredentialResolver", () => {
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
       mcpServerName: "github", resolvedServer: registeredServer(),
-    })).resolves.toEqual({ ok: false, error: "refresh_unavailable" });
+    })).resolves.toEqual({ ok: false, error: "refresh_unavailable", cause: new Error("MCP OAuth refresh timed out.") });
     expect(state.updateCount).toBe(0);
     expect(refreshEvents).toEqual([expect.objectContaining({
       outcome: "failed", failureKind: "timeout", httpStatusClass: "2xx",

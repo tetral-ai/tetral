@@ -62,10 +62,10 @@ func TestGitProxyCommandRejectsInvalidConfigBeforeDatabaseOpen(t *testing.T) {
 	}
 }
 
-func TestGitProxyCommandStartupFailureLogRedactsDependencyError(t *testing.T) {
+func TestGitProxyCommandStartupFailureLogCarriesTheDependencyErrorWithoutURLCredentials(t *testing.T) {
 	previousOpen := openDatabase
 	openDatabase = func(context.Context, string, string, string) (dbconnect.OpenResult, error) {
-		return dbconnect.OpenResult{}, errors.New("postgres://user:secret@db.internal/tetral raw bearer token")
+		return dbconnect.OpenResult{}, errors.New("connect postgres://user:secret@db.internal/tetral: connection refused")
 	}
 	t.Cleanup(func() { openDatabase = previousOpen })
 
@@ -79,10 +79,8 @@ func TestGitProxyCommandStartupFailureLogRedactsDependencyError(t *testing.T) {
 	}
 	finish()
 	output := stderr.String()
-	for _, forbidden := range []string{"postgres://", "secret@db.internal", "raw bearer token"} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("startup log leaked %q: %s", forbidden, output)
-		}
+	if strings.Contains(output, "secret") {
+		t.Fatalf("startup log holds the URL's credentials: %s", output)
 	}
 	for _, want := range []string{
 		`"msg":"startup.failed"`,
@@ -90,13 +88,11 @@ func TestGitProxyCommandStartupFailureLogRedactsDependencyError(t *testing.T) {
 		`"component":"git-proxy"`,
 		`"error.class":"startup_error"`,
 		`"error.message_safe":"startup failed"`,
+		`"error.message":"connect postgres://db.internal/tetral: connection refused"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
 		}
-	}
-	if strings.Contains(output, `"error.message"`) {
-		t.Fatalf("dependency startup log must not carry legacy error.message: %s", output)
 	}
 }
 

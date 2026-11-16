@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1387,34 +1388,44 @@ func TestPostgreSQLCredentialStoreNormalizesAndRejectsProviderOAuthBeforePersist
 		})
 		return createErr
 	}
-	logs, err := captureVaultStoreLogs(slog.LevelDebug, rejectProviderOAuth)
+	logs, err := captureVaultStoreLogs(t, slog.LevelDebug, rejectProviderOAuth)
 	if err == nil {
 		t.Fatal("logged invalid provider OAuth credential succeeded")
 	}
 	for _, required := range []string{
-		"level=DEBUG",
-		"provider_credential_rejected",
-		"provider.id=invalid-provider",
-		"validation.member=provider_id",
-		"error.class=validation",
-		"error.code=invalid_provider_oauth",
-		`error.message_safe="provider credential rejected"`,
+		`"level":"DEBUG"`,
+		`"event":"provider_credential_rejected"`,
+		`"provider.id":"invalid-provider"`,
+		`"validation.member":"provider_id"`,
+		`"error.class":"validation"`,
+		`"error.code":"invalid_provider_oauth"`,
+		`"error.message_safe":"provider credential rejected"`,
+		`"error.message":"auth.provider_id must be openai"`,
 	} {
 		if !strings.Contains(logs, required) {
 			t.Fatalf("provider credential rejection log missing %q: %s", required, logs)
 		}
 	}
 	assertStringOmits(t, logs, validAuth.AccessToken, validAuth.RefreshToken, validAuth.AccountID, validAuth.ExpiresAt)
-	quietLogs, quietErr := captureVaultStoreLogs(slog.LevelInfo, rejectProviderOAuth)
+	quietLogs, quietErr := captureVaultStoreLogs(t, slog.LevelInfo, rejectProviderOAuth)
 	if quietErr == nil || quietLogs != "" {
 		t.Fatalf("routine credential rejection at default Info: err=%v logs=%s", quietErr, quietLogs)
 	}
 }
 
-func captureVaultStoreLogs(level slog.Level, run func() error) (string, error) {
+// captureVaultStoreLogs runs run under the API's record writer at level.
+func captureVaultStoreLogs(t *testing.T, level slog.Level, run func() error) (string, error) {
+	t.Helper()
+	table, err := os.ReadFile("../../services/api/observability.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload.RegisterDeclarations("api", table)
 	var logs bytes.Buffer
-	defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: level}))}))()
-	err := run()
+	cfg := workload.DefaultDiagnosticConfig()
+	cfg.Level = level
+	defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: workload.NewLoggerWithConfig(&logs, "api", "test", "unit", cfg)}))()
+	err = run()
 	return logs.String(), err
 }
 

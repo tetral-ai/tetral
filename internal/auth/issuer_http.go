@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -134,7 +135,7 @@ func fetchIssuerJSON(ctx context.Context, rule FederationRule, endpoint string, 
 	}
 	roots, err := x509.SystemCertPool()
 	if err != nil {
-		return &UnavailableError{}
+		return Unavailable(err)
 	}
 	if rule.TrustedCAPEM != "" && !roots.AppendCertsFromPEM([]byte(rule.TrustedCAPEM)) {
 		return &AuthenticationError{Message: "invalid issuer configuration"}
@@ -143,14 +144,14 @@ func fetchIssuerJSON(ctx context.Context, rule FederationRule, endpoint string, 
 		DialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
-				return nil, &UnavailableError{}
+				return nil, Unavailable(err)
 			}
 			addresses, err := net.DefaultResolver.LookupNetIP(dialCtx, "ip", host)
 			if err != nil {
-				return nil, &UnavailableError{}
+				return nil, Unavailable(err)
 			}
 			if len(addresses) == 0 || len(addresses) > 32 {
-				return nil, &UnavailableError{}
+				return nil, Unavailable(fmt.Errorf("the issuer's host resolves to %d addresses", len(addresses)))
 			}
 			// Reject a mixed safe/unsafe DNS answer rather than opportunistically using
 			// one safe address. Refreshes repeat this check and dial a verified IP.
@@ -160,20 +161,22 @@ func fetchIssuerJSON(ctx context.Context, rule FederationRule, endpoint string, 
 				}
 			}
 			dialer := net.Dialer{Timeout: issuerHTTPTimeout}
+			var dialError error
 			for _, ip := range addresses {
 				conn, err := dialer.DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
 				if err == nil {
 					return conn, nil
 				}
+				dialError = err
 			}
-			return nil, &UnavailableError{}
+			return nil, Unavailable(dialError)
 		},
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: issuerHTTPTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return &UnavailableError{}
+		return Unavailable(err)
 	}
 	response, err := client.Do(req)
 	if err != nil {
@@ -184,21 +187,31 @@ func fetchIssuerJSON(ctx context.Context, rule FederationRule, endpoint string, 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return &UnavailableError{}
+		// The dial's own failure names its cause; the client's wrapping of it does not.
+		var dial *UnavailableError
+		if errors.As(err, &dial) {
+			return dial
+		}
+		// The client's error repeats the endpoint; the transport's error is the cause.
+		var request *url.Error
+		if errors.As(err, &request) {
+			err = request.Err
+		}
+		return Unavailable(err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
 		return &AuthenticationError{Message: "issuer redirect denied"}
 	}
 	if response.StatusCode != http.StatusOK {
-		return &UnavailableError{}
+		return Unavailable(fmt.Errorf("the issuer answered status %d", response.StatusCode))
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxIssuerResponseBytes+1))
 	if err != nil {
-		return &UnavailableError{}
+		return Unavailable(err)
 	}
 	if len(body) > maxIssuerResponseBytes {
-		return &UnavailableError{}
+		return Unavailable(errors.New("the issuer's answer exceeds its size limit"))
 	}
 	// Discovery/JWKS have extensible standards fields. Duplicate fields remain
 	// rejected; the caller's schema selectively reads the fields it owns.

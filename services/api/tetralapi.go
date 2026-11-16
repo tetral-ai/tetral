@@ -407,14 +407,14 @@ func (r *ownedRouter) Close() error {
 // asStartupConfigError re-expresses a config-VALIDATION error from a foreign
 // package (blob.ConfigError) or auth's WeakBootstrapKeyError
 // as a *workload.ConfigError carrying that error's safe static message, so the
-// startup-failure log classifies it config_error and emits the operator-facing
-// text instead of a class-only line.
+// startup-failure log classifies it config_error and names the problem in
+// startup.config_problem.
 //
 // This is the SINGLE conversion point for foreign config-validation errors. It
 // is applied ONLY at config-validation call sites (Bucket C); dependency and
 // construction sites (Bucket D — DB open, schema init, blob.NewProtectedS3BlobStore)
 // are NOT routed through it and
-// therefore stay class-only. The contract is that every wrapped error's Error()
+// therefore stay startup_error. The contract is that every wrapped error's Error()
 // is already operator-safe (names a config KEY, never echoes a secret value);
 // blob ConfigError and WeakBootstrapKeyError both satisfy that.
 //
@@ -474,7 +474,7 @@ func buildOptionalBlobStore(ctx context.Context, suppliedBlobStore blob.BlobStor
 	}
 	blobStore, err := blob.NewProtectedS3BlobStore(ctx, cfg)
 	if err != nil {
-		// Bucket D: client construction. Stays class-only (not converted).
+		// Bucket D: client construction. Stays startup_error (not converted).
 		return nil, fmt.Errorf("blob store: %w", err)
 	}
 	return blobStore, nil
@@ -607,14 +607,15 @@ func loadPositiveInt64(env Env, key string, defaultValue int64) (int64, error) {
 // diagnosis. The configured path itself is an operator-supplied value and is
 // deliberately NOT interpolated into the message — a path can carry a secret-
 // shaped segment, so only the env key name and the shape-validated mode appear.
-// The MkdirAll/Stat failures are filesystem/dependency failures and stay class-only.
+// The MkdirAll/Stat failures are filesystem failures and stay startup_error;
+// their cause is the operating system's error without the path.
 func EnsureDataDir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil { //nolint:gosec // path is service config, validated by deployment ownership.
-		return fmt.Errorf("create data dir: %w", err)
+		return fmt.Errorf("create data dir: %w", workload.WithoutPaths(err))
 	}
 	info, err := os.Stat(path) //nolint:gosec // path is service config, validated by deployment ownership.
 	if err != nil {
-		return fmt.Errorf("stat data dir: %w", err)
+		return fmt.Errorf("stat data dir: %w", workload.WithoutPaths(err))
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		return workload.NewConfigError(fmt.Sprintf("ENGINE_DATA_DIR directory has mode %04o; must not be group/other accessible", info.Mode().Perm()))

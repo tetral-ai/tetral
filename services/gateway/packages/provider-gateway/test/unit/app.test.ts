@@ -10,7 +10,7 @@ import {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { createProviderGatewayApp } from "../../src/app.js";
 import { GrpcStatusError } from "../../src/errors.js";
-import { validProviderRequest } from "./fixtures.js";
+import { validProviderRequest, writtenLogs } from "./fixtures.js";
 import type { GatewayTokenReviewClient } from "../../src/auth.js";
 import type { ProviderGatewayConfig } from "../../src/config.js";
 import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -29,7 +29,7 @@ describe("ProviderGatewayApp lifecycle", () => {
     const request = validAnthropicProviderRequest();
     const app = createProviderGatewayApp({
       config: validConfig(),
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       tokenReviewClient: new AllowingTokenReviewClient(),
       previewPublisher: {
         start: () => undefined,
@@ -116,7 +116,8 @@ describe("ProviderGatewayApp lifecycle", () => {
         expect.objectContaining({
           "request.outcome": "failed",
           "error.class": "grpc_status",
-          "error.code": "14",
+          "error.code": "unavailable",
+          "error.message": "gateway service not ready",
         }),
       ]);
       expect(logs).not.toContainEqual(expect.objectContaining({

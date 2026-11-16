@@ -21,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -155,7 +156,7 @@ func logRuntimeContextLoadRejected(logger *slog.Logger, scope *bridgev1.RuntimeS
 			slog.String("thread.id", safeActorDiagnosticIdentity(scope.GetSessionThreadId())),
 		)
 	}
-	logger.Error("runtime context load rejected", attributes...)
+	workload.WriteFailure(context.Background(), logger, "runtime_context_load_rejected", "operation_failed", workload.CauseOf(rejection), attributes...)
 }
 
 func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Context, request *bridgev1.RefreshRuntimeBindingTokenRequest) (*bridgev1.RefreshRuntimeBindingTokenResponse, error) {

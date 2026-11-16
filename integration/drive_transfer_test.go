@@ -32,6 +32,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 // statementTracer observes one pool's statements: it holds the first
@@ -469,30 +470,29 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			}
 			continue
 		}
-		requireRefusal(t, row.name, response, row.status, row.code)
+		refusal := requireRefusal(t, row.name, response, row.status, row.code)
 		if strings.Contains(row.name, "PUT") || strings.Contains(row.name, "commit") {
-			logged = append(logged, string(row.code))
+			// A schema refusal's message can quote the request and is not
+			// recorded; a limit refusal's is Engine's own text.
+			cause := refusal.Message
+			if strings.HasPrefix(cause, "protocol: ") && row.code == protocol.ErrorInvalidMessage {
+				cause = "the request does not match its schema"
+			}
+			logged = append(logged, string(row.code)+": "+cause)
 		}
 	}
 	limited := x.put(team, []byte("over the budget"))
-	requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
-	logged = append(logged, string(protocol.ErrorRateLimited))
+	refusal := requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
+	logged = append(logged, string(protocol.ErrorRateLimited)+": "+refusal.Message)
 	var refusals []string
-	for _, line := range strings.Split(f.hubLogs.String(), "\n") {
-		var record struct {
-			Msg     string `json:"msg"`
-			Code    string `json:"error.code"`
-			Message string `json:"error.message_safe"`
+	for _, record := range workloadtest.Find(workloadtest.Records(t, []byte(f.hubLogs.String())), "drive.transfer_refused") {
+		if record["error.message_safe"] == nil || record["error.message"] == "" {
+			t.Fatalf("drive.transfer_refused %v lacks its safe message or its cause", record)
 		}
-		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "drive.transfer_refused" {
-			if record.Message == "" {
-				t.Fatalf("drive.transfer_refused %s has no safe message", line)
-			}
-			refusals = append(refusals, record.Code)
-		}
+		refusals = append(refusals, fmt.Sprint(record["error.code"], ": ", record["error.message"]))
 	}
 	if !slices.Equal(refusals, logged) {
-		t.Fatalf("drive.transfer_refused codes %q; want one per refused upload and commit, %q", refusals, logged)
+		t.Fatalf("drive.transfer_refused records %q; want one per refused upload and commit, with the answered code and its cause, %q", refusals, logged)
 	}
 	if wait, err := strconv.Atoi(limited.Header.Get("Retry-After")); err != nil || wait < 1 || wait > 60 {
 		t.Fatalf("Retry-After = %q; want 1 to 60 seconds", limited.Header.Get("Retry-After"))

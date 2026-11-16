@@ -19,7 +19,8 @@
 //
 // Where each concern lives:
 //   - Records: diagnostics.go (ProcessLogger, the JSON handler, limiter,
-//     redaction, sink failures), config_error.go (startup failures),
+//     redaction, sink failures), failure.go (WriteFailure, the one entry of a
+//     failure record, and its cause), config_error.go (startup failures),
 //     http_server_diagnostics.go (net/http server errors).
 //   - Declarations: declarations.go and observability.json; inventory_test.go
 //     compares every table with deploy/managed's inventories.
@@ -28,7 +29,8 @@
 //     phases), workload.go (HealthRouter, HTTPMetrics, GRPCMetrics, process
 //     metrics).
 //   - Observations and spans: observe.go (Observe, WithFields), tracing.go
-//     (sampler, traceparent propagation, the bounded export queue, Span).
+//     (sampler, traceparent propagation, the bounded export queue and its
+//     ForceFlush, Span).
 //   - Pressure points: pressure.go. Cold starts: cold_start.go.
 //   - Process lifetime: process.go (RunProcess, the shutdown budget) and
 //     workload.go (Run, Readiness, shutdown phases).

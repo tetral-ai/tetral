@@ -206,6 +206,23 @@ describe("BridgeAPIAttachmentResolver", () => {
     expect(client.callOrder).toEqual(["metadata:file_1,file_2", "chunk:file_1:0:1"]);
   });
 
+  test("a failed call to Bridge is handed on as the failure's cause", async () => {
+    const unavailable = (text: string) => Object.assign(new Error(text), { code: status.UNAVAILABLE }) as ServiceError;
+    const file = validFileBackedProviderAttachment();
+    const fileClient = () => new RecordingMixedBridgeAttachmentClient([fileMetadataResult(file.fileBacked!, file.mime, file.filename, 1)]);
+    const rows = [
+      { name: "the metadata source", attachment: file, client: fileClient(), metadataFactory: async (): Promise<Metadata> => { throw new Error("service account token unavailable"); }, cause: "service account token unavailable" },
+      { name: "the transient attachment call", attachment: validProviderAttachment(), client: new RecordingBridgeAttachmentClient(() => { throw unavailable("transient attachment blob read failed"); }), cause: "transient attachment blob read failed" },
+      { name: "the file metadata call", attachment: file, client: Object.assign(fileClient(), { metadataError: unavailable("attachment blob store is unavailable") }), cause: "attachment blob store is unavailable" },
+      { name: "the file chunk call", attachment: file, client: Object.assign(fileClient(), { chunkError: unavailable("file attachment blob read failed") }), cause: "file attachment blob read failed" },
+    ];
+    for (const row of rows) {
+      const resolver = new BridgeAPIAttachmentResolver({ address: "bridge.test:9090", tokenPath: "/var/run/bridge/token", client: row.client, metadataFactory: row.metadataFactory ?? (async () => new Metadata()) });
+      const result = await resolver.resolve({ request: validProviderRequest({ attachments: [row.attachment] }), runtimePodUid: "pod_uid_runtime" });
+      expect(result, row.name).toMatchObject({ ok: false, error: { code: "attachment_unavailable" }, cause: expect.objectContaining({ message: row.cause }) });
+    }
+  });
+
   test("fails closed on a short chunk without reading the next offset", async () => {
     const eightMiB = 8 * 1024 * 1024;
     const attachment = validFileBackedProviderAttachment();
@@ -402,6 +419,7 @@ class RecordingBridgeAttachmentClient {
 class RecordingMixedBridgeAttachmentClient extends RecordingBridgeAttachmentClient {
   readonly callOrder: string[] = [];
   metadataError: ServiceError | undefined;
+  chunkError: ServiceError | undefined;
   chunkRejectedFileID: string | undefined;
 
   constructor(
@@ -435,6 +453,10 @@ class RecordingMixedBridgeAttachmentClient extends RecordingBridgeAttachmentClie
     callback: (error: ServiceError | null, response: ReadFileAttachmentChunkResponse) => void,
   ): unknown {
     this.callOrder.push(`chunk:${request.attachment?.fileId}:${request.offset}:${request.length}`);
+    if (this.chunkError !== undefined) {
+      callback(this.chunkError, {} as ReadFileAttachmentChunkResponse);
+      return {};
+    }
     if (request.attachment?.fileId === this.chunkRejectedFileID) {
       callback(null, {
         data: undefined,

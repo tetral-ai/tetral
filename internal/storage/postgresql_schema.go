@@ -2117,8 +2117,8 @@ func mustLoadPostgreSQLContract() database.PostgreSQL {
 // PostgreSQLSchemaError is the storage-local origin error for the
 // PostgreSQL schema initialization path. Error() text is public-safe:
 // it names the failed step but does not embed pgx error text, raw SQL,
-// or connection details. Storage-local conventions keep raw driver
-// state out of test/loggable strings.
+// or connection details. It keeps the driver's error in an unexported
+// field, which a migration's failure record reads as its cause.
 type PostgreSQLSchemaError struct {
 	Stage string
 	cause error

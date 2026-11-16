@@ -11,7 +11,7 @@
 import { mcpPhaseCompletedLogRecord } from "./logger.js";
 import type { McpConnectorLogger } from "./service.js";
 import { credentials, status } from "@grpc/grpc-js";
-import { traceparentClientInterceptor } from "@tetral/ts-observability";
+import { grpcStatusCodeName, traceparentClientInterceptor } from "@tetral/ts-observability";
 import type {
   ClientUnaryCall,
   CallOptions,
@@ -124,7 +124,7 @@ export interface BridgeMcpToolResultClient {
 /** Reports a durable manifest acknowledgement or a bounded retry classification. */
 export type BridgeAPIManifestChangeResult =
   | { readonly ok: true; readonly duplicate: boolean }
-  | { readonly ok: false; readonly retryable: boolean; readonly code: string; readonly message: string };
+  | { readonly ok: false; readonly retryable: boolean; readonly code: string; readonly message: string; readonly error?: unknown };
 
 type McpManifestChangeResult =
   | { readonly type: "committed" }
@@ -185,12 +185,13 @@ export class BridgeAPIManifestChangeNotifier {
     let metadata: Metadata;
     try {
       metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
-    } catch {
+    } catch (error) {
       return {
         ok: false,
         retryable: true,
         code: "bridge_token_unavailable",
         message: "mcp manifest change notification failed",
+        error,
       };
     }
     let response: McpManifestChangedResponse;
@@ -203,8 +204,9 @@ export class BridgeAPIManifestChangeNotifier {
       return {
         ok: false,
         retryable: serviceError.code === undefined || serviceError.code === status.UNAVAILABLE || serviceError.code === status.DEADLINE_EXCEEDED,
-        code: serviceError.code === undefined ? "bridge_unavailable" : `grpc_${serviceError.code}`,
+        code: serviceError.code === undefined ? "bridge_unavailable" : grpcStatusCodeName(serviceError.code),
         message: "mcp manifest change notification failed",
+        error,
       };
     }
     try {
@@ -357,6 +359,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     let outcomeUnknown = false;
     let recoveryStarted: number | undefined;
     let recoveryAttempts=0;
+    let lastError: unknown;
     for (let attempt = 0; ; attempt++) {
       if (
         this.stopping ||
@@ -366,7 +369,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
             context.phaseDeadline?.() ?? Infinity,
           )
       )
-        throw new McpIdempotencyOutcomeUnknownError();
+        throw new McpIdempotencyOutcomeUnknownError(lastError === undefined ? undefined : { cause: lastError });
       let metadata: Metadata;
       try {
         metadata = await this.metadata();
@@ -375,6 +378,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           this.releaseLocalClaim(key, context);
           throw error;
         }
+        lastError = error;
         const delayIndex = Math.min(
           attempt,
           MCP_COMMIT_RETRY_BACKOFF_MS.length - 1,
@@ -413,7 +417,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           if (result.type !== "stale") {
             committedResponse = materializeCommittedMcpToolResponse(activeStored, result.attachmentRef);
           }
-        } catch {
+        } catch (error) {
+          lastError = error;
           // A malformed ACK is as ambiguous as a dropped ACK: Bridge may have
           // committed before a proxy or incompatible peer corrupted the
           // response. Keep the exact immutable request and converge through
@@ -453,6 +458,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           this.releaseLocalClaim(key, context);
           throw new McpIdempotencyStaleCustodyError();
         }
+        lastError = error;
         outcomeUnknown = true;
         const delayIndex = Math.min(
           attempt,

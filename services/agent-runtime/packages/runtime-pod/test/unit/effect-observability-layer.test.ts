@@ -34,20 +34,19 @@ describe("Effect observability layer", () => {
     } finally { recording.restore(); }
   });
 
-  test("a failed Effect span keeps only the error class and code, and its failure text reaches neither span nor record", async () => {
+  test("a failed Effect span keeps only the error class and code, and its failure text is the record's cause", async () => {
     const recording = recordingTelemetry({ serviceName: "agent-runtime", declarations: runtimePodDeclarations });
     try {
-      await Effect.runPromiseExit(Effect.fail({ errorCode: "provider_timeout", detail: "PRIVATE_FAILURE_TEXT" }).pipe(
+      await Effect.runPromiseExit(Effect.fail(Object.assign(new Error("the Thread's contract check failed"), { errorCode: "runtime_semantic_error" })).pipe(
         Effect.tapCause((cause) => Effect.logError("runtime_terminal_settlement", cause)),
         Effect.withSpan("agent_provider_request"),
         Effect.provide(ObservabilityLive),
       ));
       const [span] = recording.spans();
       expect(span?.events).toEqual([]);
-      expect(span?.attributes).toEqual({ "error.class": "operation_failed", "error.code": "provider_timeout" });
+      expect(span?.attributes).toEqual({ "error.class": "operation_failed", "error.code": "runtime_semantic_error" });
       expect(span?.status.message).toBeUndefined();
-      expect(recording.records()).toEqual([expect.objectContaining({ event: "runtime_terminal_settlement", level: "ERROR", "error.code": expect.any(String), trace_id: span!.spanContext().traceId })]);
-      expect(JSON.stringify(recording.records())).not.toContain("PRIVATE_FAILURE_TEXT");
+      expect(recording.records()).toEqual([expect.objectContaining({ event: "runtime_terminal_settlement", level: "ERROR", "error.code": "runtime_semantic_error", "error.message": "the Thread's contract check failed", trace_id: span!.spanContext().traceId })]);
     } finally { recording.restore(); }
   });
 });
