@@ -111,8 +111,9 @@ the isolated harness tests without starting the CLI.
   processes saw (`timeline`): `<record>.timeline.log` holds, at their times
   since the test's start, each line that each process the harness started
   wrote, each control the test sent the reference control server, each
-  request on Engine's side at its arrival and its end, each step of a seam
-  clock, each barrier a process waited at and each count it reported;
+  request on Engine's side at its arrival and its end, each request the Git
+  server answered, each step of a seam clock, each barrier a process waited
+  at and each count it reported;
   `<record>.reference-<n>.json` holds that server's traffic and state at the
   failure. The harness writes them from a panic hook, so a test needs no code
   of its own for them, and prints where they are and the timeline's last
