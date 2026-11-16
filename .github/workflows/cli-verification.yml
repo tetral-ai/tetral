@@ -16,7 +16,6 @@ on:
         default: false
 
 permissions:
-  actions: read
   contents: read
 
 cache-mode: read
@@ -247,12 +246,3 @@ jobs:
         env:
           TETRAL_CI_NEEDS: ${{ toJSON(needs) }}
         run: go run ./internal/testinfra/cmd/tetral-ci-flow needs --deciding changed --product cli
-      # Last, so the time counts everything the gate did before it.
-      - name: Fail a run that took thirty minutes or more
-        if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TETRAL_CI_REPOSITORY: ${{ github.repository }}
-          TETRAL_CI_RUN_ID: ${{ github.run_id }}
-          TETRAL_CI_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "CLI results"

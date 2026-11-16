@@ -390,14 +390,10 @@ The readable CI topology is:
   GitHub; its runners are discarded with everything they started, and its
   gate fails.
 
-  A pull request's run must finish in under 30 minutes, counted from the
-  moment its first job was created, waiting for a runner included, to Merge
-  Gate's last step, which fails the run at 30 minutes or more and prints each
-  job's runner wait and run time. A partial rerun does not make a run faster:
-  a job that is not run again keeps its first creation time, so a rerun of the
-  failed jobs alone that ends later than 30 minutes after the first start
-  fails the gate again. Only a rerun of all jobs or a new push starts a new
-  measure. CLI results applies the same rule to CLI Verification.
+  A run's speed is measured, not enforced: no step and no test fails a run or
+  a pull request for the time it took or waited for a runner, which follows
+  from how many jobs GitHub is running for the repository, not from the
+  change. Job timeouts end a stuck job and are no speed rule.
 - **CLI Verification**: reports on every pull request. Its `changed` job
   takes the decision from `tetral-ci-flow decide` (package
   `internal/testinfra/ciflow`): the CLI's jobs run for a change under `cli/`
@@ -416,10 +412,7 @@ The readable CI topology is:
   twice on one runner and pass the job limit, whether the two builds run one
   after the other or together. **CLI results** applies the shared gate rule (`tetral-ci-flow
   needs`): the deciding job succeeded and every matrix job ended `success`, or
-  `skipped` when the CLI was not selected. Its last step (`tetral-ci-flow
-  duration`) fails a run that took 30 minutes or more from the creation of
-  its earliest job, runner wait included; the job limits of 2, 26 and 2
-  minutes allow no chain of jobs more. Each job runs its profile
+  `skipped` when the CLI was not selected. Each job runs its profile
   through `scripts/verify-cli.py` under cargo-nextest, which
   `scripts/install-cargo-nextest.sh` installs at a pinned version after its
   SHA-256 check: each test runs in a process of its own, and one that passes

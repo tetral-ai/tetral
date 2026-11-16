@@ -278,7 +278,3 @@ jobs:
           path: .test-results/merge-gate.json
           if-no-files-found: error
           retention-days: 14
-      # Last, so the time counts everything the gate did before it.
-      - name: Fail a run that took thirty minutes or more
-        if: ${{ !cancelled() }}
-        run: go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Merge Gate"

@@ -571,26 +571,6 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	if got := scalar(mappingValue(mappingValue(rule, "env"), "TETRAL_CI_NEEDS")); got != "${{ toJSON(needs) }}" {
 		t.Fatalf("the gate reads its needed jobs from %q", got)
 	}
-	if !lastStepMeasuresTheRun(workflow.Content[0], results) {
-		t.Fatal("CLI results' last step does not measure the run under the gate's own name")
-	}
-	duration := steps[len(steps)-1]
-	if !sameCondition(scalar(mappingValue(duration, "if")), "${{ !cancelled() }}") {
-		t.Fatalf("the gate's last step must measure the run also after a failed job: if %q", scalar(mappingValue(duration, "if")))
-	}
-	for name, want := range map[string]string{
-		"GH_TOKEN":              "${{ github.token }}",
-		"TETRAL_CI_REPOSITORY":  "${{ github.repository }}",
-		"TETRAL_CI_RUN_ID":      "${{ github.run_id }}",
-		"TETRAL_CI_RUN_ATTEMPT": "${{ github.run_attempt }}",
-	} {
-		if got := scalar(mappingValue(mappingValue(duration, "env"), name)); got != want {
-			t.Fatalf("the measurement's %s = %q, want %q", name, got, want)
-		}
-	}
-	if scalar(mappingValue(mappingValue(workflow.Content[0], "permissions"), "actions")) != "read" {
-		t.Fatal("the measurement reads the run's jobs, which needs actions: read")
-	}
 	// The rule itself has its table in package ciflow; these rows hold the
 	// workflow's job and output names to it.
 	needed := func(selected, changed, linux, macos string) string {

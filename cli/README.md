@@ -347,7 +347,7 @@ jobs cover ordinary functionality, release seam exclusion, and the serial
 enabled, each running `scripts/verify-cli.py` with its profile; three jobs on
 `macos-15` run the functional, the release and the full-ledger profile. `CLI results`
 requires every selected job to pass, or accepts them skipped when
-verification was not selected, and fails a run that took 30 minutes or more.
+verification was not selected.
 The rules and the commands are in [testing](../docs/testing.md#the-clis-tests).
 
 Label events never start it. Manual dispatch with `measure-builds` measures
