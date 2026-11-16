@@ -369,7 +369,11 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
     pass_all();
     refuse_uploads();
     answer_fault(&machine.engine, json!({"action": "release"}));
-    wait_until("the released upload's refusal", || {
+    // Which of the result's clock steps the App Server saw decides whether an
+    // attempt is held at the release or the last one stalled and waits to be
+    // sent again; a step past that wait sends it, and it is refused.
+    machine.step(Duration::from_secs(5));
+    wait_until("the upload's refusal after the release", || {
         upload_faults(&machine, "invalid_message", 400) > faults
     });
     let (again, during) = next_command();
@@ -387,10 +391,10 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
     assert_eq!(
         drives::failure_reports(&machine.engine),
         [] as [Value; 0],
-        "the released upload's refusal was reported"
+        "the refusal after the release was reported"
     );
     case.observe(
-        "c.txt was listed uploading while its upload was held and upload_pending once the released upload was refused; the next command tried it again and the one after committed it",
+        "c.txt was listed uploading while its upload was held and upload_pending once an upload after the release was refused; the next command tried it again and the one after committed it",
     );
     case.pass();
 }
