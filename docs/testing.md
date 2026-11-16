@@ -618,12 +618,12 @@ automatically.
 
 Report-only coverage runs `go test ./...` once without Race, so the integration
 package executes every top-level test sequentially in one binary. Its Go
-budget is 60 minutes: more than twice the 25 to 28 minutes that package took
-in the coverage runs of Main Branch Verification runs 38151172754 and
-38149638991. Coverage times are not part of the repository's evidence, so
+budget is 80 minutes: more than twice the 21 to 38 minutes that package took
+in the coverage runs of Scheduled Verification runs 43446807422, 43601344163,
+43723360527 and 43906321371. Coverage times are not part of the repository's evidence, so
 `TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests` checks the budget
 against twice the package's summed Race time in `go_shard_weights.json`, a
-lower figure that grows with the package. The coverage job's 80-minute limit
+lower figure that grows with the package. The coverage job's 95-minute limit
 leaves room for dependency setup, compilation, and the Bun coverage commands
 around it.
 

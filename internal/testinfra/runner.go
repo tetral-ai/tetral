@@ -370,7 +370,7 @@ func goPackageTimeout(plan Plan, packages []string) string {
 // the package's Race total in go_shard_weights.json. The scheduled coverage
 // job limit holds this budget plus dependency setup, compilation and the Bun
 // coverage commands.
-const coverageGoTestTimeout = "-timeout=60m"
+const coverageGoTestTimeout = "-timeout=80m"
 
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {

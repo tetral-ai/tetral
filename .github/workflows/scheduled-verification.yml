@@ -107,7 +107,7 @@ jobs:
     name: Report-only Coverage
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    timeout-minutes: 95
     permissions:
       contents: read
     steps:
