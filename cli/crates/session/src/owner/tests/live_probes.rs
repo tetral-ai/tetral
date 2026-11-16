@@ -75,7 +75,12 @@ async fn check_end(reason: &str) {
         .args(["-c", "import sys; print(sys.executable)"])
         .output()
         .unwrap();
-    assert!(python.status.success());
+    assert!(
+        python.status.success(),
+        "python3 {}: {}",
+        python.status,
+        String::from_utf8_lossy(&python.stderr)
+    );
     let python = String::from_utf8(python.stdout).unwrap();
     let program = directory.path().join("probe");
     // Each process holds stdout open and waits on a private handshake socket.

@@ -359,8 +359,10 @@ mod tests {
                 .unwrap();
             assert!(
                 output.status.success(),
-                "{name}: {}",
-                String::from_utf8_lossy(&output.stdout)
+                "{name}: {}; stdout: {}; stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(
                 std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,

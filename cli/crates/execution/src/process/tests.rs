@@ -74,6 +74,12 @@ fn root_group_leader() -> u64 {
         .args(["-axo", "pid=,pgid=,uid="])
         .output()
         .unwrap();
+    assert!(
+        listing.status.success(),
+        "ps {}: {}",
+        listing.status,
+        String::from_utf8_lossy(&listing.stderr)
+    );
     String::from_utf8_lossy(&listing.stdout)
         .lines()
         .find_map(|line| {
