@@ -158,19 +158,27 @@ func workflowExpression(condition string) string {
 	return condition
 }
 
-// lastStepMeasuresTheRun says the gate's last step runs the duration command
-// and names the gate job by the name the job has: run under bash with a stub
-// go, the step calls go run on tetral-ci-flow duration with --gate and that
-// name.
+// lastStepMeasuresTheRun says the gate's last step runs the duration command,
+// names the gate job by the name the job has and fails when the command
+// fails: run under bash with a stub go, the step calls go run on tetral-ci-flow
+// duration with --gate and that name.
 func lastStepMeasuresTheRun(workflow, gate *workflowYAMLNode) bool {
 	steps := sequenceNodes(mappingValue(gate, "steps"))
 	if len(steps) == 0 {
 		return false
 	}
 	step := steps[len(steps)-1]
-	command, arguments, ok := ciFlowCall(scalar(mappingValue(step, "run")), stepEnvironment(workflow, gate, step))
+	script, environment := scalar(mappingValue(step, "run")), stepEnvironment(workflow, gate, step)
+	command, arguments, ok := ciFlowCall(script, environment)
 	gateName, named := goFlagValue(arguments, "gate")
-	return ok && command == "duration" && named && gateName == scalar(mappingValue(gate, "name"))
+	return ok && command == "duration" && named && gateName == scalar(mappingValue(gate, "name")) && stepFailsWithGo(script, environment)
+}
+
+// stepFailsWithGo says the step's script, run as recordGoCalls runs it, fails
+// when its go call fails.
+func stepFailsWithGo(script string, environment []string) bool {
+	_, err := recordGoCalls(script, append(slices.Clone(environment), "GO_STUB_EXIT=17"))
+	return err != nil
 }
 
 // ciFlowCall runs a step's script under bash with a stub go and returns the
@@ -208,6 +216,7 @@ func stepEnvironment(workflow, job, step *workflowYAMLNode) []string {
 
 // recordGoCalls runs script under bash -e with a stub go that records each
 // call's arguments, and the extra environment, and returns the calls in order.
+// The stub exits with GO_STUB_EXIT, 0 when it is unset.
 func recordGoCalls(script string, environment []string) ([][]string, error) {
 	directory, err := os.MkdirTemp("", "go-calls-")
 	if err != nil {
@@ -217,6 +226,7 @@ func recordGoCalls(script string, environment []string) ([][]string, error) {
 	stub := `#!/bin/bash
 printf '%s\0' "$@" >> "$GO_CALLS"
 printf '\n' >> "$GO_CALLS"
+exit "${GO_STUB_EXIT:-0}"
 `
 	if err := os.WriteFile(filepath.Join(directory, "go"), []byte(stub), 0o755); err != nil { //nolint:gosec // The stub go must be executable.
 		return nil, err

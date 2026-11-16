@@ -151,6 +151,9 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 				yamlPut(t, workflow, "Merge Gate", "env", "GATE")
 			},
 		), "", 0},
+		{"Merge Gate's measurement swallows its failure", pullRequest, set(`go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Merge Gate" || true`, "jobs", "merge-gate", "steps", "last", "run"), "merge Gate's last step does not measure the run", 0},
+		{"Merge Gate's measurement reports its failure and goes on", pullRequest, set(`if ! go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Merge Gate"; then echo "took too long"; fi`, "jobs", "merge-gate", "steps", "last", "run"), "merge Gate's last step does not measure the run", 0},
+		{"Merge Gate's measurement fails with its own message", pullRequest, set(`go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Merge Gate" || { echo "took too long" >&2; exit 1; }`, "jobs", "merge-gate", "steps", "last", "run"), "", 0},
 		{"Merge Gate's measurement by module path with build flags", pullRequest, set(`go run -race -buildvcs github.com/tetral-ai/tetral/internal/testinfra/cmd/tetral-ci-flow duration --gate="Merge Gate"`, "jobs", "merge-gate", "steps", "last", "run"), "", 0},
 		{"main job that runs whatever the decision", main, remove("jobs", "verification", "if"), `main verification job "verification" does not run on the deciding job's selection of Engine`, 0},
 		{"main workflow without the deciding job's output", main, remove("jobs", "decide", "outputs"), "main verification has no deciding job", 0},
