@@ -393,7 +393,14 @@ The readable CI topology is:
   A run's speed is measured, not enforced: no step and no test fails a run or
   a pull request for the time it took or waited for a runner, which follows
   from how many jobs GitHub is running for the repository, not from the
-  change. Job timeouts end a stuck job and are no speed rule.
+  change. Job timeouts end a stuck job and are no speed rule. To measure a
+  finished run, run `go run ./internal/testinfra/cmd/tetral-ci-flow duration
+  --run <ID> --gate "Merge Gate"` (or `--gate "CLI results"`) from a
+  checkout with `gh` signed in or `GH_TOKEN` set: it prints each job's runner
+  wait and run time and the run's time from its earliest job's creation to
+  the gate's end, and succeeds whatever the time. A job a partial rerun did
+  not run again keeps its first creation time, so the run's time covers every
+  attempt.
 - **CLI Verification**: reports on every pull request. Its `changed` job
   takes the decision from `tetral-ci-flow decide` (package
   `internal/testinfra/ciflow`): the CLI's jobs run for a change under `cli/`

@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// RunLimit is the time a pull-request run may take, runner wait included.
-const RunLimit = 30 * time.Minute
-
 // JobTimes are a job's timestamps as GitHub lists them for a run attempt.
 type JobTimes struct {
 	Name      string
@@ -23,9 +20,8 @@ func (job JobTimes) RanEarlier() bool {
 	return !job.Started.IsZero() && job.Started.Before(job.Created)
 }
 
-// ParseJobs reads GitHub's list of a run attempt's jobs and leaves out the
-// gate job, whose own time ends at the moment it decides.
-func ParseJobs(body []byte, gate string) ([]JobTimes, error) {
+// ParseJobs reads GitHub's list of a run attempt's jobs.
+func ParseJobs(body []byte) ([]JobTimes, error) {
 	var listed struct {
 		Jobs []struct {
 			Name      string     `json:"name"`
@@ -39,9 +35,6 @@ func ParseJobs(body []byte, gate string) ([]JobTimes, error) {
 	}
 	var jobs []JobTimes
 	for _, job := range listed.Jobs {
-		if job.Name == gate {
-			continue
-		}
 		if job.Created.IsZero() {
 			return nil, fmt.Errorf("the job %s has no creation time", job.Name)
 		}
@@ -55,7 +48,7 @@ func ParseJobs(body []byte, gate string) ([]JobTimes, error) {
 		jobs = append(jobs, times)
 	}
 	if len(jobs) == 0 {
-		return nil, fmt.Errorf("the run lists no job beside %s", gate)
+		return nil, fmt.Errorf("the run lists no job")
 	}
 	return jobs, nil
 }
@@ -85,15 +78,18 @@ func WithFirstCreations(current []JobTimes, earlier ...[]JobTimes) ([]JobTimes, 
 	return jobs, nil
 }
 
-// DurationReport gives one line for each job with its runner wait and its
-// run time, and one for the run, counted from the earliest creation among
-// the jobs to the moment the gate decides. The error says the run reached
-// RunLimit.
-func DurationReport(jobs []JobTimes, decided time.Time) ([]string, error) {
+// DurationReport gives one line for each job but the gate with its runner
+// wait and its run time, and one for the run, counted from the earliest
+// creation among those jobs to the moment the gate finished.
+func DurationReport(jobs []JobTimes, gate string) []string {
 	var lines []string
-	earliest := decided
+	var earliest, decided time.Time
 	for _, job := range jobs {
-		if job.Created.Before(earliest) {
+		if job.Name == gate {
+			decided = job.Completed
+			continue
+		}
+		if earliest.IsZero() || job.Created.Before(earliest) {
 			earliest = job.Created
 		}
 		wait, run := "not started", "not finished"
@@ -105,12 +101,10 @@ func DurationReport(jobs []JobTimes, decided time.Time) ([]string, error) {
 		}
 		lines = append(lines, fmt.Sprintf("%s: runner wait %s, run %s", job.Name, wait, run))
 	}
-	total := decided.Sub(earliest)
-	lines = append(lines, "run: "+seconds(total))
-	if total >= RunLimit {
-		return lines, fmt.Errorf("the run took %s; the limit is %s", seconds(total), seconds(RunLimit))
+	if decided.IsZero() || earliest.IsZero() {
+		return append(lines, "run: the gate "+gate+" has not decided")
 	}
-	return lines, nil
+	return append(lines, "run: "+seconds(decided.Sub(earliest)))
 }
 
 func seconds(duration time.Duration) string {
