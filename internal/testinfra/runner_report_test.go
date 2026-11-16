@@ -257,7 +257,14 @@ func TestResourceRecordSamplesMemoryLoadAndContainers(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), resourceRecordFile)
 	stop := recordResources(path, 20*time.Millisecond)
-	time.Sleep(time.Second)
+	// Two samples before the stop come from the start and the interval; the
+	// stop adds the last one.
+	for body, _ := os.ReadFile(path); bytes.Count(body, []byte("\n")) < 2; body, _ = os.ReadFile(path) {
+		if ctx.Err() != nil {
+			t.Fatalf("the record holds %q; want two samples before its stop", body)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	stop()
 	body, err := os.ReadFile(path)
 	if err != nil {
