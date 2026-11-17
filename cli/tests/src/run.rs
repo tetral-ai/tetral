@@ -298,7 +298,9 @@ pub struct RunningChild {
     blocked_stderr: Option<std::fs::File>,
     input: Option<Input>,
     output_limit: usize,
-    exit_noted: bool,
+    /// Set once the test has reaped the process and noted its exit.
+    exit_noted: Arc<AtomicBool>,
+    _at_failure: timeline::Registered,
     _sockets: SocketContext,
 }
 
@@ -312,6 +314,16 @@ impl RunningChild {
         blocked_stderr: Option<std::fs::File>,
         output_limit: usize,
     ) -> Self {
+        let exit_noted = Arc::new(AtomicBool::new(false));
+        let at_failure = {
+            let (pid, exit_noted) = (child.id(), exit_noted.clone());
+            timeline::at_failure(&label, move || timeline::AtFailure {
+                lines: unnoticed_exit(pid, &exit_noted)
+                    .map(|line| vec![(timeline::now(), line)])
+                    .unwrap_or_default(),
+                files: Vec::new(),
+            })
+        };
         let mut running = Self {
             child,
             label,
@@ -320,7 +332,8 @@ impl RunningChild {
             blocked_stderr,
             input: None,
             output_limit,
-            exit_noted: false,
+            exit_noted,
+            _at_failure: at_failure,
             _sockets: sockets,
         };
         running.stdout = Some(Reader::start(
@@ -368,7 +381,7 @@ impl RunningChild {
 
     /// Notes the exit once, at the first wait that sees it.
     fn exited(&mut self, status: ExitStatus) {
-        if !std::mem::replace(&mut self.exit_noted, true) {
+        if !self.exit_noted.swap(true, Ordering::SeqCst) {
             timeline::note(&self.label, format!("exits: {status}"));
         }
     }
@@ -412,6 +425,33 @@ impl Drop for RunningChild {
         // Worker drops cancel nonblocking operations before joining; inherited
         // pipe handles cannot leave a reader or stdin writer waiting forever.
     }
+}
+
+/// At a failure, whether the process `pid` still runs or has exited without
+/// the test having waited for it, read without reaping it, so its pid stays
+/// its own; nothing once the test has reaped it.
+fn unnoticed_exit(pid: u32, exit_noted: &AtomicBool) -> Option<String> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    if exit_noted.load(Ordering::SeqCst) {
+        return None;
+    }
+    let pid = Pid::from_raw(i32::try_from(pid).ok()?)?;
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    Some(match waitid(WaitId::Pid(pid), options) {
+        Ok(None) => "still runs".to_owned(),
+        Ok(Some(status)) => {
+            let raw = match (status.exit_status(), status.terminating_signal()) {
+                (Some(code), _) => code << 8,
+                (None, Some(signal)) => signal | if status.dumped() { 0x80 } else { 0 },
+                (None, None) => return Some("has changed state without exiting".to_owned()),
+            };
+            format!(
+                "has exited, before the test waited for it: {}",
+                <ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(raw)
+            )
+        }
+        Err(error) => format!("cannot be asked whether it has exited: {error}"),
+    })
 }
 
 /// Waits for a started process and collects output already being drained.

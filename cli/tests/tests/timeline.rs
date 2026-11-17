@@ -3,12 +3,14 @@
 //! the test process's.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, waitid};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::{
     CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, seconds,
 };
+use tetral_tests::run::Tetral;
 use tetral_tests::{record, timeline};
 
 #[test]
@@ -16,7 +18,7 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
  {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a worker's panic and then the test's, after an App Server connected to the reference control server and the test moved its clock",
+        "a worker's panic and then the test's, after an App Server connected to the reference control server, the test moved its clock and another process it started was killed",
     );
     let directory = tempfile::tempdir().unwrap();
     let engine = one_credential_engine();
@@ -35,6 +37,16 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
         )
     });
     machine.advance(seconds(1.5));
+    let sleeper = Tetral::at(Path::new("/bin/sleep"), ["600"]).spawn();
+    let pid = Pid::from_raw(sleeper.id() as i32).unwrap();
+    kill_process(pid, Signal::KILL).unwrap();
+    // Waits for its exit and leaves it unreaped, as a test that never
+    // looked at the process would.
+    waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+    )
+    .unwrap();
     let worker = std::thread::Builder::new()
         .name("worker".to_owned())
         .spawn(|| panic!("a deliberate failure in the worker"))
@@ -70,6 +82,7 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
     let answered = first("reference 1", "POST /v1/client/ready ends with status 200");
     let stream = first("reference 1", "GET /v1/client/events");
     let moved = first("seams 1", "the test moves the clock by 1.5s to 1001.500 s");
+    let started = first("sleep 600 1", "starts as process");
     let in_the_worker = first(
         "test",
         "thread 'worker' panics: panicked at tests/tests/timeline.rs",
@@ -85,9 +98,9 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
         lines.windows(2).all(|pair| pair[0].0 <= pair[1].0),
         "the lines are in the order of their times:\n{timeline}"
     );
-    assert!(stream < ready && ready < answered && answered < moved && moved < in_the_worker);
+    assert!(stream < ready && ready < answered && answered < moved && moved < started);
     assert!(connected < moved);
-    assert!(in_the_worker < on_its_join);
+    assert!(started < in_the_worker && in_the_worker < on_its_join);
     assert!(
         lines[in_the_worker]
             .1
@@ -100,6 +113,13 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
         "the open stream is listed as served at the failure"
     );
     assert!(first("seams 1", "stands at 1001.500 s") > on_its_join);
+    assert!(first("tetral server run 1", "still runs") > on_its_join);
+    assert!(
+        first(
+            "sleep 600 1",
+            "has exited, before the test waited for it: signal: 9"
+        ) > on_its_join
+    );
     assert!(
         both["traffic"]
             .as_array()
@@ -110,11 +130,12 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
                 && entry["status"] == 200)
     );
     assert_eq!(both["state"]["connections"][0]["ready_accepted"], true);
+    drop(sleeper);
     for suffix in ["timeline.log", "reference-1.json"] {
         std::fs::remove_file(path(suffix)).unwrap();
     }
     case.observe(
-        "the timeline held the App Server's connection.state_changed, the ready's arrival and its 200, the open stream, the clock's step, and the worker's panic and then the test's on its join, each with its thread, in that order; the reference control server's file held its traffic and state",
+        "the timeline held the App Server's connection.state_changed, the ready's arrival and its 200, the open stream, the clock's step, the start of the killed process, the worker's panic and then the test's on its join, each with its thread; at the failure, the App Server still ran and the killed process had exited by signal 9; the reference control server's file held its traffic and state",
     );
     case.pass();
 }

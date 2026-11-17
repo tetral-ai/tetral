@@ -110,17 +110,17 @@ the isolated harness tests without starting the CLI.
 - A test that fails leaves, beside its acceptance record, what the other
   processes saw (`timeline`): `<record>.timeline.log` holds, at their times
   since the test's start, each line of stdout and stderr of each process
-  started through `run::Tetral`, its start, and its exit as the test saw it;
-  each control the test sent the reference control server; each request on
-  Engine's side at its arrival and how it ended, as far as that server could
-  know; each request the Git server answered; each step of a seam clock,
-  each barrier a process waited at and each count it reported; and each
-  panic with its thread. The
+  started through `run::Tetral`, its start, and its exit as the test saw it
+  or, at the failure, whether it still ran; each control the test sent the
+  reference control server; each request on Engine's side at its arrival and
+  how it ended, as far as that server could know; each request the Git
+  server answered; each step of a seam clock, each barrier a process waited
+  at and each count it reported; and each panic with its thread. The
   reference control server's and the Git server's own stderr go to the
   console instead. `<record>.reference-<n>.json` holds that server's traffic
-  and state at the failure. The harness writes them from a panic hook, so a test needs no code
-  of its own for them, and prints where they are and the timeline's last
-  lines.
+  and state at the failure. The harness writes them from a panic hook, so a
+  test needs no code of its own for them, and prints where they are and the
+  timeline's last lines.
 
 ## Where things are
 
