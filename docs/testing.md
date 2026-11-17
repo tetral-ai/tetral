@@ -249,9 +249,13 @@ when that test has failed by the fixture's `Close`, each container's log is kept
 in `container-logs/<test>/<image>-<container>.log` of the run's evidence (the
 runner names the directory in `TETRAL_TEST_EVIDENCE_DIR`; outside the runner
 nothing is kept). A test process that `go test -timeout` or a signal ended runs
-no cleanup, so its containers outlive it; whoever removes them as orphans, a
-later fixture of the run or the end of a failed run, first keeps each log in
-`container-logs/orphaned/<image>-<container>.log`.
+no cleanup, so its containers outlive it. Each container created in a test
+process of a run carries the run's evidence directory as a label, and whichever
+process collects it as an orphan (a later fixture or dependency start, or the
+end of a failed run) first keeps its log there, in
+`container-logs/orphaned/<image>-<container>.log`. When collectors of several
+processes reach the same orphan, the first complete read is kept; a read that
+failed keeps nothing.
 
 Every run also writes `resources.jsonl` into its evidence: one JSON line at its
 start, every 15 seconds and at its end, with the host's available and total

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -783,28 +784,46 @@ func TestFailedRunKeepsItsDependencyContainersLogs(t *testing.T) {
 
 // A test process that go test -timeout ended ran none of its cleanups, so its
 // fixture's container outlives it with the only record of what it was doing.
+// Other processes of a run collect orphans too, at any moment; whichever does
+// keeps the log in the evidence of the run the container names.
 func TestFailedRunKeepsTheLogsOfContainersItsEndedTestsLeft(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	output := t.TempDir()
+	// The owner stands in for the test process: alive while its container
+	// starts and logs, then ended without cleanup.
+	owner := exec.Command("sleep", "600")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Process.Kill(); _ = owner.Wait() })
 	name, err := dependencyContainerName("orphan-log-proof")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = removeContainer(context.Background(), name) })
-	if err := runQuiet(ctx, "docker", "run", "-d", "--name", name,
-		"--label", "tetral.test.owner=testinfra",
-		"--label", "tetral.test.owner-pid=999999999",
-		"--label", "tetral.test.owner-start=dead",
-		postgresImage, "sh", "-c", "echo orphan-cause; sleep 300"); err != nil {
+	arguments := slices.Concat([]string{"run", "-d", "--name", name},
+		ownerLabels("orphan-log-proof", "ended-test", owner.Process.Pid, processStartIdentity(owner.Process.Pid), output),
+		[]string{postgresImage, "sh", "-c", "echo orphan-cause; sleep 300"})
+	if err := runQuiet(ctx, "docker", arguments...); err != nil {
 		t.Fatal(err)
 	}
+	for logs, _ := commandOutput(ctx, "docker", "logs", name); !strings.Contains(logs, "orphan-cause"); logs, _ = commandOutput(ctx, "docker", "logs", name) {
+		if ctx.Err() != nil {
+			t.Fatalf("the container never logged its line: %q", logs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := owner.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = owner.Wait()
 	root := t.TempDir()
 	writeTestFile(t, root, "go.mod", "module example.com/failing\n\ngo 1.26\n")
 	if err := os.Mkdir(filepath.Join(root, "failing"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeTestFile(t, root, "failing/failing_test.go", "package failing\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"deliberate failure\") }\n")
-	output := t.TempDir()
 	plan := Plan{Profile: ProfileFast, Selections: []Selection{{Group: "go", Packages: []string{"./failing"}, Tests: []string{"TestFails"}}}}
 	if result, err := Execute(ctx, plan, RunOptions{Root: root, OutputDir: output}); err == nil || result.Status != "fail" {
 		t.Fatalf("run = %s, %v; want a failed run", result.Status, err)
