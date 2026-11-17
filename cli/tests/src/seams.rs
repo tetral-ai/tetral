@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,10 @@ const PROTOCOL: &str = "TETRAL_TEST_SEAMS_V1";
 /// bounds a wait for something that must happen, never one for something
 /// that must not.
 pub const WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long a failure's records wait for the clock's state, which the
+/// harness's threads each hold only briefly.
+const STANDING_WAIT: Duration = Duration::from_millis(100);
 
 /// The clock of a process under test, its barriers and its counters.
 pub struct Seams {
@@ -87,37 +91,8 @@ impl Seams {
             let Some(shared) = standing.upgrade() else {
                 return timeline::AtFailure::default();
             };
-            let state = shared.lock();
-            let sorted = |map: &HashMap<String, u64>| {
-                map.iter()
-                    .filter(|(_, count)| **count > 0)
-                    .map(|(name, count)| format!("{name}={count}"))
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let waiting: HashMap<String, u64> = state
-                .waiting
-                .iter()
-                .map(|(name, count)| (name.clone(), *count as u64))
-                .collect();
-            let mut held: Vec<&String> = state.held.iter().collect();
-            held.sort();
             timeline::AtFailure {
-                lines: vec![(
-                    timeline::now(),
-                    format!(
-                        "stands at {}; held barriers [{}]; waiting [{}]; counters [{}]",
-                        shared.time(state.clock),
-                        held.iter()
-                            .map(|name| name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        sorted(&waiting),
-                        sorted(&state.counters)
-                    ),
-                )],
+                lines: vec![(timeline::now(), shared.standing())],
                 files: Vec::new(),
             }
         });
@@ -277,6 +252,52 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The clock, barriers and counters as they stand, for a failure's
+    /// records. It never blocks: the panicking thread may hold the state.
+    fn standing(&self) -> String {
+        let deadline = Instant::now() + STANDING_WAIT;
+        let state = loop {
+            match self.state.try_lock() {
+                Ok(state) => break state,
+                Err(TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return format!(
+                        "its state stayed held for {STANDING_WAIT:?}, by the panicking thread or another, so its standing is not known"
+                    );
+                }
+            }
+        };
+        let sorted = |map: &HashMap<String, u64>| {
+            map.iter()
+                .filter(|(_, count)| **count > 0)
+                .map(|(name, count)| format!("{name}={count}"))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let waiting: HashMap<String, u64> = state
+            .waiting
+            .iter()
+            .map(|(name, count)| (name.clone(), *count as u64))
+            .collect();
+        let mut held: Vec<&String> = state.held.iter().collect();
+        held.sort();
+        format!(
+            "stands at {}; held barriers [{}]; waiting [{}]; counters [{}]",
+            self.time(state.clock),
+            held.iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            sorted(&waiting),
+            sorted(&state.counters)
+        )
+    }
+
     /// `clock` as the timeline shows it: its time and its distance from the
     /// start.
     fn time(&self, clock: Duration) -> String {
@@ -373,5 +394,32 @@ impl Shared {
         if held {
             timeline::note(&self.label, format!("process {pid} passes barrier {name}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_reads_the_clock_without_waiting_for_a_held_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let seams = Seams::serve(directory.path(), Duration::from_secs(1000));
+        let (taken, held) = std::sync::mpsc::channel();
+        let shared = seams.shared.clone();
+        let holder = thread::spawn(move || {
+            let _state = shared.lock();
+            taken.send(()).unwrap();
+            thread::sleep(STANDING_WAIT * 3);
+        });
+        held.recv().unwrap();
+        let while_held = seams.shared.standing();
+        holder.join().unwrap();
+        assert!(
+            while_held.contains("its standing is not known"),
+            "{while_held}"
+        );
+        let after = seams.shared.standing();
+        assert!(after.starts_with("stands at 1000.000 s"), "{after}");
     }
 }
