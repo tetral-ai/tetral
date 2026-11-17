@@ -406,14 +406,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let seams = Seams::serve(directory.path(), Duration::from_secs(1000));
         let (taken, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
         let shared = seams.shared.clone();
         let holder = thread::spawn(move || {
             let _state = shared.lock();
             taken.send(()).unwrap();
-            thread::sleep(STANDING_WAIT * 3);
+            let _ = released.recv();
         });
         held.recv().unwrap();
         let while_held = seams.shared.standing();
+        release.send(()).unwrap();
         holder.join().unwrap();
         assert!(
             while_held.contains("its standing is not known"),
