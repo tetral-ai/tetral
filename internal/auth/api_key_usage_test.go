@@ -366,13 +366,19 @@ func TestAPIKeyUsageWorkerAndAdmissionContention(t *testing.T) {
 			t.Fatal("cancelled worker transaction committed usage")
 		}
 		requireUsageCounters(t, r, map[string]uint64{"unconfirmed": 1})
+		var record map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+			t.Fatalf("expected exactly one failure warning: %v", err)
+		}
 		// The cause is the expired deadline as the commit reports it: the
-		// context's error, unless database/sql's own rollback at the deadline
-		// ran first and the commit finds the transaction done.
-		expired := strings.Contains(logs.String(), `"error.message":"context deadline exceeded"`)
-		rolledBack := strings.Contains(logs.String(), `"error.message":"sql: transaction has already been committed or rolled back"`)
-		if strings.Count(logs.String(), `"failed.count":1`) != 1 || expired == rolledBack {
-			t.Fatalf("failure warning=%s", logs.String())
+		// context's error, in database/sql's words or, when database/sql checks
+		// before the expiry has reached the transaction's own context, in pgx's;
+		// or, when database/sql's own rollback at the deadline ran first, the
+		// transaction it ended.
+		cause, _ := record["error.message"].(string)
+		if record["msg"] != "auth.api_key_usage.failed" || record["failed.count"] != float64(1) ||
+			!strings.HasSuffix(cause, context.DeadlineExceeded.Error()) && cause != sql.ErrTxDone.Error() {
+			t.Fatalf("failure warning=%v", record)
 		}
 	})
 	t.Run("SaturatedPoolAcquisitionTimesOut", func(t *testing.T) {
