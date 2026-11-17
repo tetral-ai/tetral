@@ -489,7 +489,18 @@ func dependencyContainerLabels(kind, runID string) []string {
 	}
 }
 
+// cleanupOrphanedDependencyContainers removes the containers whose owner
+// process is gone. In a test process of a run, each keeps its log in the
+// run's evidence first.
 func cleanupOrphanedDependencyContainers(ctx context.Context) error {
+	return collectOrphanedContainers(ctx, os.Getenv(EnvTestEvidenceDir))
+}
+
+// collectOrphanedContainers removes the containers whose owner process is
+// gone, a test process that go test -timeout or a signal ended before its
+// cleanup ran. When evidence is set, each container's log is kept beneath it
+// first, as container-logs/orphaned/<image>-<container>.log.
+func collectOrphanedContainers(ctx context.Context, evidence string) error {
 	output, err := commandOutput(ctx, "docker", "ps", "-aq", "--filter", "label=tetral.test.owner=testinfra")
 	if err != nil {
 		return fmt.Errorf("list owned test dependency containers: %w", err)
@@ -512,6 +523,14 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 		pid, err := strconv.Atoi(strings.TrimSpace(pidText))
 		if err != nil || processIdentityAlive(pid, strings.TrimSpace(started)) {
 			continue
+		}
+		if evidence != "" {
+			if identity, err := commandOutput(ctx, "docker", "inspect", "--format", "{{.Config.Image}} {{.Name}}", container); err == nil {
+				if image, name, found := strings.Cut(strings.TrimSpace(identity), " "); found {
+					name = strings.TrimPrefix(name, "/")
+					saveContainerLog(ctx, name, filepath.Join(evidence, "container-logs", "orphaned", imageName(image)+"-"+name+".log"))
+				}
+			}
 		}
 		if err := removeContainer(ctx, container); err != nil {
 			if removed, checkErr := waitDockerResourceRemoved(ctx, "container", "id", container); checkErr == nil && removed {

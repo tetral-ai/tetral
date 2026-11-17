@@ -778,3 +778,41 @@ func TestFailedRunKeepsItsDependencyContainersLogs(t *testing.T) {
 		t.Fatalf("the test was not told the evidence directory %s: %v", output, err)
 	}
 }
+
+// A test process that go test -timeout ended ran none of its cleanups, so its
+// fixture's container outlives it with the only record of what it was doing.
+func TestFailedRunKeepsTheLogsOfContainersItsEndedTestsLeft(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	name, err := dependencyContainerName("orphan-log-proof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = removeContainer(context.Background(), name) })
+	if err := runQuiet(ctx, "docker", "run", "-d", "--name", name,
+		"--label", "tetral.test.owner=testinfra",
+		"--label", "tetral.test.owner-pid=999999999",
+		"--label", "tetral.test.owner-start=dead",
+		postgresImage, "sh", "-c", "echo orphan-cause; sleep 300"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/failing\n\ngo 1.26\n")
+	if err := os.Mkdir(filepath.Join(root, "failing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, root, "failing/failing_test.go", "package failing\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"deliberate failure\") }\n")
+	output := t.TempDir()
+	plan := Plan{Profile: ProfileFast, Selections: []Selection{{Group: "go", Packages: []string{"./failing"}, Tests: []string{"TestFails"}}}}
+	if result, err := Execute(ctx, plan, RunOptions{Root: root, OutputDir: output}); err == nil || result.Status != "fail" {
+		t.Fatalf("run = %s, %v; want a failed run", result.Status, err)
+	}
+	path := filepath.Join(output, "container-logs", "orphaned", "postgres-"+name+".log")
+	body, err := os.ReadFile(path) //nolint:gosec // The path is beneath this test's directory.
+	if err != nil || !strings.Contains(string(body), "orphan-cause") {
+		t.Fatalf("log %s = %q, %v; want the orphan's own line", path, body, err)
+	}
+	if exists, err := dockerResourceExists(ctx, "container", "name", "^"+name+"$"); err != nil || exists {
+		t.Fatalf("the orphan remained after its log was kept: %v, %v", exists, err)
+	}
+}

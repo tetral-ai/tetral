@@ -108,6 +108,11 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 
 	if runErr != nil {
 		dependencies.saveLogs(options.OutputDir)
+		// A test process that its timeout or a signal ended left its
+		// fixtures' containers behind; they keep their logs here too.
+		orphanCtx, cancelOrphans := context.WithTimeout(context.Background(), dependencyStopTimeout)
+		_ = collectOrphanedContainers(orphanCtx, options.OutputDir)
+		cancelOrphans()
 	}
 	teardownStart := time.Now()
 	stopErr := dependencies.stopBounded()

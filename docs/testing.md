@@ -248,7 +248,10 @@ starts containers through `testinfra.NewDockerResources` passes itself to it;
 when that test has failed by the fixture's `Close`, each container's log is kept
 in `container-logs/<test>/<image>-<container>.log` of the run's evidence (the
 runner names the directory in `TETRAL_TEST_EVIDENCE_DIR`; outside the runner
-nothing is kept).
+nothing is kept). A test process that `go test -timeout` or a signal ended runs
+no cleanup, so its containers outlive it; whoever removes them as orphans, a
+later fixture of the run or the end of a failed run, first keeps each log in
+`container-logs/orphaned/<image>-<container>.log`.
 
 Every run also writes `resources.jsonl` into its evidence: one JSON line at its
 start, every 15 seconds and at its end, with the host's available and total
