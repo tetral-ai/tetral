@@ -52,12 +52,8 @@ type ScheduledRun struct {
 	// schedules can run different jobs, so each has its own issue.
 	Schedule string
 	// Reporter is the reporting job's own name, left out of the jobs it reads.
-	Reporter string
-	// Current holds the issue title of every schedule that the repository's
-	// workflows declare at the run's commit. An open issue whose title is not
-	// among them belongs to a schedule that was renamed or removed, and no run
-	// would ever close it.
-	Current []string
+	Reporter       string
+	DeclaredTitles []string
 }
 
 // ScheduledIssueTitle is the exact title of the issue of a workflow's
@@ -80,7 +76,7 @@ const scheduledIssueTitlePrefix = "Scheduled check red on main: "
 // schedule's issue.
 func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error) {
 	title := ScheduledIssueTitle(run.Workflow, run.Schedule)
-	if !slices.Contains(run.Current, title) {
+	if !slices.Contains(run.DeclaredTitles, title) {
 		return "", fmt.Errorf("the repository's workflows declare no schedule titled %q", title)
 	}
 	jobs, err := api.Jobs()
@@ -128,7 +124,7 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 		switch {
 		case issue.Title == title:
 			number = issue.Number
-		case strings.HasPrefix(issue.Title, scheduledIssueTitlePrefix) && !slices.Contains(run.Current, issue.Title):
+		case strings.HasPrefix(issue.Title, scheduledIssueTitlePrefix) && !slices.Contains(run.DeclaredTitles, issue.Title):
 			if err := api.Comment(issue.Number, "No workflow of this repository declares this schedule any more, so no run will report on it.\n"); err != nil {
 				return "", err
 			}

@@ -109,7 +109,7 @@ func main() {
 		if err != nil {
 			fail(1, err.Error())
 		}
-		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, Schedule: *schedule, URL: *runURL, Commit: *commit, Reporter: *reporter, Current: current})
+		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, Schedule: *schedule, URL: *runURL, Commit: *commit, Reporter: *reporter, DeclaredTitles: current})
 		if err != nil {
 			fail(1, err.Error())
 		}

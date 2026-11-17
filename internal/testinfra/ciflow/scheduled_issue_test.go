@@ -64,7 +64,7 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 	weekly := ScheduledIssue{Number: 5, Title: ScheduledIssueTitle("Scheduled Verification", "17 7 * * 1")}
 	open := []ScheduledIssue{{Number: 3, Title: "Scheduled check red on main: engine-vulncheck (23 6 * * *)"}, {Number: 9, Title: title}}
 	current := []string{title, weekly.Title, open[0].Title}
-	run := ScheduledRun{Workflow: "Scheduled Verification", Schedule: "41 6 * * *", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter, Current: current}
+	run := ScheduledRun{Workflow: "Scheduled Verification", Schedule: "41 6 * * *", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter, DeclaredTitles: current}
 	// A workflow's cron was edited: no run carries the old one any more.
 	removed := ScheduledIssue{Number: 4, Title: ScheduledIssueTitle("Scheduled Verification", "41 5 * * *")}
 	coverage := ScheduledJob{ID: 2, Name: "Report-only Coverage", Conclusion: "cancelled"}
@@ -163,7 +163,7 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 			api := &issueAPIStandIn{jobs: row.jobs, logs: logs, annotations: map[int64][]ScheduledAnnotation{2: row.annotations}, unreadable: row.unreadable, issues: row.issues}
 			run := run
 			if row.current != nil {
-				run.Current = row.current
+				run.DeclaredTitles = row.current
 			}
 			did, err := ReportScheduledRun(api, run)
 			failure := ""
