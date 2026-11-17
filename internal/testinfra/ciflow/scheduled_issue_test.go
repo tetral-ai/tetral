@@ -60,11 +60,11 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 	}
 	logs := map[int64]string{
 		1: "2026-11-16T06:41:12.0000000Z Vulnerability #1: GO-2026-4100\n2026-11-16T06:41:12.0000000Z   More info: GO-2026-4100\nGHSA-2c2m-3v8f-9x7q in bun audit\n",
-		4: "--- FAIL: TestPostgreSQLRuntimeContextRecovery (3.20s)\n    --- FAIL: TestPostgreSQLRuntimeContextRecovery/resume (1.00s)\n(fail) gateway > routes a stream [12.00ms]\n",
+		4: "--- FAIL: TestPostgreSQLRuntimeContextRecovery (3.20s)\n    --- FAIL: TestPostgreSQLRuntimeContextRecovery/resume (1.00s)\n",
 	}
 	failedBody := "Scheduled run https://github.com/o/r/actions/runs/7 of Scheduled Verification on commit abc123 failed.\n\n" +
 		"- Dependency Advisories: `GO-2026-4100`, `GHSA-2c2m-3v8f-9x7q`\n" +
-		"- Compatibility and Repository Health: `TestPostgreSQLRuntimeContextRecovery`, `TestPostgreSQLRuntimeContextRecovery/resume`, `gateway > routes a stream`\n"
+		"- Compatibility and Repository Health: `TestPostgreSQLRuntimeContextRecovery`, `TestPostgreSQLRuntimeContextRecovery/resume`\n"
 	green := []ScheduledJob{
 		{ID: 1, Name: "Dependency Advisories", Conclusion: "success"},
 		{ID: 5, Name: "Repeated Concurrency Owners", Conclusion: "skipped"},

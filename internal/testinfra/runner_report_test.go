@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/testinfra/ciflow"
 )
 
 func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
@@ -336,16 +337,26 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 	// printf spells the command's own summary entry, so the command line in
 	// the excerpt header does not contain it.
 	const commandWrite = "step command wrote the summary"
+	// cause is what a scheduled run's issue names when the job log holds this
+	// excerpt.
 	for _, tc := range []struct {
 		name, kind, diagnostic string
 		rejectSkip             bool
 		want, absent           []string
+		cause                  string
 	}{
 		{
 			name: "go test JSON", kind: "go-json", diagnostic: goReport,
 			want:   []string{"    broken_test.go:9: deadline: context canceled", "--- FAIL: TestBroken (0.08s)", "FAIL\texample/pkg\t0.1s"},
 			absent: []string{"passing noise", `"Action"`},
+			cause:  "`TestBroken`",
 		},
+		{
+			name: "bun test", diagnostic: "bun test v1.3.14\n\ngateway.test.ts:\n(pass) gateway > accepts a stream [3.00ms]\n(fail) gateway > routes a stream [12.00ms]\n\n 1 pass\n 1 fail\n",
+			want:  []string{"(fail) gateway > routes a stream [12.00ms]"},
+			cause: "`gateway > routes a stream`",
+		},
+
 		{
 			name: "rejected Go test skip", kind: "go-json", diagnostic: skipReport, rejectSkip: true,
 			want:   []string{"    fixture_test.go:3: NATS fixture is not provisioned", "--- SKIP: TestNeedsFixture (0.00s)"},
@@ -412,6 +423,13 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 			for _, line := range printed[min(2, len(printed)):] {
 				if !strings.HasPrefix(line, "  | ") {
 					t.Errorf("job log line %q lacks the excerpt prefix", line)
+				}
+			}
+			if tc.cause != "" {
+				// GitHub writes each line of the job log behind a timestamp.
+				jobLog := "2026-11-16T06:41:12.0000000Z " + strings.Join(printed, "\n2026-11-16T06:41:12.0000000Z ")
+				if cause := ciflow.JobCause(jobLog); cause != tc.cause {
+					t.Errorf("the job log's cause = %s; want %s", cause, tc.cause)
 				}
 			}
 		})

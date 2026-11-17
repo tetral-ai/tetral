@@ -119,6 +119,8 @@ var (
 	logTimestamp  = regexp.MustCompile(`^\d{4}-\d\d-\d\dT[\d:.]+Z `)
 	failedGoTest  = regexp.MustCompile(`--- FAIL: (\S+)`)
 	failedBunTest = regexp.MustCompile(`^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$`)
+	// The runner prints a failed step's diagnostic lines behind this prefix.
+	excerptPrefix = regexp.MustCompile(`^\|\s?`)
 	// The IDs the advisory producers report: govulncheck's GO-, bun audit's
 	// GHSA- and cargo-deny's RUSTSEC-. cargo-deny also names a CVE in an
 	// advisory's title and announcement; the advisory's own ID is the cause.
@@ -149,7 +151,7 @@ func JobCause(log string) string {
 		if match := failedGoTest.FindStringSubmatch(line); match != nil {
 			add(match[1])
 		}
-		if match := failedBunTest.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
+		if match := failedBunTest.FindStringSubmatch(excerptPrefix.ReplaceAllString(strings.TrimSpace(line), "")); match != nil {
 			add(match[1])
 		}
 		if match := apparatusCause.FindStringSubmatch(line); match != nil {
