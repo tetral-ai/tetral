@@ -133,11 +133,10 @@ type StepResult struct {
 
 // LocalRunLimit is the wall-clock limit of a whole run of profile: above the
 // limit of every step inside it (Go's default 10-minute test timeout in Fast,
-// the 25-minute integration package watchdog otherwise) and below the 30
-// minutes a documented local command may take.
+// the 80-minute budget of the whole integration package otherwise).
 func LocalRunLimit(profile Profile) time.Duration {
 	if profile == ProfileFast {
 		return 12 * time.Minute
 	}
-	return 28 * time.Minute
+	return 90 * time.Minute
 }

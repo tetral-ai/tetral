@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import type { SchemaSQL } from "../../../schema/src/verify.js";
 import {
 	SchemaVerificationError,
@@ -238,6 +238,29 @@ describe("provider-gateway schema verification", () => {
 			verify: async () => { throw new Error("connect ECONNREFUSED 10.0.0.7:5432"); },
 		}).then(() => undefined, (error: unknown) => error);
 		expect(causeOf(failure)).toEqual(causeOf("database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"));
+	});
+
+	test("a pool whose close never settles still fails verification once the close's time has passed", async () => {
+		jest.useFakeTimers();
+		try {
+			const sql = schemaSQL([], []);
+			sql.close = () => new Promise<void>(() => {});
+			let settled = false;
+			const failure = openPostgresSQLOwner({
+				url: "postgres://gateway", pool: databasePoolDefaults,
+				sqlFactory: () => sql as never,
+				verify: async () => { throw new Error("postgresql runtime role is not permitted"); },
+			}).then(() => undefined, (error: unknown) => error).finally(() => { settled = true; });
+			const turns = async () => { for (let turn = 0; turn < 10; turn++) await Promise.resolve(); };
+			await turns();
+			expect(settled).toBe(false);
+			jest.advanceTimersByTime(2_000);
+			await turns();
+			expect(settled).toBe(true);
+			expect(causeOf(await failure)).toEqual(causeOf("database pool generation verification failed: postgresql runtime role is not permitted"));
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 });
 

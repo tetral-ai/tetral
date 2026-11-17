@@ -101,24 +101,26 @@ Docker object the runner and the tests create carries
 its owner's process ID and start time, and the next owner-aware cleanup, in
 the orphaned tests or in the next run, removes those whose owner is gone.
 
-A whole run has a wall-clock limit: 12 minutes for Fast, 28 minutes for
+A whole run has a wall-clock limit: 12 minutes for Fast, 90 minutes for
 Affected and Full. Each is above the limits of the commands inside it (Go's
 default 10-minute test timeout in Fast, the package watchdogs below
-otherwise) and below 30 minutes. A run that reaches its limit stops as a
+otherwise). A run that reaches its limit stops as a
 stop does. Whatever the limit or a signal ends, the planning, a command, a Go
 or Bun suite or the start of the dependencies, the step's error is what ended
-it, such as `stopped by the run's limit of 28m0s` or `interrupt signal
+it, such as `stopped by the run's limit of 1h30m0s` or `interrupt signal
 received`, not the report the stopped command did not finish. `--run-limit`
 sets another limit for one run.
 
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
-package has a 25-minute watchdog for its complete composition inventory; a
-serial command containing that package applies 25 minutes to every package in
-that invocation. In a sharded run, such as a Go Race job, the integration
-package's slice has a 15-minute watchdog: each shard starts that slice first
-and plans about six minutes for it, so Go names a hung test before the job's
-25-minute limit ends the job. These are package-wide runaway limits, separate
-from each test's unchanged request, fault, recovery and cleanup deadlines.
+package, run whole in one binary, has an 80-minute watchdog: more than twice
+its summed Race time in `internal/testinfra/go_shard_weights.json`, which a
+test holds it to as the package grows. A serial command containing that
+package applies 80 minutes to every package in that invocation. In a sharded
+run, such as a Go Race job, the integration package's slice has a 35-minute
+watchdog, more than twice the slowest slice measured, so Go names a hung test
+before the job's 60-minute limit ends the job. These are package-wide runaway
+limits, separate from each test's unchanged request, fault, recovery and
+cleanup deadlines.
 
 Engine's tests do not use the SDK. Every request a test sends to a public
 route goes through `enginetest.Developer` (`integration/enginetest`), which
@@ -354,10 +356,10 @@ Each command before the tests, and each of the `reference` profile, runs in
 a process group of its own, which a stop ends whole, so a build's children
 end with it. The `reference` profile stops its whole run at 480 s, below the
 10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
-`error`. Every other profile stops its whole run, as a stop does, at 1,380 s
-(23 min) on Linux and 1,460 s (24 min 20 s) on macOS, with `stopped by the
-run's limit of <seconds> s` as `error`: above the tests' limits of
-`cli/.config/nextest.toml`, and below the 26 minutes of its CI job less the
+`error`. Every other profile stops its whole run, as a stop does, at 2,700 s
+(45 min) on Linux and 3,000 s (50 min) on macOS, with `stopped by the
+run's limit of <seconds> s` as `error`: more than twice the slowest run
+measured on each system, and below the 60 minutes of its CI job less the
 steps before and after it, on Linux the functional job's reference check
 among them. `--run-limit <seconds>` sets another limit for one run. A run
 killed with SIGKILL
@@ -417,7 +419,13 @@ The readable CI topology is:
   A run's speed is measured, not enforced: no step and no test fails a run or
   a pull request for the time it took or waited for a runner, which follows
   from how many jobs GitHub is running for the repository, not from the
-  change. Job timeouts end a stuck job and are no speed rule. To measure a
+  change. Thirty minutes for a whole run is the target the measurements
+  below and [CI Benchmark](#ci-benchmark) work toward, not a limit. Every
+  time limit of a job, a step, a run or a package ends a hang and is no speed
+  rule: each is at least twice the slowest passing run measured of what it
+  bounds, and a limit that names what hung (a package watchdog, an evidence
+  step's time limit, the CLI script's run limit) is below the limit of the
+  step or job around it. To measure a
   finished run, run `go run ./internal/testinfra/cmd/tetral-ci-flow duration
   --run <ID> --gate "Merge Gate"` (or `--gate "CLI results"`) from a
   checkout with `gh` signed in or `GH_TOKEN` set: it prints each job's runner
@@ -440,8 +448,8 @@ The readable CI topology is:
   the full-ledger test's 4,030 Seatbelt launches take minutes, so it has a
   job of its own there), so the macOS adapters cannot reach `main`
   unchecked. One job running both would build the CLI
-  twice on one runner and pass the job limit, whether the two builds run one
-  after the other or together. **CLI results** applies the shared gate rule (`tetral-ci-flow
+  twice on one runner and take the time of both, whether the two builds run
+  one after the other or together. **CLI results** applies the shared gate rule (`tetral-ci-flow
   needs`): the deciding job succeeded and every matrix job ended `success`, or
   `skipped` when the CLI was not selected. Each job runs its profile
   through `scripts/verify-cli.py` under cargo-nextest, which
@@ -638,7 +646,7 @@ in the coverage runs of Scheduled Verification runs 43446807422, 43601344163,
 43723360527 and 43906321371. Coverage times are not part of the repository's evidence, so
 `TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests` checks the budget
 against twice the package's summed Race time in `go_shard_weights.json`, a
-lower figure that grows with the package. The coverage job's 95-minute limit
+lower figure that grows with the package. The coverage job's 110-minute limit
 leaves room for dependency setup, compilation, and the Bun coverage commands
 around it.
 

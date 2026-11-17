@@ -37,3 +37,4 @@ state = { workspace = true, features = ["test-seams"] }
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["signal"] }

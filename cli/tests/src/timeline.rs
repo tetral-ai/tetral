@@ -13,6 +13,11 @@
 //! where they are and the timeline's last lines. Under cargo-nextest each test
 //! is a process of its own, so the timeline is the test's.
 //!
+//! A SIGTERM writes the same records and then ends the process: cargo-nextest
+//! stops a test that passes its time limit with one, and kills it ten seconds
+//! later. The lines are written before the live parts are asked, since the
+//! runner stops the processes they would ask in the same moment.
+//!
 //! The drive crate's tests include this file as a module of their support,
 //! so it names nothing else of this package; a test without an acceptance
 //! record gets its records in the acceptance directory under its own name.
@@ -189,6 +194,7 @@ impl Timeline {
                 TIMELINE.write();
             }));
         }
+        write_at_a_stop();
         Timeline {
             start: Instant::now(),
             start_wall: SystemTime::now(),
@@ -232,19 +238,32 @@ impl Timeline {
 
     /// Writes the failure's records, again at each panic, and prints where
     /// they are at the first. A panic whose write is skipped is in the next.
-    // The drive crate's unit tests include this file under its deny of
-    // prints; a failure's notice goes to the test's stderr.
-    #[allow(clippy::print_stderr)]
     fn write(&self) {
         // A panic while the records are written, on this thread or another,
         // leaves them to the write under way.
         let Ok(_writing) = self.writing.try_lock() else {
             return;
         };
-        let parts: Vec<(String, AtFailure)> = lock(&self.parts)
+        self.write_records(&self.ask_parts(), true);
+    }
+
+    fn write_at_a_stop(&self) {
+        let _writing = lock(&self.writing);
+        self.write_records(&[], false);
+        self.write_records(&self.ask_parts(), true);
+    }
+
+    fn ask_parts(&self) -> Vec<(String, AtFailure)> {
+        lock(&self.parts)
             .iter()
             .map(|(label, part)| (label.clone(), part()))
-            .collect();
+            .collect()
+    }
+
+    // The drive crate's unit tests include this file under its deny of
+    // prints; a failure's notice goes to the test's stderr.
+    #[allow(clippy::print_stderr)]
+    fn write_records(&self, parts: &[(String, AtFailure)], announce: bool) {
         let mut rows: Vec<(Duration, String, String)> = Vec::new();
         let dropped = {
             let lines = lock(&self.lines);
@@ -263,7 +282,7 @@ impl Timeline {
             }
             lines.dropped
         };
-        for (label, part) in &parts {
+        for (label, part) in parts {
             for (time, text) in &part.lines {
                 rows.push((*time, label.clone(), text.clone()));
             }
@@ -292,14 +311,14 @@ impl Timeline {
         let name = |suffix: &str| PathBuf::from(format!("{}.{suffix}", stem.display()));
         let mut written = vec![name("timeline.log")];
         let _ = std::fs::write(&written[0], text);
-        for (label, part) in &parts {
+        for (label, part) in parts {
             for (file, contents) in &part.files {
                 let path = name(&format!("{}.{file}", label.replace(' ', "-")));
                 let _ = std::fs::write(&path, contents);
                 written.push(path);
             }
         }
-        if self.printed.swap(true, Ordering::SeqCst) {
+        if !announce || self.printed.swap(true, Ordering::SeqCst) {
             return;
         }
         let mut notice = String::from("the failure's records:\n");
@@ -311,5 +330,41 @@ impl Timeline {
             let _ = writeln!(notice, "  {row}");
         }
         eprint!("{notice}");
+    }
+}
+
+/// Has a SIGTERM write the failure's records and end the process, and
+/// returns once the signal is taken.
+fn write_at_a_stop() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (taken, is_taken) = std::sync::mpsc::channel();
+    let watch = move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build();
+        let stops = runtime.as_ref().ok().and_then(|runtime| {
+            let _entered = runtime.enter();
+            signal(SignalKind::terminate()).ok()
+        });
+        let _ = taken.send(());
+        let (Ok(runtime), Some(mut stops)) = (runtime, stops) else {
+            return;
+        };
+        if runtime.block_on(stops.recv()).is_none() {
+            return;
+        }
+        TIMELINE.push(
+            "test",
+            None,
+            "the runner stops the test with SIGTERM".to_owned(),
+        );
+        TIMELINE.write_at_a_stop();
+        std::process::exit(128 + 15);
+    };
+    let watching = std::thread::Builder::new()
+        .name("timeline stop".to_owned())
+        .spawn(watch);
+    if watching.is_ok() {
+        let _ = is_taken.recv();
     }
 }

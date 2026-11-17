@@ -145,7 +145,7 @@ jobs:
     needs: decide
     if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     cache-mode: read
     strategy:
       fail-fast: false

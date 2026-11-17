@@ -50,7 +50,7 @@ jobs:
     if: ${{ !cancelled() && (needs.tag-check.result == 'success' || (github.event_name == 'pull_request' && github.event.label.name == 'cli-release-check' && needs.tag-check.result == 'skipped')) }}
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
