@@ -1,9 +1,13 @@
 //! The contract of `timeline`: a failing test leaves what the other
-//! processes saw. One test, as the timeline and the failure's records are
-//! the test process's.
+//! processes saw, and so does a test the runner stops. The timeline and the
+//! failure's records are the test process's, so the stopped test is a process
+//! the second test starts.
 
+use std::io::{BufRead, BufReader, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, waitid};
 use tetral_tests::app_server::wait_until;
@@ -136,6 +140,82 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
     }
     case.observe(
         "the timeline held the App Server's connection.state_changed, the ready's arrival and its 200, the open stream, the clock's step, the start of the killed process, the worker's panic and then the test's on its join, each with its thread; at the failure, the App Server still ran and the killed process had exited by signal 9; the reference control server's file held its traffic and state",
+    );
+    case.pass();
+}
+
+const WAITS_FOR_A_STOP: &str = "TETRAL_TEST_WAITS_FOR_A_STOP";
+
+/// The test the next one starts and stops; without its variable it does
+/// nothing.
+#[test]
+fn waits_for_a_stop_helper() {
+    if std::env::var_os(WAITS_FOR_A_STOP).is_none() {
+        return;
+    }
+    timeline::note("test", "waits for the stop");
+    let _part = timeline::at_failure("part 1", || timeline::AtFailure {
+        lines: vec![(timeline::now(), "is asked at the stop".to_owned())],
+        files: vec![("json".to_owned(), "{}".to_owned())],
+    });
+    println!("waiting");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(Duration::from_secs(600));
+}
+
+#[test]
+fn a_test_the_runner_stops_leaves_its_timeline_and_ends_within_the_time_the_runner_leaves() {
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a test that waits with a note on its timeline and a live part, stopped with SIGTERM as cargo-nextest stops a test at its time limit",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "waits_for_a_stop_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(WAITS_FOR_A_STOP, "1")
+        .env(timeline::DIRECTORY_VARIABLE, directory.path())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    assert!(output.any(|line| line.unwrap().contains("waiting")));
+    let stopped = Instant::now();
+    kill_process(Pid::from_raw(child.id() as i32).unwrap(), Signal::TERM).unwrap();
+    let status = child.wait().unwrap();
+    let ended_after = stopped.elapsed();
+
+    let written = |suffix: &str| -> Vec<PathBuf> {
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_string_lossy().ends_with(suffix))
+            .collect()
+    };
+    let timelines = written(".timeline.log");
+    assert_eq!(timelines.len(), 1, "one timeline in {:?}", written(""));
+    let timeline = std::fs::read_to_string(&timelines[0]).unwrap();
+    let line = |text: &str| {
+        timeline
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("no line with {text:?} in\n{timeline}"))
+    };
+    assert!(line("waits for the stop") < line("the runner stops the test with SIGTERM"));
+    line("is asked at the stop");
+    assert_eq!(written(".part-1.json").len(), 1);
+    assert!(!status.success(), "the stopped test ended with {status}");
+    // scripts/verify-cli.py kills the runner five seconds after it stops it.
+    assert!(
+        ended_after < Duration::from_secs(5),
+        "the stopped test ended after {ended_after:?}"
+    );
+    case.observe(
+        "the stopped process left one timeline with its note before the stop, the stop, and the line of its live part, and that part's file; it ended unsuccessfully within five seconds",
     );
     case.pass();
 }

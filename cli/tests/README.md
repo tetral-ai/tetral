@@ -120,7 +120,10 @@ the isolated harness tests without starting the CLI.
   console instead. `<record>.reference-<n>.json` holds that server's traffic
   and state at the failure. The harness writes them from a panic hook, so a
   test needs no code of its own for them, and prints where they are and the
-  timeline's last lines.
+  timeline's last lines. A test the runner stops with SIGTERM, as
+  cargo-nextest does at a test's time limit, leaves the same records: the
+  timeline first, then what the other processes still answer, since the
+  runner stops them in the same moment.
 
 ## Where things are
 
