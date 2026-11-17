@@ -37,11 +37,11 @@ const STANDING_WAIT: Duration = Duration::from_millis(100);
 /// The clock of a process under test, its barriers and its counters.
 pub struct Seams {
     socket: PathBuf,
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     _at_failure: timeline::Registered,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     state: Mutex<State>,
     changed: Condvar,
     /// The file the process under test reads the clock from.
@@ -52,7 +52,7 @@ struct Shared {
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     clock: Duration,
     /// How far tests have moved the clock.
     advanced: Duration,
@@ -246,7 +246,7 @@ impl Drop for Seams {
 }
 
 impl Shared {
-    fn lock(&self) -> MutexGuard<'_, State> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -254,7 +254,7 @@ impl Shared {
 
     /// The clock, barriers and counters as they stand, for a failure's
     /// records. It never blocks: the panicking thread may hold the state.
-    fn standing(&self) -> String {
+    pub(crate) fn standing(&self) -> String {
         let deadline = Instant::now() + STANDING_WAIT;
         let state = loop {
             match self.state.try_lock() {
@@ -394,34 +394,5 @@ impl Shared {
         if held {
             timeline::note(&self.label, format!("process {pid} passes barrier {name}"));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_failure_reads_the_clock_without_waiting_for_a_held_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let seams = Seams::serve(directory.path(), Duration::from_secs(1000));
-        let (taken, held) = std::sync::mpsc::channel();
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let shared = seams.shared.clone();
-        let holder = thread::spawn(move || {
-            let _state = shared.lock();
-            taken.send(()).unwrap();
-            let _ = released.recv();
-        });
-        held.recv().unwrap();
-        let while_held = seams.shared.standing();
-        release.send(()).unwrap();
-        holder.join().unwrap();
-        assert!(
-            while_held.contains("its standing is not known"),
-            "{while_held}"
-        );
-        let after = seams.shared.standing();
-        assert!(after.starts_with("stands at 1000.000 s"), "{after}");
     }
 }

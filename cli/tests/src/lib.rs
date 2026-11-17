@@ -13,6 +13,8 @@ pub mod record;
 pub mod reference;
 pub mod run;
 pub mod seams;
+#[cfg(test)]
+mod seams_tests;
 pub mod sessions;
 pub mod small_volume;
 pub mod snapshot;
