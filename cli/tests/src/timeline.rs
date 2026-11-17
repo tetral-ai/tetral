@@ -107,8 +107,7 @@ pub fn note_repeated(source: &str, key: &str, text: impl Into<String>) {
 }
 
 /// Whether a line from `source` holds `text`.
-#[cfg(test)]
-pub(crate) fn holds(source: &str, text: &str) -> bool {
+pub fn holds(source: &str, text: &str) -> bool {
     lock(&TIMELINE.lines)
         .kept
         .iter()

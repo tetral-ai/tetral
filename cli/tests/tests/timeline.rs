@@ -1,17 +1,20 @@
 //! The contract of `timeline`: a failing test leaves what the other
-//! processes saw.
+//! processes saw. One test, as the timeline and the failure's records are
+//! the test process's.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 
-use crate::app_server::wait_until;
-use crate::machine::{
+use tetral_tests::app_server::wait_until;
+use tetral_tests::machine::{
     CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, seconds,
 };
+use tetral_tests::{record, timeline};
 
 #[test]
 fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_clock_on_one_timeline()
  {
-    let record = crate::record!();
+    let record = tetral_tests::record!();
     let mut case = record.case(
         "a panic after an App Server connected to the reference control server and the test moved its clock",
     );
@@ -26,7 +29,7 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
     // The status reads "online" before the App Server's log line has come
     // through its stderr pipe.
     wait_until("the App Server's connection line on the timeline", || {
-        crate::timeline::holds(
+        timeline::holds(
             "tetral server run 1 stderr",
             r#""event":"connection.state_changed""#,
         )
@@ -35,8 +38,8 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
     let failed = catch_unwind(AssertUnwindSafe(|| panic!("a deliberate failure")));
     assert!(failed.is_err());
 
-    let stem = crate::record::current().unwrap().with_extension("");
-    let path = |suffix: &str| std::path::PathBuf::from(format!("{}.{suffix}", stem.display()));
+    let stem = record::current().unwrap().with_extension("");
+    let path = |suffix: &str| PathBuf::from(format!("{}.{suffix}", stem.display()));
     let timeline = std::fs::read_to_string(path("timeline.log")).unwrap();
     let both: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path("reference-1.json")).unwrap()).unwrap();
@@ -81,7 +84,9 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
             .as_array()
             .unwrap()
             .iter()
-            .any(|entry| entry["path"] == "/v1/client/ready" && entry["status"] == 200)
+            .any(|entry| entry["path"] == "/v1/client/ready"
+                && entry["outcome"] == "answered"
+                && entry["status"] == 200)
     );
     assert_eq!(both["state"]["connections"][0]["ready_accepted"], true);
     for suffix in ["timeline.log", "reference-1.json"] {
