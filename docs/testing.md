@@ -241,12 +241,12 @@ fails with an error that names the program and its subcommand and ends with up
 to the last 20 lines it wrote to standard error, so a failed plan or setup shows
 its own cause in the console and in `result.json`.
 
-A run whose steps failed keeps the whole log of each dependency container it
-started (PostgreSQL, MinIO, NATS, ...) in `dependency-logs/` of its evidence,
-before it removes them. A test that starts containers through
-`testinfra.NewDockerResources` passes itself to it; when that test has failed by
-the fixture's `Close`, each container's log is kept in
-`container-logs/<test>/<image>-<container>.log` of the run's evidence (the
+A run whose steps failed, or whose dependency did not become ready, keeps the
+whole log of each dependency container it started (PostgreSQL, MinIO, NATS,
+...) in `dependency-logs/` of its evidence, before it removes them. A test that
+starts containers through `testinfra.NewDockerResources` passes itself to it;
+when that test has failed by the fixture's `Close`, each container's log is kept
+in `container-logs/<test>/<image>-<container>.log` of the run's evidence (the
 runner names the directory in `TETRAL_TEST_EVIDENCE_DIR`; outside the runner
 nothing is kept).
 

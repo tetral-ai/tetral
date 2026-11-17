@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
 func TestFastPlanStartsNoDurableDependency(t *testing.T) {
@@ -139,6 +142,39 @@ func TestNextRunnerRemovesDependencyContainerOwnedByDeadProcess(t *testing.T) {
 	}
 	if strings.TrimSpace(output) != "" {
 		t.Fatal("dead runner's dependency container remained")
+	}
+}
+
+func TestDependencyThatNeverBecameReadyKeepsItsLog(t *testing.T) {
+	// The run starts its own PostgreSQL container, not an external one.
+	t.Setenv(storagetest.EnvTestDatabaseURL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	evidence := t.TempDir()
+	var name string
+	starters := dependencyStarters{postgresql: func(ctx context.Context, m *dependencyManager) error {
+		var err error
+		if name, err = dependencyContainerName("postgres"); err != nil {
+			return err
+		}
+		m.containers = append(m.containers, name)
+		m.containerDependencies = append(m.containerDependencies, "postgresql")
+		arguments := slices.Concat([]string{"run", "-d", "--name", name}, dependencyContainerLabels("postgres", "never-ready"), []string{postgresImage, "sh", "-c", "echo dependency-cause; exit 1"})
+		if err := runQuiet(ctx, "docker", arguments...); err != nil {
+			return err
+		}
+		return errors.New("PostgreSQL dependency did not become ready")
+	}}
+	if _, err := startDependenciesWithRoot(ctx, []string{"postgresql"}, os.Environ(), starters, "", evidence); err == nil {
+		t.Fatal("a dependency that never became ready started")
+	}
+	path := filepath.Join(evidence, "dependency-logs", "postgresql-"+name+".log")
+	body, err := os.ReadFile(path) //nolint:gosec // The path is beneath this test's directory.
+	if err != nil || !strings.Contains(string(body), "dependency-cause") {
+		t.Fatalf("log %s = %q, %v; want the container's own line", path, body, err)
+	}
+	if exists, err := dockerResourceExists(ctx, "container", "name", "^"+name+"$"); err != nil || exists {
+		t.Fatalf("the container remained after its log was kept: %v, %v", exists, err)
 	}
 }
 

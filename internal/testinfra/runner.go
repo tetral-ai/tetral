@@ -75,7 +75,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	defer recordResources(filepath.Join(options.OutputDir, resourceRecordFile), resourceRecordInterval)()
 
 	setupStart := time.Now()
-	dependencies, err := startDependencies(ctx, plan.Dependencies, options.Root)
+	dependencies, err := startDependencies(ctx, plan.Dependencies, options.Root, options.OutputDir)
 	result.Setup = time.Since(setupStart)
 	if err != nil {
 		result.Status = "apparatus-failed"

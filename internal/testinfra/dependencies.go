@@ -104,15 +104,18 @@ func (m *dependencyManager) closeProcessRun(runID string) error {
 	return storagetest.CloseRun(ctx, m.postgresDSN, runID)
 }
 
-func startDependencies(ctx context.Context, dependencies []string, root string) (*dependencyManager, error) {
-	return startDependenciesWithRoot(ctx, dependencies, os.Environ(), productionDependencyStarters, root)
+// startDependencies starts a run's dependencies. When one fails, the
+// containers started so far keep their logs beneath evidence before they are
+// removed: a dependency that never became ready says why only in its log.
+func startDependencies(ctx context.Context, dependencies []string, root, evidence string) (*dependencyManager, error) {
+	return startDependenciesWithRoot(ctx, dependencies, os.Environ(), productionDependencyStarters, root, evidence)
 }
 
 func startDependenciesWith(ctx context.Context, dependencies, environment []string, starters dependencyStarters) (*dependencyManager, error) {
-	return startDependenciesWithRoot(ctx, dependencies, environment, starters, "")
+	return startDependenciesWithRoot(ctx, dependencies, environment, starters, "", "")
 }
 
-func startDependenciesWithRoot(ctx context.Context, dependencies, environment []string, starters dependencyStarters, root string) (*dependencyManager, error) {
+func startDependenciesWithRoot(ctx context.Context, dependencies, environment []string, starters dependencyStarters, root, evidence string) (*dependencyManager, error) {
 	manager := &dependencyManager{environment: environment, root: root}
 	// Keycloak and egctl mostly wait, on a JVM start or on a download and a
 	// helper build, so each starts in the background on its own manager. That
@@ -175,6 +178,9 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 		manager.adopt(starter, inherited)
 	}
 	if failure != nil {
+		if evidence != "" {
+			manager.saveLogs(evidence)
+		}
 		_ = manager.stopBounded()
 		// A starter stopped by the caller reports only its own symptom.
 		if cause := context.Cause(caller); cause != nil && !errors.Is(failure, cause) {
@@ -545,7 +551,7 @@ func (m *dependencyManager) recordDependencyTeardown(name string, elapsed time.D
 }
 
 // saveLogs keeps each dependency container's log beneath directory, for a
-// run whose tests failed against them.
+// run whose tests failed against them or that they failed to start.
 func (m *dependencyManager) saveLogs(directory string) {
 	ctx, cancel := context.WithTimeout(context.Background(), dependencyStopTimeout)
 	defer cancel()
