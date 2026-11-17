@@ -57,13 +57,16 @@ func (s *issueAPIStandIn) CloseIssue(number int) error {
 
 func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 	const reporter = "Report a Red Scheduled Run"
-	run := ScheduledRun{Workflow: "Scheduled Verification", Schedule: "41 6 * * *", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter}
-	title := ScheduledIssueTitle(run.Workflow, run.Schedule)
+	title := ScheduledIssueTitle("Scheduled Verification", "41 6 * * *")
 	if title != "Scheduled check red on main: Scheduled Verification (41 6 * * *)" {
 		t.Fatalf("title %q", title)
 	}
-	weekly := ScheduledIssue{Number: 5, Title: ScheduledIssueTitle(run.Workflow, "17 7 * * 1")}
+	weekly := ScheduledIssue{Number: 5, Title: ScheduledIssueTitle("Scheduled Verification", "17 7 * * 1")}
 	open := []ScheduledIssue{{Number: 3, Title: "Scheduled check red on main: engine-vulncheck (23 6 * * *)"}, {Number: 9, Title: title}}
+	current := []string{title, weekly.Title, open[0].Title}
+	run := ScheduledRun{Workflow: "Scheduled Verification", Schedule: "41 6 * * *", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter, Current: current}
+	// A workflow's cron was edited: no run carries the old one any more.
+	removed := ScheduledIssue{Number: 4, Title: ScheduledIssueTitle("Scheduled Verification", "41 5 * * *")}
 	coverage := ScheduledJob{ID: 2, Name: "Report-only Coverage", Conclusion: "cancelled"}
 	// The annotations GitHub gave job 132777784768 of run 43702901197.
 	timedOut := []ScheduledAnnotation{
@@ -98,7 +101,8 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 		issues      []ScheduledIssue
 		annotations []ScheduledAnnotation
 		unreadable  map[int64]bool
-		did         string
+		current     []string
+		did, err    string
 		calls       []string
 	}{
 		{
@@ -136,7 +140,6 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 			calls: []string{"annotations 2", "comment 9\n" + failedHeader +
 				"- Report-only Coverage: cancelled, and its annotations could not be read: HTTP 403: Resource not accessible by integration\n"},
 		},
-
 		{
 			name: "a failed job whose log cannot be read is reported with the read error beside the others", jobs: failedRun, issues: open[:1], unreadable: map[int64]bool{1: true}, did: "created",
 			calls: []string{"log 1", "log 4", "label " + ScheduledRedLabel, "create " + title + " [" + ScheduledRedLabel + "]\n" + failedHeader +
@@ -144,15 +147,31 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 				"- Compatibility and Repository Health: `TestPostgreSQLRuntimeContextRecovery`, `TestPostgreSQLRuntimeContextRecovery/resume`\n"},
 		},
 		{
+			name: "the open issue of a schedule no workflow declares closes, whatever the run", jobs: green, issues: []ScheduledIssue{removed, weekly}, did: "none",
+			calls: []string{"comment 4\nNo workflow of this repository declares this schedule any more, so no run will report on it.\n", "close 4"},
+		},
+		{
 			name: "every job skipped: nothing", issues: open, did: "none",
 			jobs: []ScheduledJob{{ID: 5, Name: "Repeated Concurrency Owners", Conclusion: "skipped"}, {ID: 6, Name: reporter}},
+		},
+		{
+			name: "a run whose own schedule the workflows do not declare touches no issue", jobs: failedRun, issues: []ScheduledIssue{removed}, current: []string{weekly.Title},
+			err: `the repository's workflows declare no schedule titled "` + title + `"`,
 		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			api := &issueAPIStandIn{jobs: row.jobs, logs: logs, annotations: map[int64][]ScheduledAnnotation{2: row.annotations}, unreadable: row.unreadable, issues: row.issues}
+			run := run
+			if row.current != nil {
+				run.Current = row.current
+			}
 			did, err := ReportScheduledRun(api, run)
-			if err != nil || did != row.did || !slices.Equal(api.calls, row.calls) {
-				t.Fatalf("did %q, %v, calls:\n%s\nwant %q, calls:\n%s", did, err, strings.Join(api.calls, "\n--\n"), row.did, strings.Join(row.calls, "\n--\n"))
+			failure := ""
+			if err != nil {
+				failure = err.Error()
+			}
+			if failure != row.err || did != row.did || !slices.Equal(api.calls, row.calls) {
+				t.Fatalf("did %q, %q, calls:\n%s\nwant %q, %q, calls:\n%s", did, failure, strings.Join(api.calls, "\n--\n"), row.did, row.err, strings.Join(row.calls, "\n--\n"))
 			}
 		})
 	}

@@ -9,8 +9,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/tetral-ai/tetral/internal/testinfra/ciflow"
 )
@@ -77,6 +80,49 @@ func (ghIssueAPI) Annotations(id int64) ([]ciflow.ScheduledAnnotation, error) {
 	}
 	var annotations []ciflow.ScheduledAnnotation
 	return annotations, json.Unmarshal(body, &annotations)
+}
+
+// scheduleTitles is the issue title of every schedule that the workflows in
+// directory declare. GitHub names a workflow without a name by its path.
+func scheduleTitles(directory string) ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(directory, "*.y*ml"))
+	if err != nil {
+		return nil, err
+	}
+	var titles []string
+	for _, path := range paths {
+		// The path is a workflow file of the checked-out repository.
+		//nolint:gosec
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var workflow struct {
+			Name string    `yaml:"name"`
+			On   yaml.Node `yaml:"on"`
+		}
+		if err := yaml.Unmarshal(body, &workflow); err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		// An on that is one event or a list of events declares no schedule.
+		var on struct {
+			Schedule []struct {
+				Cron string `yaml:"cron"`
+			} `yaml:"schedule"`
+		}
+		if workflow.On.Kind == yaml.MappingNode {
+			if err := workflow.On.Decode(&on); err != nil {
+				return nil, fmt.Errorf("read %s: %w", path, err)
+			}
+		}
+		if workflow.Name == "" {
+			workflow.Name = filepath.ToSlash(path)
+		}
+		for _, schedule := range on.Schedule {
+			titles = append(titles, ciflow.ScheduledIssueTitle(workflow.Name, schedule.Cron))
+		}
+	}
+	return titles, nil
 }
 
 func (ghIssueAPI) OpenIssues(label string) ([]ciflow.ScheduledIssue, error) {

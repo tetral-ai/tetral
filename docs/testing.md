@@ -526,7 +526,9 @@ listed with the cause its log prints: the advisory IDs it reports (`GO-`,
 `GHSA-`, `RUSTSEC-`), the tests that failed, or the error of a run that failed
 before its tests, and "no cause recorded" when the log names none, which is a
 defect of that job's output to fix. A job whose log or annotations cannot be
-read is listed with the read error.
+read is listed with the read error. Every run also closes the open issues of
+schedules that no workflow at its commit declares any more, after a cron was
+edited or a workflow renamed, since no run would close them.
 
 `internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
 holds medians of Go Race evidence in milliseconds: every package's `Elapsed`

@@ -3,6 +3,7 @@ package ciflow
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -52,13 +53,20 @@ type ScheduledRun struct {
 	Schedule string
 	// Reporter is the reporting job's own name, left out of the jobs it reads.
 	Reporter string
+	// Current holds the issue title of every schedule that the repository's
+	// workflows declare at the run's commit. An open issue whose title is not
+	// among them belongs to a schedule that was renamed or removed, and no run
+	// would ever close it.
+	Current []string
 }
 
 // ScheduledIssueTitle is the exact title of the issue of a workflow's
 // schedule.
 func ScheduledIssueTitle(workflow, schedule string) string {
-	return "Scheduled check red on main: " + workflow + " (" + schedule + ")"
+	return scheduledIssueTitlePrefix + workflow + " (" + schedule + ")"
 }
+
+const scheduledIssueTitlePrefix = "Scheduled check red on main: "
 
 // ReportScheduledRun keeps the issue of a workflow's schedule in step with
 // its scheduled run: a run with a failed job opens the issue or comments on
@@ -67,8 +75,14 @@ func ScheduledIssueTitle(workflow, schedule string) string {
 // and counts for neither. GitHub reports a job that ran past its time limit
 // as cancelled, with an annotation that says so; such a job failed. A run
 // with any other cancelled job and none failed changes nothing, and so does a
-// green run with no open issue. It returns what it did.
+// green run with no open issue. Whatever the run, it closes the open issues of
+// schedules no workflow declares any more. It returns what it did to its own
+// schedule's issue.
 func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error) {
+	title := ScheduledIssueTitle(run.Workflow, run.Schedule)
+	if !slices.Contains(run.Current, title) {
+		return "", fmt.Errorf("the repository's workflows declare no schedule titled %q", title)
+	}
 	jobs, err := api.Jobs()
 	if err != nil {
 		return "", fmt.Errorf("list the run's jobs: %w", err)
@@ -105,16 +119,22 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 			cancelled = true
 		}
 	}
-	title := ScheduledIssueTitle(run.Workflow, run.Schedule)
 	open, err := api.OpenIssues(ScheduledRedLabel)
 	if err != nil {
 		return "", fmt.Errorf("list the open issues: %w", err)
 	}
 	number := 0
 	for _, issue := range open {
-		if issue.Title == title {
+		switch {
+		case issue.Title == title:
 			number = issue.Number
-			break
+		case strings.HasPrefix(issue.Title, scheduledIssueTitlePrefix) && !slices.Contains(run.Current, issue.Title):
+			if err := api.Comment(issue.Number, "No workflow of this repository declares this schedule any more, so no run will report on it.\n"); err != nil {
+				return "", err
+			}
+			if err := api.CloseIssue(issue.Number); err != nil {
+				return "", err
+			}
 		}
 	}
 	switch {

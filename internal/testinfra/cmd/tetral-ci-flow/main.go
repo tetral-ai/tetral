@@ -105,7 +105,11 @@ func main() {
 		if *workflow == "" || *schedule == "" || *run == "" || *runURL == "" || *commit == "" || *reporter == "" {
 			fail(2, "usage: tetral-ci-flow scheduled-issue --workflow <name> --schedule <cron> --run <ID> --attempt <n> --run-url <URL> --commit <SHA> --reporter <job name>")
 		}
-		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, Schedule: *schedule, URL: *runURL, Commit: *commit, Reporter: *reporter})
+		current, err := scheduleTitles(".github/workflows")
+		if err != nil {
+			fail(1, err.Error())
+		}
+		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, Schedule: *schedule, URL: *runURL, Commit: *commit, Reporter: *reporter, Current: current})
 		if err != nil {
 			fail(1, err.Error())
 		}
