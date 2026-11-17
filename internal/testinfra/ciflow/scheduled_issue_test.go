@@ -138,6 +138,12 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 		},
 
 		{
+			name: "a failed job whose log cannot be read is reported with the read error beside the others", jobs: failedRun, issues: open[:1], unreadable: map[int64]bool{1: true}, did: "created",
+			calls: []string{"log 1", "log 4", "label " + ScheduledRedLabel, "create " + title + " [" + ScheduledRedLabel + "]\n" + failedHeader +
+				"- Dependency Advisories: its log could not be read: read the log of job 1: 404 Not Found\n" +
+				"- Compatibility and Repository Health: `TestPostgreSQLRuntimeContextRecovery`, `TestPostgreSQLRuntimeContextRecovery/resume`\n"},
+		},
+		{
 			name: "every job skipped: nothing", issues: open, did: "none",
 			jobs: []ScheduledJob{{ID: 5, Name: "Repeated Concurrency Owners", Conclusion: "skipped"}, {ID: 6, Name: reporter}},
 		},

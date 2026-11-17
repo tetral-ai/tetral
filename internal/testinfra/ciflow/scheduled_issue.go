@@ -81,11 +81,13 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 		case job.Conclusion == "success":
 			ran++
 		case job.Conclusion == "failure" || job.Conclusion == "timed_out":
-			log, err := api.JobLog(job.ID)
-			if err != nil {
-				return "", fmt.Errorf("read the log of job %s: %w", job.Name, err)
+			cause := "its log could not be read: "
+			if log, err := api.JobLog(job.ID); err != nil {
+				cause += oneLine(err.Error())
+			} else {
+				cause = JobCause(log)
 			}
-			failed = append(failed, job.Name+": "+JobCause(log))
+			failed = append(failed, job.Name+": "+cause)
 		case job.Conclusion == "cancelled":
 			annotations, err := api.Annotations(job.ID)
 			if err != nil {

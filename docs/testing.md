@@ -525,8 +525,8 @@ cancelled job and none failed leaves the issue as it is. Each failed job is
 listed with the cause its log prints: the advisory IDs it reports (`GO-`,
 `GHSA-`, `RUSTSEC-`), the tests that failed, or the error of a run that failed
 before its tests, and "no cause recorded" when the log names none, which is a
-defect of that job's output to fix. A cancelled job whose annotations cannot
-be read is listed with the read error.
+defect of that job's output to fix. A job whose log or annotations cannot be
+read is listed with the read error.
 
 `internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
 holds medians of Go Race evidence in milliseconds: every package's `Elapsed`
