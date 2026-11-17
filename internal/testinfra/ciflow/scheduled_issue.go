@@ -116,10 +116,13 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 }
 
 var (
-	logTimestamp   = regexp.MustCompile(`^\d{4}-\d\d-\d\dT[\d:.]+Z `)
-	failedGoTest   = regexp.MustCompile(`--- FAIL: (\S+)`)
-	failedBunTest  = regexp.MustCompile(`^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$`)
-	advisory       = regexp.MustCompile(`\b(?:GO-\d{4}-\d{4,}|GHSA(?:-[2-9cfghjmpqrvwx]{4}){3}|RUSTSEC-\d{4}-\d{4}|CVE-\d{4}-\d{4,})\b`)
+	logTimestamp  = regexp.MustCompile(`^\d{4}-\d\d-\d\dT[\d:.]+Z `)
+	failedGoTest  = regexp.MustCompile(`--- FAIL: (\S+)`)
+	failedBunTest = regexp.MustCompile(`^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$`)
+	// The IDs the advisory producers report: govulncheck's GO-, bun audit's
+	// GHSA- and cargo-deny's RUSTSEC-. cargo-deny also names a CVE in an
+	// advisory's title and announcement; the advisory's own ID is the cause.
+	advisory       = regexp.MustCompile(`\b(?:GO-\d{4}-\d{4,}|GHSA(?:-[2-9cfghjmpqrvwx]{4}){3}|RUSTSEC-\d{4}-\d{4})\b`)
 	apparatusCause = regexp.MustCompile(`verification apparatus-failed: (.+)`)
 )
 

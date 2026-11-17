@@ -517,10 +517,11 @@ opens the issue `Scheduled check red on main: <workflow name> (<cron>)`,
 labelled `scheduled-check-red`, or adds a comment to it while it is open; the
 schedule's next run whose jobs all succeeded comments and closes it. A skipped
 job did not run and counts for neither, so a run whose other jobs succeeded is
-green; a run with a cancelled job and none failed leaves the issue as it is. Each failed job is listed with the
-cause its log prints: the advisories it reports, the tests that failed, or the
-error of a run that failed before its tests, and "no cause recorded" when the
-log names none, which is a defect of that job's output to fix.
+green; a run with a cancelled job and none failed leaves the issue as it is.
+Each failed job is listed with the cause its log prints: the advisory IDs it
+reports (`GO-`, `GHSA-`, `RUSTSEC-`), the tests that failed, or the error of a
+run that failed before its tests, and "no cause recorded" when the log names
+none, which is a defect of that job's output to fix.
 
 `internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
 holds medians of Go Race evidence in milliseconds: every package's `Elapsed`

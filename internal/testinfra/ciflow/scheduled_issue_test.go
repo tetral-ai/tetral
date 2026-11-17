@@ -116,17 +116,29 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 
 func TestJobCauseNamesWhatTheLogReports(t *testing.T) {
 	var many strings.Builder
+	var listed []string
 	for index := range maxCauses + 2 {
 		fmt.Fprintf(&many, "--- FAIL: TestCase%d (0.00s)\n", index)
+		if index < maxCauses {
+			listed = append(listed, fmt.Sprintf("`TestCase%d`", index))
+		}
 	}
+	// cargo-deny's report of an advisory, as job 129304031156 logged it.
+	cargoDeny := strings.Join([]string{
+		"2026-11-09T16:52:53.2109131Z error[vulnerability]: `libsqlite3-sys` via C SQLite CVE-2026-119375",
+		"2026-11-09T16:52:53.2117912Z     ├ ID: RUSTSEC-2026-0459",
+		"2026-11-09T16:52:53.2118955Z     ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0459",
+		"2026-11-09T16:52:53.2144132Z     ├ Announcement: https://nvd.nist.gov/vuln/detail/CVE-2026-119375",
+		"2026-11-09T16:52:53.2145542Z     ├ Solution: Upgrade to >=0.39.0 (try `cargo update -p libsqlite3-sys`)",
+	}, "\n")
 	for _, row := range []struct{ name, log, want string }{
 		{name: "a run that failed before its tests", log: "verification apparatus-failed: enumerate fast Go evidence: go list: exit status 1\n", want: "`enumerate fast Go evidence: go list: exit status 1`"},
-		{name: "a RustSec advisory", log: "error[vulnerability]: RUSTSEC-2026-0012 in tokio\n", want: "`RUSTSEC-2026-0012`"},
+		{name: "a RustSec advisory that also names a CVE", log: cargoDeny, want: "`RUSTSEC-2026-0459`"},
 		{name: "a log with none", log: "Process completed with exit code 1.\n", want: "no cause recorded"},
-		{name: "more causes than the list holds", log: many.String(), want: "`TestCase0`"},
+		{name: "more causes than the list holds", log: many.String(), want: strings.Join(listed, ", ") + " and 2 more"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			if got := JobCause(row.log); !strings.HasPrefix(got, row.want) || (row.name == "more causes than the list holds" && !strings.HasSuffix(got, "`TestCase19` and 2 more")) {
+			if got := JobCause(row.log); got != row.want {
 				t.Fatalf("JobCause = %q; want %q", got, row.want)
 			}
 		})
