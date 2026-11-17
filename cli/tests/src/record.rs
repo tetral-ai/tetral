@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::workspace_dir;
 
 /// The variable that names the directory of acceptance records.
-pub const DIRECTORY_VARIABLE: &str = "TETRAL_ACCEPTANCE_DIR";
+pub use crate::timeline::DIRECTORY_VARIABLE;
 
 /// The variable in which cargo-nextest gives a test process its one test.
 const NEXTEST_TEST_NAME: &str = "NEXTEST_TEST_NAME";
@@ -35,6 +35,13 @@ macro_rules! record {
     () => {
         $crate::record::Record::of(env!("CARGO_CRATE_NAME"))
     };
+}
+
+static RECORD: OnceLock<Record> = OnceLock::new();
+
+/// The path of this process's record, once it has one.
+pub fn current() -> Option<&'static Path> {
+    RECORD.get().map(|record| record.path.as_path())
 }
 
 /// The record of one process of one test file.
@@ -48,11 +55,11 @@ impl Record {
     /// The record of the test file `test`, created at its first use in the
     /// process.
     pub fn of(test: &'static str) -> &'static Record {
-        static RECORD: OnceLock<Record> = OnceLock::new();
         RECORD.get_or_init(|| Record::create(test))
     }
 
     fn create(test: &str) -> Record {
+        crate::timeline::start();
         let test = match std::env::var(NEXTEST_TEST_NAME) {
             Ok(one) => format!("{test}.{}", one.replace("::", ".")),
             Err(_) => test.to_owned(),
@@ -103,6 +110,7 @@ impl Record {
             cases: Mutex::new(BTreeMap::new()),
         };
         record.write(&BTreeMap::new());
+        crate::timeline::beside(&record.path);
         record
     }
 

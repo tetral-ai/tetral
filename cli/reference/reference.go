@@ -96,7 +96,8 @@ type Server struct {
 	// failures are what fail recorded.
 	failures []string
 
-	log serverLog
+	log     serverLog
+	traffic traffic
 }
 
 // New builds a server from its startup input.
@@ -156,7 +157,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/client/drives/{drive_id}/content/{sha256}", server.uploadContent)
 	mux.HandleFunc("POST /v1/client/drives/{drive_id}/commits", server.commit)
 	mux.HandleFunc("GET /v1/client/drives/{drive_id}/content/{sha256}", server.downloadContent)
-	return mux
+	return server.traffic.recorded(mux)
 }
 
 // newID gives a fresh identity with prefix, unique across the server.

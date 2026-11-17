@@ -9,6 +9,14 @@ use tetral_tests::{binaries, workspace_dir};
 const MARKER: &[u8] = b"TETRAL_TEST_SEAMS_V1";
 const SOCKET_PARENT: &str = "TETRAL_TEST_SOCKET_PARENT";
 const GIT_LOW_SPEED: &str = "TETRAL_TEST_GIT_LOW_SPEED_SECONDS";
+/// A reply only the drive's watch of mount operations writes.
+const DRIVE_WATCH: &str = "read from the content file";
+
+fn holds(binary: &[u8], text: &str) -> bool {
+    binary
+        .windows(text.len())
+        .any(|window| window == text.as_bytes())
+}
 
 fn holds_marker(binary: &[u8]) -> bool {
     binary.windows(MARKER.len()).any(|window| window == MARKER)
@@ -54,6 +62,10 @@ fn a_release_build_holds_no_test_seam() {
             .any(|window| window == GIT_LOW_SPEED.as_bytes()),
         "the release build reads the test Git low-speed override"
     );
+    assert!(
+        !holds(&release, DRIVE_WATCH),
+        "the release build holds the drive's watch of mount operations"
+    );
 
     let directory = tempfile::tempdir().unwrap();
     let missing_root = directory.path().join("absent-root");
@@ -91,6 +103,10 @@ fn a_release_build_holds_no_test_seam() {
             .windows(GIT_LOW_SPEED.len())
             .any(|window| window == GIT_LOW_SPEED.as_bytes()),
         "the harness build lacks its Git low-speed construction override"
+    );
+    assert!(
+        holds(&with_seams, DRIVE_WATCH),
+        "the harness build lacks the drive's watch of mount operations"
     );
     case.pass();
 }

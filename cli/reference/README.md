@@ -150,6 +150,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `break_stream` | Close the instance's stream; its connection keeps its lease |
 | `clock` | Advance the clock by `advance_ms`, then do what is due |
 | `state` | Read the credentials, the connections with their leases, bindings (each with its drive sets) and issued instructions, the git tickets, the held answers, the throttled reads, the received messages (a commit's body among them), the sent events, the request log, each request with the credential its key names, the tool-list rows and the `failures` (`Snapshot`) |
+| `traffic` | Read every request on Engine's side from its arrival, also one held or abandoned before it was served: its method, path and query, the wall-clock times at which it arrived and its handler returned, and how it ended as far as the server can know: answered with a status, after its client had gone, answered with its body unread so that a departure of the client could not be seen, or cut without an answer (`trafficEntry`, `outcome`); the harness reads it when a test fails |
 
 ## Where things are
 

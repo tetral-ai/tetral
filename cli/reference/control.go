@@ -226,6 +226,7 @@ func (server *Server) ControlHandler() http.Handler {
 		"drive_budget":              server.controlDriveBudget,
 		"drive_state":               server.controlDriveState,
 		"state":                     func(json.RawMessage) (any, error) { return server.snapshot(), nil },
+		"traffic":                   func(json.RawMessage) (any, error) { return server.traffic.snapshot(), nil },
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /control/{name}", func(w http.ResponseWriter, request *http.Request) {
