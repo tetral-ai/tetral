@@ -314,6 +314,15 @@ fn an_upload_the_budget_refuses_is_listed_uploading_and_sent_again_after_its_ret
             .filter(|upload| upload["content_sha256"] == sha256(content.as_bytes()))
             .collect()
     };
+    wait_until(
+        "the App Server to take the refusal before its clock moves",
+        || {
+            machine
+                .records("pressure.rejecting_started")
+                .iter()
+                .any(|record| record["pressure.point"] == "tetral_uploads")
+        },
+    );
 
     // The budget refills by the server's clock and the App Server waits by
     // its own, so both move together. The refusal's Retry-After is the 60
