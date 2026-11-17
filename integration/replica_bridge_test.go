@@ -491,7 +491,7 @@ func (s *coreCaptureRejoinStore) FinishIdle(ctx context.Context, request *bridge
 func startReplicaFinishIdleCoreChild(t *testing.T, address string, request json.RawMessage) *handoffRuntimeChild {
 	t.Helper()
 	child := &handoffRuntimeChild{directory: t.TempDir(), done: make(chan struct{})}
-	input, err := json.Marshal(map[string]any{"address": address, "token": "runtime", "directory": child.directory, "request": request, "env": map[string]string{"TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS": "5000"}})
+	input, err := json.Marshal(map[string]any{"address": address, "token": "runtime", "directory": child.directory, "request": request, "env": map[string]string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
