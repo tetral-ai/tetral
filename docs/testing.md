@@ -234,10 +234,34 @@ step's diagnostic file: its first 20 and last 60 lines, after a `go test -json`
 report is reduced to the decoded output of the tests and packages that did not
 pass (a skipped test counts as not passing where the step rejects skips).
 Under GitHub Actions the same excerpt goes to the job summary; the complete
-diagnostic stays in the evidence artifact. These dependency setup commands end
-the setup error the runner prints with up to the last 20 lines of their output
-when they fail: the Bun workspace installs, the Docker check, image pulls, container
-starts and removals, and the egctl SecretType helper build. Native package
+diagnostic stays in the evidence artifact. Every other command the runner and
+its fixtures run (`go list`, `git`, `gh`, `docker` and the setup commands such as
+the Bun workspace installs, image pulls and the egctl SecretType helper build)
+fails with an error that names the program and its subcommand and ends with up
+to the last 20 lines it wrote to standard error, so a failed plan or setup shows
+its own cause in the console and in `result.json`.
+
+A run whose steps failed, or whose dependency did not become ready, keeps the
+whole log of each dependency container it started (PostgreSQL, MinIO, NATS,
+...) in `dependency-logs/` of its evidence, before it removes them. A test that
+starts containers through `testinfra.NewDockerResources` passes itself to it;
+when that test has failed by the fixture's `Close`, each container's log is kept
+in `container-logs/<test>/<image>-<container>.log` of the run's evidence (the
+runner names the directory in `TETRAL_TEST_EVIDENCE_DIR`; outside the runner
+nothing is kept). A test process that `go test -timeout` or a signal ended runs
+no cleanup, so its containers outlive it. Each container created in a test
+process of a run carries the run's evidence directory as a label, and whichever
+process collects it as an orphan (a later fixture or dependency start, or the
+end of a failed run) first keeps its log there, in
+`container-logs/orphaned/<image>-<container>.log`. When collectors of several
+processes reach the same orphan, the first complete read is kept; a read that
+failed keeps nothing.
+
+Every run also writes `resources.jsonl` into its evidence: one JSON line at its
+start, every 15 seconds and at its end, with the host's available and total
+memory, its load averages and Docker's memory use of each running container.
+It is a record only; a value it cannot read is written as an error in that
+line, and it never fails a run. Native package
 commands remain appropriate while developing one owning package; the repository
 profiles are the pre-submission contract.
 
@@ -490,6 +514,29 @@ The readable CI topology is:
 - **CI Benchmark**: dispatched by hand to measure a speed change; see
   [CI Benchmark](#ci-benchmark). Nothing gates on it.
 
+Every workflow with a schedule (Scheduled Verification, engine-vulncheck, CLI
+Dependency Check, Go Build Cache) ends with the job **Report a Red Scheduled
+Run**, which waits for all its other jobs whatever their result and acts only
+on a scheduled run (`tetral-ci-flow scheduled-issue`, with `actions: read` to
+read the run's jobs, `checks: read` to read a job's annotations and
+`issues: write`). Each schedule has its own issue,
+since a workflow's schedules can run different jobs: a run with a failed job
+opens the issue `Scheduled check red on main: <workflow name> (<cron>)`,
+labelled `scheduled-check-red`, or adds a comment to it while it is open; the
+schedule's next run whose jobs all succeeded comments and closes it. A skipped
+job did not run and counts for neither, so a run whose other jobs succeeded is
+green. GitHub reports a job that ran past its `timeout-minutes` as cancelled,
+with the annotation "The job has exceeded the maximum execution time of ...";
+such a job failed, and that message is its cause. A run with any other
+cancelled job and none failed leaves the issue as it is. Each failed job is
+listed with the cause its log prints: the advisory IDs it reports (`GO-`,
+`GHSA-`, `RUSTSEC-`), the tests that failed, or the error of a run that failed
+before its tests, and "no cause recorded" when the log names none, which is a
+defect of that job's output to fix. A job whose log or annotations cannot be
+read is listed with the read error. Every run also closes the open issues of
+schedules that no workflow at its commit declares any more, after a cron was
+edited or a workflow renamed, since no run would close them.
+
 `internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
 holds medians of Go Race evidence in milliseconds: every package's `Elapsed`
 (summed over its slices in a run) and its overhead per step (step time outside
@@ -586,12 +633,12 @@ automatically.
 
 Report-only coverage runs `go test ./...` once without Race, so the integration
 package executes every top-level test sequentially in one binary. Its Go
-budget is 60 minutes: more than twice the 25 to 28 minutes that package took
-in the coverage runs of Main Branch Verification runs 38151172754 and
-38149638991. Coverage times are not part of the repository's evidence, so
+budget is 80 minutes: more than twice the 21 to 38 minutes that package took
+in the coverage runs of Scheduled Verification runs 43446807422, 43601344163,
+43723360527 and 43906321371. Coverage times are not part of the repository's evidence, so
 `TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests` checks the budget
 against twice the package's summed Race time in `go_shard_weights.json`, a
-lower figure that grows with the package. The coverage job's 80-minute limit
+lower figure that grows with the package. The coverage job's 95-minute limit
 leaves room for dependency setup, compilation, and the Bun coverage commands
 around it.
 

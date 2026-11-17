@@ -11,7 +11,7 @@ func TestPinnedTransportImagesRunCanonicalRuntimes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	manager := &dependencyManager{root: repositoryRootForTest(t)}
-	resources, err := NewDockerResources(ctx, "pinned-runtime-proof")
+	resources, err := NewDockerResources(ctx, t, "pinned-runtime-proof")
 	if err != nil {
 		t.Fatal(err)
 	}

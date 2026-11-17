@@ -50,7 +50,7 @@ func newPreviewTLSCluster(t *testing.T) *previewTLSCluster {
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	c := &previewTLSCluster{Directory: t.TempDir(), Root: transporttest.Must(transporttest.NewAuthority("preview-root-r1"))}
-	resources, err := testinfra.NewDockerResources(ctx, "preview-tls")
+	resources, err := testinfra.NewDockerResources(ctx, t, "preview-tls")
 	if err != nil {
 		t.Fatal(err)
 	}

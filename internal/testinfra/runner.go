@@ -72,15 +72,19 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	if err := os.MkdirAll(options.OutputDir, 0o700); err != nil {
 		return result, err
 	}
+	defer recordResources(filepath.Join(options.OutputDir, resourceRecordFile), resourceRecordInterval)()
 
 	setupStart := time.Now()
-	dependencies, err := startDependencies(ctx, plan.Dependencies, options.Root)
+	dependencies, err := startDependencies(ctx, plan.Dependencies, options.Root, options.OutputDir)
 	result.Setup = time.Since(setupStart)
 	if err != nil {
 		result.Status = "apparatus-failed"
 		result.FinishedAt = time.Now().UTC()
 		_ = writeJSON(filepath.Join(options.OutputDir, "result.json"), result)
 		return result, err
+	}
+	if evidence, absErr := filepath.Abs(options.OutputDir); absErr == nil {
+		dependencies.environment = append(withoutEnvironmentVariable(dependencies.environment, EnvTestEvidenceDir), EnvTestEvidenceDir+"="+evidence)
 	}
 	var runErr error
 	goSelections := make([]Selection, 0)
@@ -102,6 +106,14 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		runErr = errors.Join(runErr, stepErr)
 	}
 
+	if runErr != nil {
+		dependencies.saveLogs(options.OutputDir)
+		// A test process ended by its timeout or a signal leaves its
+		// fixtures' containers behind.
+		orphanCtx, cancelOrphans := context.WithTimeout(context.Background(), dependencyStopTimeout)
+		_ = cleanupOrphanedDependencyContainers(orphanCtx)
+		cancelOrphans()
+	}
 	teardownStart := time.Now()
 	stopErr := dependencies.stopBounded()
 	result.Teardown = time.Since(teardownStart)
@@ -363,7 +375,7 @@ func goPackageTimeout(plan Plan, packages []string) string {
 // the package's Race total in go_shard_weights.json. The scheduled coverage
 // job limit holds this budget plus dependency setup, compilation and the Bun
 // coverage commands.
-const coverageGoTestTimeout = "-timeout=60m"
+const coverageGoTestTimeout = "-timeout=80m"
 
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {

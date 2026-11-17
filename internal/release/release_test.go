@@ -62,9 +62,11 @@ func TestCandidateAcceptsHistoricalAndCurrentDatabaseVersions(t *testing.T) {
 
 func TestDatabaseIdentityCommandUsesCurrentMigration(t *testing.T) {
 	command := exec.Command("go", "run", "./cmd/tetral-release", "database-identity")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	body, err := command.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("database-identity: %v\n%s", err, stderr.String())
 	}
 	var identity DatabaseIdentity
 	if err := json.Unmarshal(body, &identity); err != nil {

@@ -238,8 +238,12 @@ func (m *dependencyManager) startKeycloak(ctx context.Context) error {
 		}
 	}
 	version, err := dockerOutput(ready, "exec", name, "/opt/keycloak/bin/kc.sh", "--version")
-	if err != nil || !strings.HasPrefix(version, "Keycloak "+lock.Version+"\n") {
-		return errors.New("running Keycloak version differs from its lock")
+	if err != nil {
+		return fmt.Errorf("keycloak version: %w", err)
+	}
+	if !strings.HasPrefix(version, "Keycloak "+lock.Version+"\n") {
+		reported, _, _ := strings.Cut(version, "\n")
+		return fmt.Errorf("running Keycloak reports %q, not version %s of its lock", reported, lock.Version)
 	}
 	data, err := json.Marshal(f)
 	if err != nil {

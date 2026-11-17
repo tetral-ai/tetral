@@ -4,6 +4,8 @@
 // workflow runs, prints from a checkout how long the jobs of a run named by
 // its ID waited for a runner and ran; gh reads the repository from the
 // checkout and the token from the environment or its own login.
+// scheduled-issue, the last job of each scheduled workflow, opens, comments
+// on or closes the issue of the workflow's schedule for its runs on main.
 package main
 
 import (
@@ -19,7 +21,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail(2, "usage: tetral-ci-flow decide|needs|duration [flags]")
+		fail(2, "usage: tetral-ci-flow decide|needs|duration|scheduled-issue [flags]")
 	}
 	flags := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	switch os.Args[1] {
@@ -91,6 +93,27 @@ func main() {
 		for _, line := range ciflow.DurationReport(jobs, *gate) {
 			fmt.Println(line)
 		}
+	case "scheduled-issue":
+		workflow := flags.String("workflow", "", "the workflow's name")
+		schedule := flags.String("schedule", "", "the cron expression of the schedule that started the run")
+		run := flags.String("run", "", "the run's ID")
+		attempt := flags.Int("attempt", 1, "the run's attempt")
+		runURL := flags.String("run-url", "", "the run's page")
+		commit := flags.String("commit", "", "the commit the run tested")
+		reporter := flags.String("reporter", "", "the name of the job that runs this report")
+		_ = flags.Parse(os.Args[2:])
+		if *workflow == "" || *schedule == "" || *run == "" || *runURL == "" || *commit == "" || *reporter == "" {
+			fail(2, "usage: tetral-ci-flow scheduled-issue --workflow <name> --schedule <cron> --run <ID> --attempt <n> --run-url <URL> --commit <SHA> --reporter <job name>")
+		}
+		current, err := scheduleTitles(".github/workflows")
+		if err != nil {
+			fail(1, err.Error())
+		}
+		did, err := ciflow.ReportScheduledRun(ghIssueAPI{run: *run, attempt: *attempt}, ciflow.ScheduledRun{Workflow: *workflow, Schedule: *schedule, URL: *runURL, Commit: *commit, Reporter: *reporter, DeclaredTitles: current})
+		if err != nil {
+			fail(1, err.Error())
+		}
+		fmt.Printf("%s: %s\n", ciflow.ScheduledIssueTitle(*workflow, *schedule), did)
 	default:
 		fail(2, "unknown command "+os.Args[1])
 	}

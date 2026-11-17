@@ -193,11 +193,11 @@ func listGoPackages(ctx context.Context, root string) ([]listedPackage, error) {
 func readGoPackages(ctx context.Context, root string) ([]listedPackage, error) {
 	command := exec.CommandContext(ctx, "go", "list", "-json", "./...")
 	command.Dir = root
-	output, err := command.Output()
+	output, err := commandStdout(command)
 	if err != nil {
 		return nil, err
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(output)))
+	decoder := json.NewDecoder(bytes.NewReader(output))
 	var packages []listedPackage
 	for {
 		var pkg listedPackage

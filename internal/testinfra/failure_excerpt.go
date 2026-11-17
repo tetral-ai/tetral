@@ -93,9 +93,16 @@ func commandOutputTail(output *os.File) string {
 	start := max(0, info.Size()-commandTailBytes)
 	tail := make([]byte, info.Size()-start)
 	read, _ := output.ReadAt(tail, start)
-	lines := logSafeLines(tail[:read])
-	if start > 0 && len(lines) > 1 {
-		// The read can begin inside the first line.
+	return outputTail(tail[:read], start > 0)
+}
+
+func outputTail(tail []byte, cut bool) string {
+	if len(tail) > commandTailBytes {
+		tail, cut = tail[len(tail)-commandTailBytes:], true
+	}
+	lines := logSafeLines(tail)
+	if cut && len(lines) > 1 {
+		// A cut tail can begin inside its first line.
 		lines = lines[1:]
 	}
 	lines = lines[max(0, len(lines)-commandTailLines):]

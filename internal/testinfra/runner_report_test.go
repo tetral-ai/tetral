@@ -1,11 +1,13 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -15,6 +17,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/testinfra/ciflow"
 )
 
 func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
@@ -234,6 +239,56 @@ func TestRunnerAnchorsRelativeEvidencePathsAtRepositoryRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".test-results", "example", "result.json")); err != nil {
 		t.Fatalf("relative evidence output was not rooted at the repository: %v", err)
 	}
+	if body, err := os.ReadFile(filepath.Join(root, ".test-results", "example", resourceRecordFile)); err != nil || bytes.Count(body, []byte("\n")) < 2 {
+		t.Fatalf("resource record = %q, %v; want a first and a last sample", body, err)
+	}
+}
+
+func TestResourceRecordSamplesMemoryLoadAndContainers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	r, err := NewDockerResources(ctx, t, "resource-record")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	c, err := r.Run(ctx, ContainerSpec{Image: postgresImage, Entrypoint: "sh", Command: []string{"-c", "sleep 300"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), resourceRecordFile)
+	stop := recordResources(path, 20*time.Millisecond)
+	for body, _ := os.ReadFile(path); bytes.Count(body, []byte("\n")) < 2; body, _ = os.ReadFile(path) {
+		if ctx.Err() != nil {
+			t.Fatalf("the record holds %q; want two samples before its stop", body)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	var previous time.Time
+	sawContainer := false
+	for _, line := range lines {
+		var sample resourceSample
+		if err := json.Unmarshal([]byte(line), &sample); err != nil {
+			t.Fatalf("sample %q: %v", line, err)
+		}
+		// A docker stats call that outlives its deadline on a loaded host is
+		// recorded in the sample; the /proc reads have no deadline.
+		hostErrors := slices.DeleteFunc(slices.Clone(sample.Errors), func(e string) bool { return strings.HasPrefix(e, "docker stats: ") })
+		if !sample.At.After(previous) || sample.MemAvailableBytes <= 0 || sample.MemAvailableBytes > sample.MemTotalBytes || sample.Load1 < 0 || len(hostErrors) != 0 {
+			t.Fatalf("sample %+v after %s; want a later time, available memory within the total, a load and no error reading them", sample, previous)
+		}
+		previous = sample.At
+		sawContainer = sawContainer || strings.Contains(sample.ContainerMemory[c.Name], " / ")
+	}
+	if len(lines) < 3 || !sawContainer {
+		t.Fatalf("%d samples, container %s recorded %v; want several, with its memory", len(lines), c.Name, sawContainer)
+	}
 }
 
 func TestStepWithoutStructuredArtifactUsesVisibleDiagnosticName(t *testing.T) {
@@ -287,11 +342,18 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 		name, kind, diagnostic string
 		rejectSkip             bool
 		want, absent           []string
+		cause                  string
 	}{
 		{
 			name: "go test JSON", kind: "go-json", diagnostic: goReport,
 			want:   []string{"    broken_test.go:9: deadline: context canceled", "--- FAIL: TestBroken (0.08s)", "FAIL\texample/pkg\t0.1s"},
 			absent: []string{"passing noise", `"Action"`},
+			cause:  "`TestBroken`",
+		},
+		{
+			name: "bun test", diagnostic: "bun test v1.3.14\n\ngateway.test.ts:\n(pass) gateway > accepts a stream [3.00ms]\n(fail) gateway > routes a stream [12.00ms]\n\n 1 pass\n 1 fail\n",
+			want:  []string{"(fail) gateway > routes a stream [12.00ms]"},
+			cause: "`gateway > routes a stream`",
 		},
 		{
 			name: "rejected Go test skip", kind: "go-json", diagnostic: skipReport, rejectSkip: true,
@@ -359,6 +421,13 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 			for _, line := range printed[min(2, len(printed)):] {
 				if !strings.HasPrefix(line, "  | ") {
 					t.Errorf("job log line %q lacks the excerpt prefix", line)
+				}
+			}
+			if tc.cause != "" {
+				// GitHub writes each line of the job log behind a timestamp.
+				jobLog := "2026-11-16T06:41:12.0000000Z " + strings.Join(printed, "\n2026-11-16T06:41:12.0000000Z ")
+				if cause := ciflow.JobCause(jobLog); cause != tc.cause {
+					t.Errorf("the job log's cause = %s; want %s", cause, tc.cause)
 				}
 			}
 		})
@@ -457,6 +526,37 @@ func TestAStepEndedByTheRunSaysWhatEndedIt(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFailedPlanReportsTheFailedCommandsOwnError(t *testing.T) {
+	const cause = "go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: unexpected EOF"
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/sh\necho '"+cause+"' >&2\nexit 1\n"), 0o755); err != nil { //nolint:gosec // The stub must be executable.
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+	root, err := filepath.Abs(testRepositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A listing an earlier test kept would spare the plan its go list.
+	goPackageListings.Lock()
+	delete(goPackageListings.byRoot, root)
+	goPackageListings.Unlock()
+	started := time.Now()
+	_, planErr := BuildPlan(context.Background(), root, ProfileFast, "")
+	if planErr == nil {
+		t.Fatal("planning with a failing go list succeeded")
+	}
+	output := t.TempDir()
+	result, err := PlanFailed(context.Background(), ProfileFast, RunOptions{Root: root, OutputDir: output}, started, planErr)
+	var written Result
+	if body, readErr := os.ReadFile(filepath.Join(output, "result.json")); readErr != nil || json.Unmarshal(body, &written) != nil || len(written.Steps) != 1 {
+		t.Fatalf("result.json does not hold the plan step: %v", readErr)
+	}
+	if result.Status != "apparatus-failed" || !strings.Contains(err.Error(), "go list: exit status 1") || !strings.Contains(err.Error(), cause) || !strings.Contains(written.Steps[0].FirstFailure, cause) {
+		t.Fatalf("status %s, error %v, recorded first failure %q; want each to carry go list's own error", result.Status, err, written.Steps[0].FirstFailure)
 	}
 }
 
@@ -634,5 +734,94 @@ func writeReport(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFailedRunKeepsItsDependencyContainersLogs(t *testing.T) {
+	t.Setenv(storagetest.EnvTestDatabaseURL, "")
+	root := t.TempDir()
+	for path, body := range map[string]string{
+		"go.mod": "module example.com/failing\n\ngo 1.26\n",
+		"failing/failing_test.go": "package failing\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+			"func TestFailsAgainstTheDatabase(t *testing.T) {\n\tt.Log(\"evidence directory: \" + os.Getenv(\"" + EnvTestEvidenceDir + "\"))\n\tt.Fatal(\"deliberate failure\")\n}\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, path), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := t.TempDir()
+	plan := Plan{Profile: ProfileFast, Dependencies: []string{"postgresql"}, Selections: []Selection{{Group: "go", Packages: []string{"./failing"}, Tests: []string{"TestFailsAgainstTheDatabase"}}}}
+	result, err := Execute(context.Background(), plan, RunOptions{Root: root, OutputDir: output})
+	if err == nil || result.Status != "fail" {
+		t.Fatalf("run = %s, %v; want a failed run", result.Status, err)
+	}
+	logs, _ := filepath.Glob(filepath.Join(output, "dependency-logs", "postgresql-tetral-test-postgres-*.log"))
+	if len(logs) != 1 {
+		t.Fatalf("dependency logs = %q; want one PostgreSQL log", logs)
+	}
+	body, err := os.ReadFile(logs[0])
+	if err != nil || !strings.Contains(string(body), "database system is ready to accept connections") {
+		t.Fatalf("PostgreSQL log = %q, %v; want its start", body, err)
+	}
+	reports, _ := filepath.Glob(filepath.Join(output, "go-*.jsonl"))
+	if len(reports) != 1 {
+		t.Fatalf("Go reports = %q; want one", reports)
+	}
+	if report, err := os.ReadFile(reports[0]); err != nil || !strings.Contains(string(report), "evidence directory: "+output) {
+		t.Fatalf("the test was not told the evidence directory %s: %v", output, err)
+	}
+}
+
+func TestFailedRunKeepsTheLogsOfContainersItsEndedTestsLeft(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	output := t.TempDir()
+	// The owner stands in for a test process that ended without cleanup.
+	owner := exec.Command("sleep", "600")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Process.Kill(); _ = owner.Wait() })
+	name, err := dependencyContainerName("orphan-log-proof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = removeContainer(context.Background(), name) })
+	arguments := slices.Concat([]string{"run", "-d", "--name", name},
+		ownerLabels("orphan-log-proof", "ended-test", owner.Process.Pid, processStartIdentity(owner.Process.Pid), output),
+		[]string{postgresImage, "sh", "-c", "echo orphan-cause; sleep 300"})
+	if err := runQuiet(ctx, "docker", arguments...); err != nil {
+		t.Fatal(err)
+	}
+	for logs, _ := commandOutput(ctx, "docker", "logs", name); !strings.Contains(logs, "orphan-cause"); logs, _ = commandOutput(ctx, "docker", "logs", name) {
+		if ctx.Err() != nil {
+			t.Fatalf("the container never logged its line: %q", logs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := owner.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = owner.Wait()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/failing\n\ngo 1.26\n")
+	if err := os.Mkdir(filepath.Join(root, "failing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, root, "failing/failing_test.go", "package failing\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"deliberate failure\") }\n")
+	plan := Plan{Profile: ProfileFast, Selections: []Selection{{Group: "go", Packages: []string{"./failing"}, Tests: []string{"TestFails"}}}}
+	if result, err := Execute(ctx, plan, RunOptions{Root: root, OutputDir: output}); err == nil || result.Status != "fail" {
+		t.Fatalf("run = %s, %v; want a failed run", result.Status, err)
+	}
+	path := filepath.Join(output, "container-logs", "orphaned", "postgres-"+name+".log")
+	body, err := os.ReadFile(path) //nolint:gosec // The path is beneath this test's directory.
+	if err != nil || !strings.Contains(string(body), "orphan-cause") {
+		t.Fatalf("log %s = %q, %v; want the orphan's own line", path, body, err)
+	}
+	if exists, err := dockerResourceExists(ctx, "container", "name", "^"+name+"$"); err != nil || exists {
+		t.Fatalf("the orphan remained after its log was kept: %v, %v", exists, err)
 	}
 }

@@ -37,6 +37,12 @@ func TestWorkflowSkeletonsHoldTheNamesReadersFindAndDistinctConcurrency(t *testi
 		{"a group that another workflow's group starts", setIn("workflows/ci-benchmark.yml", "go-build-cache-${{ github.ref }}-bench", "concurrency", "group"), "can share a concurrency group"},
 		{"a group renamed apart from the others", setIn("workflows/ci-benchmark.yml", "benchmark-${{ github.ref }}", "concurrency", "group"), ""},
 		{"main without its push trigger", removeIn("workflows/main-branch-verification.yml", "on", "push"), "does not start on push"},
+		{"a scheduled workflow without its red-run reporter", removeIn("workflows/engine-vulncheck.yml", "jobs", "report-red"), "has no report-red job"},
+		{"a reporter that does not wait for every job", setIn("workflows/cli-dependency-check.yml", "cargo-deny", "jobs", "report-red", "needs"), "not every other job"},
+		{"a reporter that runs on every event", setIn("workflows/scheduled-verification.yml", "always()", "jobs", "report-red", "if"), "does not run with if"},
+		{"a reporter that may write the repository", setIn("workflows/go-build-cache.yml", "write", "jobs", "report-red", "permissions", "contents"), "not exactly"},
+		{"a reporter that cannot write issues", setIn("workflows/go-build-cache.yml", "read", "jobs", "report-red", "permissions", "issues"), "not exactly"},
+		{"a reporter that cannot read a cancelled job's annotations", setIn("workflows/engine-vulncheck.yml", "none", "jobs", "report-red", "permissions", "checks"), "not exactly"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := VerifyWorkflowSkeletons(editedWorkflows(t, []workflowEdit{tc.edit}))

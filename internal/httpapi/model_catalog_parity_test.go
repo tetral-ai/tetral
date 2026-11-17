@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"maps"
 	"os/exec"
@@ -23,9 +24,11 @@ import { GatewayModelCatalog } from "./packages/provider-gateway/src/providers/c
 console.log(JSON.stringify(Object.fromEntries(GatewayModelCatalog.map((entry) =>
   [entry.providerId + "/" + entry.modelId, [entry.modelContextWindowTokens, entry.modelOutputTokenLimit]]))));`)
 	command.Dir = filepath.Join("..", "..", "services", "gateway")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("evaluate the Gateway catalog: %v", err)
+		t.Fatalf("evaluate the Gateway catalog: %v\n%s", err, stderr.String())
 	}
 	var gateway map[string][2]int
 	if err := json.Unmarshal(output, &gateway); err != nil {

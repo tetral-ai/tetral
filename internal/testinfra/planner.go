@@ -554,14 +554,11 @@ type goListPackage struct {
 func affectedGoPackages(ctx context.Context, root string, changedPaths []string) ([]string, error) {
 	command := exec.CommandContext(ctx, "go", "list", "-json", "./...")
 	command.Dir = root
-	output, err := command.StdoutPipe()
+	output, err := commandStdout(command)
 	if err != nil {
 		return nil, err
 	}
-	if err := command.Start(); err != nil {
-		return nil, err
-	}
-	decoder := json.NewDecoder(output)
+	decoder := json.NewDecoder(bytes.NewReader(output))
 	packages := map[string]goListPackage{}
 	for {
 		var pkg goListPackage
@@ -569,13 +566,9 @@ func affectedGoPackages(ctx context.Context, root string, changedPaths []string)
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			_ = command.Process.Kill()
 			return nil, err
 		}
 		packages[pkg.ImportPath] = pkg
-	}
-	if err := command.Wait(); err != nil {
-		return nil, err
 	}
 	direct := map[string]bool{}
 	for importPath, pkg := range packages {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -21,7 +20,7 @@ type commandGitHubClient struct{}
 func (commandGitHubClient) JSON(ctx context.Context, endpoint string, value any) error {
 	// Endpoints are assembled by the read-only CI gate and health collectors.
 	//nolint:gosec
-	body, err := exec.CommandContext(ctx, "gh", "api", endpoint).Output()
+	body, err := commandStdout(exec.CommandContext(ctx, "gh", "api", endpoint))
 	if err != nil {
 		return fmt.Errorf("read GitHub API %s: %w", endpoint, err)
 	}
@@ -36,9 +35,8 @@ func (commandGitHubClient) JSON(ctx context.Context, endpoint string, value any)
 func (commandGitHubClient) DownloadRunArtifacts(ctx context.Context, repository string, runID int64, pattern, directory string) error {
 	// Arguments are assembled by the read-only CI health collector.
 	//nolint:gosec
-	output, err := exec.CommandContext(ctx, "gh", "run", "download", strconv.FormatInt(runID, 10), "-R", repository, "-p", pattern, "-D", directory).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("download artifacts of run %d: %w: %s", runID, err, strings.TrimSpace(string(output)))
+	if err := runCommand(exec.CommandContext(ctx, "gh", "run", "download", strconv.FormatInt(runID, 10), "-R", repository, "-p", pattern, "-D", directory), nil); err != nil {
+		return fmt.Errorf("download artifacts of run %d: %w", runID, err)
 	}
 	return nil
 }

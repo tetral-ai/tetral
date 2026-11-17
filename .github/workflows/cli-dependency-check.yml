@@ -65,3 +65,40 @@ jobs:
       - name: Scan the module and the symbols it reaches
         working-directory: cli/reference
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+  report-red:
+    name: Report a Red Scheduled Run
+    needs: [cargo-deny, govulncheck]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+      issues: write
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Open, update or close the workflow's issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          SCHEDULE: ${{ github.event.schedule }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          go run ./internal/testinfra/cmd/tetral-ci-flow scheduled-issue
+          --workflow "$WORKFLOW"
+          --schedule "$SCHEDULE"
+          --run "$GITHUB_RUN_ID"
+          --attempt "$GITHUB_RUN_ATTEMPT"
+          --run-url "$RUN_URL"
+          --commit "$GITHUB_SHA"
+          --reporter 'Report a Red Scheduled Run'

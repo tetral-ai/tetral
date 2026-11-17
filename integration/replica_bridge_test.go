@@ -147,6 +147,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		t.Cleanup(provider.finish)
 		startHandoffOutputCapturesWithProvider(t, runtimeDB, provider)
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+		store.LifecyclePolicy.OutputCaptureWait = 80 * time.Millisecond
 		observed := &coreCaptureRejoinStore{BridgeAPIStore: store}
 		endpoint := serveReplicaBridge(t, observed, map[string]string{"runtime": pod}, nil)
 		request := bridgeAPIFinishIdleRequest(t, admin, sessionfixture.BridgeAPIScope(session, thread, binding, 1, pod), "turn_core_capture_original", `{"type":"end_turn"}`)
@@ -487,7 +488,7 @@ func (s *coreCaptureRejoinStore) FinishIdle(ctx context.Context, request *bridge
 func startReplicaFinishIdleCoreChild(t *testing.T, address string, request json.RawMessage) *handoffRuntimeChild {
 	t.Helper()
 	child := &handoffRuntimeChild{directory: t.TempDir(), done: make(chan struct{})}
-	input, err := json.Marshal(map[string]any{"address": address, "token": "runtime", "directory": child.directory, "request": request, "env": map[string]string{"TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS": "80"}})
+	input, err := json.Marshal(map[string]any{"address": address, "token": "runtime", "directory": child.directory, "request": request, "env": map[string]string{}})
 	if err != nil {
 		t.Fatal(err)
 	}

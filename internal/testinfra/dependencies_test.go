@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
 func TestFastPlanStartsNoDurableDependency(t *testing.T) {
@@ -41,15 +45,17 @@ func TestFastPlanStartsNoDurableDependency(t *testing.T) {
 	}
 }
 
-func TestSetupCommandErrorEndsWithItsOutputTail(t *testing.T) {
+func TestFailedCommandErrorNamesItAndEndsWithItsOutputTail(t *testing.T) {
 	longLine := "registry " + strings.Repeat("x", 1000)
-	failed := []string{"exit status 3"}
+	failed := []string{"sh: exit status 3"}
 	for line := 33; line < 50; line++ {
 		failed = append(failed, fmt.Sprintf("  | output %d", line))
 	}
 	failed = append(failed, "  | "+longLine[:300]+" ...", "  | unreachable", "  | ::error::forged")
 	for _, tc := range []struct {
 		name, script string
+		readStdout   bool
+		wantStdout   string
 		want         []string
 	}{
 		{
@@ -61,14 +67,36 @@ func TestSetupCommandErrorEndsWithItsOutputTail(t *testing.T) {
 			name:   "a successful command adds nothing",
 			script: `echo progress; echo warning >&2`,
 		},
+		{
+			name:       "a failing command whose output is read adds what it wrote to standard error",
+			script:     `echo '{"partial":'; echo 'go: example.com/m@v1.0.0: reading proxy: unexpected EOF' >&2; exit 1`,
+			readStdout: true,
+			wantStdout: "{\"partial\":\n",
+			want:       []string{"sh: exit status 1", "  | go: example.com/m@v1.0.0: reading proxy: unexpected EOF"},
+		},
+		{
+			name:       "a successful command whose output is read returns it",
+			script:     `echo listing; echo warning >&2`,
+			readStdout: true,
+			wantStdout: "listing\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var stdout []byte
+			var err error
+			if tc.readStdout {
+				command := exec.CommandContext(context.Background(), "sh", "-c", tc.script, "sh", longLine)
+				command.Dir = t.TempDir()
+				stdout, err = commandStdout(command)
+			} else {
+				err = runQuietInDir(context.Background(), t.TempDir(), "sh", "-c", tc.script, "sh", longLine)
+			}
 			var got []string
-			if err := runQuietInDir(context.Background(), t.TempDir(), "sh", "-c", tc.script, "sh", longLine); err != nil {
+			if err != nil {
 				got = strings.Split(err.Error(), "\n")
 			}
-			if !slices.Equal(got, tc.want) {
-				t.Fatalf("error lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+			if !slices.Equal(got, tc.want) || string(stdout) != tc.wantStdout {
+				t.Fatalf("standard output %q, error lines:\n%s\nwant %q and:\n%s", stdout, strings.Join(got, "\n"), tc.wantStdout, strings.Join(tc.want, "\n"))
 			}
 		})
 	}
@@ -114,6 +142,38 @@ func TestNextRunnerRemovesDependencyContainerOwnedByDeadProcess(t *testing.T) {
 	}
 	if strings.TrimSpace(output) != "" {
 		t.Fatal("dead runner's dependency container remained")
+	}
+}
+
+func TestDependencyThatNeverBecameReadyKeepsItsLog(t *testing.T) {
+	t.Setenv(storagetest.EnvTestDatabaseURL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	evidence := t.TempDir()
+	var name string
+	starters := dependencyStarters{postgresql: func(ctx context.Context, m *dependencyManager) error {
+		var err error
+		if name, err = dependencyContainerName("postgres"); err != nil {
+			return err
+		}
+		m.containers = append(m.containers, name)
+		m.containerDependencies = append(m.containerDependencies, "postgresql")
+		arguments := slices.Concat([]string{"run", "-d", "--name", name}, dependencyContainerLabels("postgres", "never-ready"), []string{postgresImage, "sh", "-c", "echo dependency-cause; exit 1"})
+		if err := runQuiet(ctx, "docker", arguments...); err != nil {
+			return err
+		}
+		return errors.New("PostgreSQL dependency did not become ready")
+	}}
+	if _, err := startDependenciesWithRoot(ctx, []string{"postgresql"}, os.Environ(), starters, "", evidence); err == nil {
+		t.Fatal("a dependency that never became ready started")
+	}
+	path := filepath.Join(evidence, "dependency-logs", "postgresql-"+name+".log")
+	body, err := os.ReadFile(path) //nolint:gosec // The path is beneath this test's directory.
+	if err != nil || !strings.Contains(string(body), "dependency-cause") {
+		t.Fatalf("log %s = %q, %v; want the container's own line", path, body, err)
+	}
+	if exists, err := dockerResourceExists(ctx, "container", "name", "^"+name+"$"); err != nil || exists {
+		t.Fatalf("the container remained after its log was kept: %v, %v", exists, err)
 	}
 }
 
