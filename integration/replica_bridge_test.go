@@ -147,9 +147,6 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		t.Cleanup(provider.finish)
 		startHandoffOutputCapturesWithProvider(t, runtimeDB, provider)
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-		// The Bridge's own capture wait expires, as in production, where it is
-		// shorter than the Runtime's attempt deadline. The attempt that adopts the
-		// capture then has that whole deadline for its idle commit.
 		store.LifecyclePolicy.OutputCaptureWait = 80 * time.Millisecond
 		observed := &coreCaptureRejoinStore{BridgeAPIStore: store}
 		endpoint := serveReplicaBridge(t, observed, map[string]string{"runtime": pod}, nil)

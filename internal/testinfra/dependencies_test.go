@@ -146,7 +146,6 @@ func TestNextRunnerRemovesDependencyContainerOwnedByDeadProcess(t *testing.T) {
 }
 
 func TestDependencyThatNeverBecameReadyKeepsItsLog(t *testing.T) {
-	// The run starts its own PostgreSQL container, not an external one.
 	t.Setenv(storagetest.EnvTestDatabaseURL, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

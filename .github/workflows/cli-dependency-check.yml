@@ -66,9 +66,6 @@ jobs:
         working-directory: cli/reference
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
-  # On a schedule only: opens the issue of this workflow's schedule when a job
-  # failed, adds a comment while it stays red, and closes it on the schedule's
-  # next green run.
   report-red:
     name: Report a Red Scheduled Run
     needs: [cargo-deny, govulncheck]

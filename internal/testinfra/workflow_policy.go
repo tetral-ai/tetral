@@ -1057,10 +1057,6 @@ const (
 	scheduledReporterCondition = "always() && github.event_name == 'schedule'"
 )
 
-// verifyScheduledReporter holds that a workflow with a schedule ends with the
-// job that reports a red scheduled run: it waits for every other job whatever
-// their result, runs on a schedule only, and may write issues and read the
-// run's jobs and their check runs' annotations and nothing else.
 func verifyScheduledReporter(workflow *workflowYAMLNode) error {
 	if mappingValue(mappingValue(workflow, "on"), "schedule") == nil {
 		return nil

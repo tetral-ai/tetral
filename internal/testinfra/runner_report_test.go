@@ -239,7 +239,6 @@ func TestRunnerAnchorsRelativeEvidencePathsAtRepositoryRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".test-results", "example", "result.json")); err != nil {
 		t.Fatalf("relative evidence output was not rooted at the repository: %v", err)
 	}
-	// The run records its resources from its start to its end.
 	if body, err := os.ReadFile(filepath.Join(root, ".test-results", "example", resourceRecordFile)); err != nil || bytes.Count(body, []byte("\n")) < 2 {
 		t.Fatalf("resource record = %q, %v; want a first and a last sample", body, err)
 	}
@@ -259,8 +258,6 @@ func TestResourceRecordSamplesMemoryLoadAndContainers(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), resourceRecordFile)
 	stop := recordResources(path, 20*time.Millisecond)
-	// Two samples before the stop come from the start and the interval; the
-	// stop adds the last one.
 	for body, _ := os.ReadFile(path); bytes.Count(body, []byte("\n")) < 2; body, _ = os.ReadFile(path) {
 		if ctx.Err() != nil {
 			t.Fatalf("the record holds %q; want two samples before its stop", body)
@@ -341,8 +338,6 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 	// printf spells the command's own summary entry, so the command line in
 	// the excerpt header does not contain it.
 	const commandWrite = "step command wrote the summary"
-	// cause is what a scheduled run's issue names when the job log holds this
-	// excerpt.
 	for _, tc := range []struct {
 		name, kind, diagnostic string
 		rejectSkip             bool
@@ -560,7 +555,6 @@ func TestFailedPlanReportsTheFailedCommandsOwnError(t *testing.T) {
 	if body, readErr := os.ReadFile(filepath.Join(output, "result.json")); readErr != nil || json.Unmarshal(body, &written) != nil || len(written.Steps) != 1 {
 		t.Fatalf("result.json does not hold the plan step: %v", readErr)
 	}
-	// The console prints the returned error; result.json holds the step.
 	if result.Status != "apparatus-failed" || !strings.Contains(err.Error(), "go list: exit status 1") || !strings.Contains(err.Error(), cause) || !strings.Contains(written.Steps[0].FirstFailure, cause) {
 		t.Fatalf("status %s, error %v, recorded first failure %q; want each to carry go list's own error", result.Status, err, written.Steps[0].FirstFailure)
 	}
@@ -744,7 +738,6 @@ func writeReport(t *testing.T, path, body string) {
 }
 
 func TestFailedRunKeepsItsDependencyContainersLogs(t *testing.T) {
-	// The run starts its own PostgreSQL container, not an external one.
 	t.Setenv(storagetest.EnvTestDatabaseURL, "")
 	root := t.TempDir()
 	for path, body := range map[string]string{
@@ -782,16 +775,11 @@ func TestFailedRunKeepsItsDependencyContainersLogs(t *testing.T) {
 	}
 }
 
-// A test process that go test -timeout ended ran none of its cleanups, so its
-// fixture's container outlives it with the only record of what it was doing.
-// Other processes of a run collect orphans too, at any moment; whichever does
-// keeps the log in the evidence of the run the container names.
 func TestFailedRunKeepsTheLogsOfContainersItsEndedTestsLeft(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	output := t.TempDir()
-	// The owner stands in for the test process: alive while its container
-	// starts and logs, then ended without cleanup.
+	// The owner stands in for a test process that ended without cleanup.
 	owner := exec.Command("sleep", "600")
 	if err := owner.Start(); err != nil {
 		t.Fatal(err)

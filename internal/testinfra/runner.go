@@ -108,9 +108,8 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 
 	if runErr != nil {
 		dependencies.saveLogs(options.OutputDir)
-		// A test process that its timeout or a signal ended left its
-		// fixtures' containers behind; collecting them keeps their logs in
-		// the evidence directory they are labelled with.
+		// A test process ended by its timeout or a signal leaves its
+		// fixtures' containers behind.
 		orphanCtx, cancelOrphans := context.WithTimeout(context.Background(), dependencyStopTimeout)
 		_ = cleanupOrphanedDependencyContainers(orphanCtx)
 		cancelOrphans()

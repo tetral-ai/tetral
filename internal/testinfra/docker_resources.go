@@ -31,14 +31,11 @@ type DockerResources struct {
 	closed     bool
 }
 
-// FixtureTest is the test that owns a fixture: a *testing.T or *testing.B.
 type FixtureTest interface {
 	Name() string
 	Failed() bool
 }
 
-// EnvTestEvidenceDir names the evidence directory of the runner's run, where
-// a failed test's fixtures keep their containers' logs.
 const EnvTestEvidenceDir = "TETRAL_TEST_EVIDENCE_DIR"
 
 type DockerMount struct {
@@ -83,8 +80,6 @@ type DockerContainer struct {
 	ownedName string
 }
 
-// NewDockerResources starts a fixture for test. When test has failed by
-// Close, each container's log is kept in the run's evidence directory first.
 func NewDockerResources(ctx context.Context, test FixtureTest, kind string) (*DockerResources, error) {
 	if kind == "" || strings.Trim(kind, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
 		return nil, errors.New("invalid Docker fixture kind")
@@ -334,8 +329,6 @@ func (r *DockerResources) Close(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-// saveContainerLog writes a container's whole log to path. It is a record
-// only: a log that cannot be read ends with why, and nothing fails.
 func saveContainerLog(ctx context.Context, name, path string) {
 	// The path is beneath the runner's evidence directory; the test name in it
 	// has its separators and dots replaced.
@@ -358,8 +351,6 @@ func saveContainerLog(ctx context.Context, name, path string) {
 	}
 }
 
-// imageName is an image reference's last path element without its tag or
-// digest: postgres for ghcr.io/tetral-ai/mirror/postgres:18-alpine.
 func imageName(image string) string {
 	name := image[strings.LastIndex(image, "/")+1:]
 	if at := strings.IndexAny(name, ":@"); at >= 0 {

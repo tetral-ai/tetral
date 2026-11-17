@@ -13,30 +13,22 @@ import (
 	"time"
 )
 
-// A run records the host's available memory and load average and each
-// container's memory in resources.jsonl of its evidence, at its start, every
-// resourceRecordInterval and at its end, so a test that failed while the
-// runner was short of memory or overloaded shows it. It is a record only:
-// what it cannot read is written into the sample, and nothing fails the run.
 const (
 	resourceRecordInterval = 15 * time.Second
 	resourceRecordFile     = "resources.jsonl"
 )
 
 type resourceSample struct {
-	At                time.Time `json:"at"`
-	MemAvailableBytes int64     `json:"mem_available_bytes,omitempty"`
-	MemTotalBytes     int64     `json:"mem_total_bytes,omitempty"`
-	Load1             float64   `json:"load1"`
-	Load5             float64   `json:"load5"`
-	Load15            float64   `json:"load15"`
-	// ContainerMemory is Docker's "used / limit" for each running container.
-	ContainerMemory map[string]string `json:"container_memory,omitempty"`
-	Errors          []string          `json:"errors,omitempty"`
+	At                time.Time         `json:"at"`
+	MemAvailableBytes int64             `json:"mem_available_bytes,omitempty"`
+	MemTotalBytes     int64             `json:"mem_total_bytes,omitempty"`
+	Load1             float64           `json:"load1"`
+	Load5             float64           `json:"load5"`
+	Load15            float64           `json:"load15"`
+	ContainerMemory   map[string]string `json:"container_memory,omitempty"`
+	Errors            []string          `json:"errors,omitempty"`
 }
 
-// recordResources writes a sample to path now and every interval until the
-// returned stop, which writes a last one.
 func recordResources(path string, interval time.Duration) (stop func()) {
 	// The path is beneath the runner's evidence directory.
 	//nolint:gosec
@@ -112,7 +104,6 @@ func sampleResources(docker bool) resourceSample {
 	return sample
 }
 
-// meminfoBytes reads one "Name: value kB" line of /proc/meminfo.
 func meminfoBytes(meminfo []byte, name string) int64 {
 	scanner := bufio.NewScanner(bytes.NewReader(meminfo))
 	for scanner.Scan() {

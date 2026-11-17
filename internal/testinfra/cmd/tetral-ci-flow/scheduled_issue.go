@@ -18,8 +18,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/testinfra/ciflow"
 )
 
-// ghIssueAPI reads and writes GitHub through gh, which takes the repository
-// from GH_REPO and the token from GH_TOKEN, and reads job logs with both.
 type ghIssueAPI struct {
 	run     string
 	attempt int
@@ -82,8 +80,6 @@ func (ghIssueAPI) Annotations(id int64) ([]ciflow.ScheduledAnnotation, error) {
 	return annotations, json.Unmarshal(body, &annotations)
 }
 
-// scheduleTitles is the issue title of every schedule that the workflows in
-// directory declare. GitHub names a workflow without a name by its path.
 func scheduleTitles(directory string) ([]string, error) {
 	paths, err := filepath.Glob(filepath.Join(directory, "*.y*ml"))
 	if err != nil {
@@ -116,6 +112,7 @@ func scheduleTitles(directory string) ([]string, error) {
 			}
 		}
 		if workflow.Name == "" {
+			// GitHub names a workflow without a name by its path.
 			workflow.Name = filepath.ToSlash(path)
 		}
 		for _, schedule := range on.Schedule {

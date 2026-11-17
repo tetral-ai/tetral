@@ -11,10 +11,9 @@ type issueAPIStandIn struct {
 	jobs        []ScheduledJob
 	logs        map[int64]string
 	annotations map[int64][]ScheduledAnnotation
-	// unreadable fails the reads of these jobs' logs and annotations.
-	unreadable map[int64]bool
-	issues     []ScheduledIssue
-	calls      []string
+	unreadable  map[int64]bool
+	issues      []ScheduledIssue
+	calls       []string
 }
 
 func (s *issueAPIStandIn) Jobs() ([]ScheduledJob, error) { return s.jobs, nil }
@@ -65,7 +64,6 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 	open := []ScheduledIssue{{Number: 3, Title: "Scheduled check red on main: engine-vulncheck (23 6 * * *)"}, {Number: 9, Title: title}}
 	current := []string{title, weekly.Title, open[0].Title}
 	run := ScheduledRun{Workflow: "Scheduled Verification", Schedule: "41 6 * * *", URL: "https://github.com/o/r/actions/runs/7", Commit: "abc123", Reporter: reporter, DeclaredTitles: current}
-	// A workflow's cron was edited: no run carries the old one any more.
 	removed := ScheduledIssue{Number: 4, Title: ScheduledIssueTitle("Scheduled Verification", "41 5 * * *")}
 	coverage := ScheduledJob{ID: 2, Name: "Report-only Coverage", Conclusion: "cancelled"}
 	// The annotations GitHub gave job 132777784768 of run 43702901197.
