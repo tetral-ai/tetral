@@ -242,7 +242,9 @@ Drives on this machine belong here, with two owners:
   owner, its reply, and each notice that drops the kernel's cached pages,
   given as lines to the watcher a test sets; it only observes, and exists
   only for the unit tests and under `test-seams`. The integration tests'
-  support module puts these lines on a failing test's timeline.
+  support module puts these lines on a failing test's timeline when
+  `test-seams` is on, as in the workspace's run; a run of this package
+  alone needs `--features test-seams` for them.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
   rules.
 - `upload.rs`: the upload triggers, the upload slot requests, the quiet

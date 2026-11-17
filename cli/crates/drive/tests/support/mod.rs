@@ -530,6 +530,9 @@ impl Env {
         // Canonical, as an App Server's root is; on macOS the temporary
         // directory lies behind the `/var` link.
         let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        // The watch exists under `test-seams`, which the workspace's run
+        // turns on and a run of this package alone does not.
+        #[cfg(feature = "test-seams")]
         drive::watch::watch(|line| timeline::note("drive", line));
         let mounts_at_failure = {
             let root = root.path().to_path_buf();
