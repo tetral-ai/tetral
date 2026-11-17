@@ -89,4 +89,7 @@ bounded observer.
   record a failure as `transport.credential_reload_failed` with
   `transport.outcome` `invalid_generation` or `candidate_verification_failed`.
 - **Close.** `close()` stops observation, interrupts a validating candidate
-  and joins every pool within its deadline (default 5 seconds).
+  and joins every pool within its deadline (default 5 seconds). The owner
+  waits for a pool's close one second past the time it gave the pool and then
+  goes on, so a close the driver never settles holds neither a failed startup
+  nor a replacement nor `close()`.

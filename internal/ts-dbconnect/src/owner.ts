@@ -55,6 +55,7 @@ interface Generation { readonly sql: Bun.SQL; readonly trust?: Trust; users: num
 
 const candidateRetryInitialMs = 250;
 const candidateRetryMaxMs = 5_000;
+const poolCloseGraceSeconds = 1;
 
 async function readTrust(path: string): Promise<Trust> {
   let pem: string;
@@ -143,8 +144,17 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
     if (previous !== undefined) return previous;
     if (!generations.has(generation)) return Promise.resolve();
     const closing = Promise.resolve().then(async () => {
-      try { await generation.sql.close({ timeout: remaining(seconds) }); }
-      finally { generations.delete(generation); pools--; event("closed"); poolCloses.delete(generation); }
+      const timeout = remaining(seconds);
+      let overdue: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // On Bun 1.3.14 the close of a pool that still has a connection in
+        // its handshake can fail to settle (oven-sh/bun#32095).
+        await Promise.race([
+          generation.sql.close({ timeout }),
+          new Promise<void>((resolve) => { overdue = setTimeout(resolve, (timeout + poolCloseGraceSeconds) * 1000); }),
+        ]);
+      }
+      finally { if (overdue !== undefined) clearTimeout(overdue); generations.delete(generation); pools--; event("closed"); poolCloses.delete(generation); }
     });
     poolCloses.set(generation, closing);
     return closing;
