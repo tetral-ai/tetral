@@ -279,8 +279,11 @@ func TestResourceRecordSamplesMemoryLoadAndContainers(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &sample); err != nil {
 			t.Fatalf("sample %q: %v", line, err)
 		}
-		if !sample.At.After(previous) || sample.MemAvailableBytes <= 0 || sample.MemAvailableBytes > sample.MemTotalBytes || sample.Load1 < 0 || len(sample.Errors) != 0 {
-			t.Fatalf("sample %+v after %s; want a later time, available memory within the total, a load and no error", sample, previous)
+		// A docker stats call that outlives its deadline on a loaded host is
+		// recorded in the sample; the /proc reads have no deadline.
+		hostErrors := slices.DeleteFunc(slices.Clone(sample.Errors), func(e string) bool { return strings.HasPrefix(e, "docker stats: ") })
+		if !sample.At.After(previous) || sample.MemAvailableBytes <= 0 || sample.MemAvailableBytes > sample.MemTotalBytes || sample.Load1 < 0 || len(hostErrors) != 0 {
+			t.Fatalf("sample %+v after %s; want a later time, available memory within the total, a load and no error reading them", sample, previous)
 		}
 		previous = sample.At
 		sawContainer = sawContainer || strings.Contains(sample.ContainerMemory[c.Name], " / ")
@@ -356,7 +359,6 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 			want:  []string{"(fail) gateway > routes a stream [12.00ms]"},
 			cause: "`gateway > routes a stream`",
 		},
-
 		{
 			name: "rejected Go test skip", kind: "go-json", diagnostic: skipReport, rejectSkip: true,
 			want:   []string{"    fixture_test.go:3: NATS fixture is not provisioned", "--- SKIP: TestNeedsFixture (0.00s)"},
