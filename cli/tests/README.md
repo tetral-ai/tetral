@@ -114,7 +114,8 @@ the isolated harness tests without starting the CLI.
   each control the test sent the reference control server; each request on
   Engine's side at its arrival and how it ended, as far as that server could
   know; each request the Git server answered; each step of a seam clock,
-  each barrier a process waited at and each count it reported. The
+  each barrier a process waited at and each count it reported; and each
+  panic with its thread. The
   reference control server's and the Git server's own stderr go to the
   console instead. `<record>.reference-<n>.json` holds that server's traffic
   and state at the failure. The harness writes them from a panic hook, so a test needs no code

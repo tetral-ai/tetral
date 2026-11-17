@@ -175,7 +175,18 @@ impl Timeline {
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |panic| {
                 previous(panic);
-                TIMELINE.write(&panic.to_string().replace('\n', " "));
+                // Kept as a line, so a later panic's records hold this one.
+                let thread = std::thread::current();
+                TIMELINE.push(
+                    "test",
+                    None,
+                    format!(
+                        "thread '{}' panics: {}",
+                        thread.name().unwrap_or("<unnamed>"),
+                        panic.to_string().replace('\n', " ")
+                    ),
+                );
+                TIMELINE.write();
             }));
         }
         Timeline {
@@ -220,17 +231,16 @@ impl Timeline {
     }
 
     /// Writes the failure's records, again at each panic, and prints where
-    /// they are at the first.
+    /// they are at the first. A panic whose write is skipped is in the next.
     // The drive crate's unit tests include this file under its deny of
     // prints; a failure's notice goes to the test's stderr.
     #[allow(clippy::print_stderr)]
-    fn write(&self, panic: &str) {
+    fn write(&self) {
         // A panic while the records are written, on this thread or another,
         // leaves them to the write under way.
         let Ok(_writing) = self.writing.try_lock() else {
             return;
         };
-        let at = self.start.elapsed();
         let parts: Vec<(String, AtFailure)> = lock(&self.parts)
             .iter()
             .map(|(label, part)| (label.clone(), part()))
@@ -258,7 +268,6 @@ impl Timeline {
                 rows.push((*time, label.clone(), text.clone()));
             }
         }
-        rows.push((at, "test".to_owned(), format!("panics: {panic}")));
         rows.sort_by_key(|(time, _, _)| *time);
         let width = rows
             .iter()
