@@ -306,15 +306,7 @@ fn at_failure(control: &str) -> timeline::AtFailure {
                     format!("{request} arrives"),
                 ));
                 if entry["ended_unix_ns"].is_u64() {
-                    let gone = if entry["client_gone"] == true {
-                        ", its client gone"
-                    } else {
-                        ""
-                    };
-                    lines.push((
-                        time(&entry["ended_unix_ns"]),
-                        format!("{request} ends with status {}{gone}", entry["status"]),
-                    ));
+                    lines.push((time(&entry["ended_unix_ns"]), ended(&request, entry)));
                 } else {
                     lines.push((timeline::now(), format!("{request} is still being served")));
                 }
@@ -335,5 +327,61 @@ fn at_failure(control: &str) -> timeline::AtFailure {
             "json".to_owned(),
             serde_json::to_string_pretty(&both).unwrap_or_default(),
         )],
+    }
+}
+
+/// How the request `entry` of the traffic log ended, in the words of the
+/// timeline: only what the reference control server could know.
+fn ended(request: &str, entry: &Value) -> String {
+    let status = entry["status"].as_u64();
+    match (entry["outcome"].as_str(), status) {
+        (Some("answered"), Some(status)) => format!("{request} ends with status {status}"),
+        (Some("client_gone"), Some(status)) => {
+            format!("{request} ends with status {status} after its client had gone")
+        }
+        (Some("client_gone"), None) => {
+            format!("{request} ends unanswered after its client had gone")
+        }
+        (Some("client_unknown"), Some(status)) => format!(
+            "{request} ends with status {status}; its body was not read to the end, so whether its client was still there is not known"
+        ),
+        (Some("cut"), _) => format!("{request} is cut without an answer"),
+        (outcome, _) => format!(
+            "{request} ends: {}",
+            json!({ "outcome": outcome, "status": status })
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_way_a_request_ended_has_its_own_words() {
+        for (entry, words) in [
+            (
+                json!({"outcome": "answered", "status": 200}),
+                "#1 GET /x ends with status 200",
+            ),
+            (
+                json!({"outcome": "client_gone", "status": 400}),
+                "#1 GET /x ends with status 400 after its client had gone",
+            ),
+            (
+                json!({"outcome": "client_gone"}),
+                "#1 GET /x ends unanswered after its client had gone",
+            ),
+            (
+                json!({"outcome": "client_unknown", "status": 400}),
+                "#1 GET /x ends with status 400; its body was not read to the end, so whether its client was still there is not known",
+            ),
+            (
+                json!({"outcome": "cut"}),
+                "#1 GET /x is cut without an answer",
+            ),
+        ] {
+            assert_eq!(ended("#1 GET /x", &entry), words, "{entry}");
+        }
     }
 }
