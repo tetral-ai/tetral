@@ -1060,7 +1060,7 @@ const (
 // verifyScheduledReporter holds that a workflow with a schedule ends with the
 // job that reports a red scheduled run: it waits for every other job whatever
 // their result, runs on a schedule only, and may write issues and read the
-// run's jobs and nothing else.
+// run's jobs and their check runs' annotations and nothing else.
 func verifyScheduledReporter(workflow *workflowYAMLNode) error {
 	if mappingValue(mappingValue(workflow, "on"), "schedule") == nil {
 		return nil
@@ -1087,8 +1087,8 @@ func verifyScheduledReporter(workflow *workflowYAMLNode) error {
 		return fmt.Errorf("%s does not run with if: %s", scheduledReporterJobID, scheduledReporterCondition)
 	}
 	permissions := mappingValue(reporter, "permissions")
-	if permissions == nil || len(permissions.Content) != 4 || scalar(mappingValue(permissions, "actions")) != "read" || scalar(mappingValue(permissions, "issues")) != "write" {
-		return fmt.Errorf("%s permissions are not exactly actions: read and issues: write", scheduledReporterJobID)
+	if permissions == nil || len(permissions.Content) != 6 || scalar(mappingValue(permissions, "actions")) != "read" || scalar(mappingValue(permissions, "checks")) != "read" || scalar(mappingValue(permissions, "issues")) != "write" {
+		return fmt.Errorf("%s permissions are not exactly actions: read, checks: read and issues: write", scheduledReporterJobID)
 	}
 	return nil
 }

@@ -200,6 +200,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: read
+      checks: read
       issues: write
     steps:
       - name: Check out the revision

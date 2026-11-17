@@ -511,17 +511,22 @@ Every workflow with a schedule (Scheduled Verification, engine-vulncheck, CLI
 Dependency Check, Go Build Cache) ends with the job **Report a Red Scheduled
 Run**, which waits for all its other jobs whatever their result and acts only
 on a scheduled run (`tetral-ci-flow scheduled-issue`, with `actions: read` to
-read the run's jobs and `issues: write`). Each schedule has its own issue,
+read the run's jobs, `checks: read` to read a job's annotations and
+`issues: write`). Each schedule has its own issue,
 since a workflow's schedules can run different jobs: a run with a failed job
 opens the issue `Scheduled check red on main: <workflow name> (<cron>)`,
 labelled `scheduled-check-red`, or adds a comment to it while it is open; the
 schedule's next run whose jobs all succeeded comments and closes it. A skipped
 job did not run and counts for neither, so a run whose other jobs succeeded is
-green; a run with a cancelled job and none failed leaves the issue as it is.
-Each failed job is listed with the cause its log prints: the advisory IDs it
-reports (`GO-`, `GHSA-`, `RUSTSEC-`), the tests that failed, or the error of a
-run that failed before its tests, and "no cause recorded" when the log names
-none, which is a defect of that job's output to fix.
+green. GitHub reports a job that ran past its `timeout-minutes` as cancelled,
+with the annotation "The job has exceeded the maximum execution time of ...";
+such a job failed, and that message is its cause. A run with any other
+cancelled job and none failed leaves the issue as it is. Each failed job is
+listed with the cause its log prints: the advisory IDs it reports (`GO-`,
+`GHSA-`, `RUSTSEC-`), the tests that failed, or the error of a run that failed
+before its tests, and "no cause recorded" when the log names none, which is a
+defect of that job's output to fix. A cancelled job whose annotations cannot
+be read is listed with the read error.
 
 `internal/testinfra/go_shard_weights.json` balances the Go Race shards. It
 holds medians of Go Race evidence in milliseconds: every package's `Elapsed`

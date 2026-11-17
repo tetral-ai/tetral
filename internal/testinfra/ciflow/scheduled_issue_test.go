@@ -8,16 +8,29 @@ import (
 )
 
 type issueAPIStandIn struct {
-	jobs   []ScheduledJob
-	logs   map[int64]string
-	issues []ScheduledIssue
-	calls  []string
+	jobs        []ScheduledJob
+	logs        map[int64]string
+	annotations map[int64][]ScheduledAnnotation
+	// unreadable fails the reads of these jobs' logs and annotations.
+	unreadable map[int64]bool
+	issues     []ScheduledIssue
+	calls      []string
 }
 
 func (s *issueAPIStandIn) Jobs() ([]ScheduledJob, error) { return s.jobs, nil }
 func (s *issueAPIStandIn) JobLog(id int64) (string, error) {
 	s.calls = append(s.calls, fmt.Sprintf("log %d", id))
+	if s.unreadable[id] {
+		return "", fmt.Errorf("read the log of job %d: 404 Not Found", id)
+	}
 	return s.logs[id], nil
+}
+func (s *issueAPIStandIn) Annotations(id int64) ([]ScheduledAnnotation, error) {
+	s.calls = append(s.calls, fmt.Sprintf("annotations %d", id))
+	if s.unreadable[id] {
+		return nil, fmt.Errorf("HTTP 403: Resource not accessible by integration")
+	}
+	return s.annotations[id], nil
 }
 func (s *issueAPIStandIn) OpenIssues(label string) ([]ScheduledIssue, error) {
 	if label != ScheduledRedLabel {
@@ -51,6 +64,14 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 	}
 	weekly := ScheduledIssue{Number: 5, Title: ScheduledIssueTitle(run.Workflow, "17 7 * * 1")}
 	open := []ScheduledIssue{{Number: 3, Title: "Scheduled check red on main: engine-vulncheck (23 6 * * *)"}, {Number: 9, Title: title}}
+	coverage := ScheduledJob{ID: 2, Name: "Report-only Coverage", Conclusion: "cancelled"}
+	// The annotations GitHub gave job 132777784768 of run 43702901197.
+	timedOut := []ScheduledAnnotation{
+		{Message: "The job has exceeded the maximum execution time of 95m0s"},
+		{Message: "The operation was canceled."},
+		{Message: "The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026."},
+	}
+	cancelledByHand := []ScheduledAnnotation{{Message: "The operation was canceled."}}
 	failedRun := []ScheduledJob{
 		{ID: 1, Name: "Dependency Advisories", Conclusion: "failure"},
 		{ID: 2, Name: "Report-only Coverage", Conclusion: "success"},
@@ -62,7 +83,8 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 		1: "2026-11-16T06:41:12.0000000Z Vulnerability #1: GO-2026-4100\n2026-11-16T06:41:12.0000000Z   More info: GO-2026-4100\nGHSA-2c2m-3v8f-9x7q in bun audit\n",
 		4: "--- FAIL: TestPostgreSQLRuntimeContextRecovery (3.20s)\n    --- FAIL: TestPostgreSQLRuntimeContextRecovery/resume (1.00s)\n",
 	}
-	failedBody := "Scheduled run https://github.com/o/r/actions/runs/7 of Scheduled Verification on commit abc123 failed.\n\n" +
+	failedHeader := "Scheduled run https://github.com/o/r/actions/runs/7 of Scheduled Verification on commit abc123 failed.\n\n"
+	failedBody := failedHeader +
 		"- Dependency Advisories: `GO-2026-4100`, `GHSA-2c2m-3v8f-9x7q`\n" +
 		"- Compatibility and Repository Health: `TestPostgreSQLRuntimeContextRecovery`, `TestPostgreSQLRuntimeContextRecovery/resume`\n"
 	green := []ScheduledJob{
@@ -71,11 +93,13 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 		{ID: 6, Name: reporter, Conclusion: ""},
 	}
 	for _, row := range []struct {
-		name   string
-		jobs   []ScheduledJob
-		issues []ScheduledIssue
-		did    string
-		calls  []string
+		name        string
+		jobs        []ScheduledJob
+		issues      []ScheduledIssue
+		annotations []ScheduledAnnotation
+		unreadable  map[int64]bool
+		did         string
+		calls       []string
 	}{
 		{
 			name: "a failed job and no open issue create the issue", jobs: failedRun, issues: open[:1], did: "created",
@@ -96,16 +120,30 @@ func TestScheduledRunKeepsItsWorkflowsIssueInStep(t *testing.T) {
 			calls: []string{"log 1", "log 4", "label " + ScheduledRedLabel, "create " + title + " [" + ScheduledRedLabel + "]\n" + failedBody},
 		},
 		{
-			name: "none failed but one cancelled: nothing", issues: open, did: "none",
-			jobs: []ScheduledJob{{ID: 1, Name: "Dependency Advisories", Conclusion: "success"}, {ID: 2, Name: "Report-only Coverage", Conclusion: "cancelled"}},
+			name: "a job ended at its time limit and no open issue create the issue, naming the limit", issues: open[:1], annotations: timedOut, did: "created",
+			jobs: []ScheduledJob{{ID: 1, Name: "Dependency Advisories", Conclusion: "success"}, coverage},
+			calls: []string{"annotations 2", "label " + ScheduledRedLabel, "create " + title + " [" + ScheduledRedLabel + "]\n" + failedHeader +
+				"- Report-only Coverage: `The job has exceeded the maximum execution time of 95m0s`\n"},
 		},
+		{
+			name: "none failed but one cancelled by hand: nothing", issues: open, annotations: cancelledByHand, did: "none",
+			jobs:  []ScheduledJob{{ID: 1, Name: "Dependency Advisories", Conclusion: "success"}, coverage},
+			calls: []string{"annotations 2"},
+		},
+		{
+			name: "a cancelled job whose annotations cannot be read is reported with the read error", issues: open, unreadable: map[int64]bool{2: true}, did: "commented",
+			jobs: []ScheduledJob{{ID: 1, Name: "Dependency Advisories", Conclusion: "success"}, coverage},
+			calls: []string{"annotations 2", "comment 9\n" + failedHeader +
+				"- Report-only Coverage: cancelled, and its annotations could not be read: HTTP 403: Resource not accessible by integration\n"},
+		},
+
 		{
 			name: "every job skipped: nothing", issues: open, did: "none",
 			jobs: []ScheduledJob{{ID: 5, Name: "Repeated Concurrency Owners", Conclusion: "skipped"}, {ID: 6, Name: reporter}},
 		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			api := &issueAPIStandIn{jobs: row.jobs, logs: logs, issues: row.issues}
+			api := &issueAPIStandIn{jobs: row.jobs, logs: logs, annotations: map[int64][]ScheduledAnnotation{2: row.annotations}, unreadable: row.unreadable, issues: row.issues}
 			did, err := ReportScheduledRun(api, run)
 			if err != nil || did != row.did || !slices.Equal(api.calls, row.calls) {
 				t.Fatalf("did %q, %v, calls:\n%s\nwant %q, calls:\n%s", did, err, strings.Join(api.calls, "\n--\n"), row.did, strings.Join(row.calls, "\n--\n"))

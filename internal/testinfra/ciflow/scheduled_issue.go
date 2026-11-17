@@ -23,11 +23,20 @@ type ScheduledIssue struct {
 	Title  string `json:"title"`
 }
 
+// ScheduledAnnotation is an annotation of a job's check run as the GitHub API
+// lists it.
+type ScheduledAnnotation struct {
+	Message string `json:"message"`
+}
+
 // ScheduledIssueAPI is what the report reads from and writes to GitHub.
 type ScheduledIssueAPI interface {
 	// Jobs lists the jobs of the run's attempt, the reporting job included.
 	Jobs() ([]ScheduledJob, error)
 	JobLog(id int64) (string, error)
+	// Annotations lists the annotations of a job's check run, whose ID is the
+	// job's.
+	Annotations(id int64) ([]ScheduledAnnotation, error)
 	OpenIssues(label string) ([]ScheduledIssue, error)
 	EnsureLabel(name string) error
 	CreateIssue(title, body, label string) error
@@ -52,17 +61,19 @@ func ScheduledIssueTitle(workflow, schedule string) string {
 }
 
 // ReportScheduledRun keeps the issue of a workflow's schedule in step with
-// its scheduled run: a run with a failed job opens the issue or comments on the open one;
-// a run whose jobs all succeeded comments on the open issue and closes it. A
-// skipped job did not run (each schedule runs only its own jobs) and counts
-// for neither; a run with a cancelled job and none failed changes nothing,
-// and so does a green run with no open issue. It returns what it did.
+// its scheduled run: a run with a failed job opens the issue or comments on
+// the open one; a run whose jobs all succeeded comments on the open issue and
+// closes it. A skipped job did not run (each schedule runs only its own jobs)
+// and counts for neither. GitHub reports a job that ran past its time limit
+// as cancelled, with an annotation that says so; such a job failed. A run
+// with any other cancelled job and none failed changes nothing, and so does a
+// green run with no open issue. It returns what it did.
 func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error) {
 	jobs, err := api.Jobs()
 	if err != nil {
 		return "", fmt.Errorf("list the run's jobs: %w", err)
 	}
-	var failed []ScheduledJob
+	var failed []string
 	ran, cancelled := 0, false
 	for _, job := range jobs {
 		switch {
@@ -70,7 +81,24 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 		case job.Conclusion == "success":
 			ran++
 		case job.Conclusion == "failure" || job.Conclusion == "timed_out":
-			failed = append(failed, job)
+			log, err := api.JobLog(job.ID)
+			if err != nil {
+				return "", fmt.Errorf("read the log of job %s: %w", job.Name, err)
+			}
+			failed = append(failed, job.Name+": "+JobCause(log))
+		case job.Conclusion == "cancelled":
+			annotations, err := api.Annotations(job.ID)
+			if err != nil {
+				// Without its annotations a time limit cannot be told from a
+				// cancel, and a red run must not go unreported.
+				failed = append(failed, job.Name+": cancelled, and its annotations could not be read: "+oneLine(err.Error()))
+				continue
+			}
+			if limit := timeLimitAnnotation(annotations); limit != "" {
+				failed = append(failed, job.Name+": "+limit)
+				continue
+			}
+			cancelled = true
 		default:
 			cancelled = true
 		}
@@ -90,12 +118,8 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 	switch {
 	case len(failed) > 0:
 		body := fmt.Sprintf("Scheduled run %s of %s on commit %s failed.\n", run.URL, run.Workflow, run.Commit)
-		for _, job := range failed {
-			log, err := api.JobLog(job.ID)
-			if err != nil {
-				return "", fmt.Errorf("read the log of job %s: %w", job.Name, err)
-			}
-			body += fmt.Sprintf("\n- %s: %s", job.Name, JobCause(log))
+		for _, line := range failed {
+			body += "\n- " + line
 		}
 		body += "\n"
 		if number != 0 {
@@ -113,6 +137,24 @@ func ReportScheduledRun(api ScheduledIssueAPI, run ScheduledRun) (string, error)
 		}
 		return "closed", api.CloseIssue(number)
 	}
+}
+
+// GitHub's annotation on a job it ended at its timeout-minutes; the job's log
+// holds only the line a manual cancel also writes.
+const timeLimitMessage = "The job has exceeded the maximum execution time"
+
+func timeLimitAnnotation(annotations []ScheduledAnnotation) string {
+	for _, annotation := range annotations {
+		if strings.HasPrefix(annotation.Message, timeLimitMessage) {
+			return "`" + strings.ReplaceAll(oneLine(annotation.Message), "`", "'") + "`"
+		}
+	}
+	return ""
+}
+
+// oneLine keeps text that GitHub or a command wrote to one line of an issue.
+func oneLine(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 var (

@@ -42,6 +42,7 @@ func TestWorkflowSkeletonsHoldTheNamesReadersFindAndDistinctConcurrency(t *testi
 		{"a reporter that runs on every event", setIn("workflows/scheduled-verification.yml", "always()", "jobs", "report-red", "if"), "does not run with if"},
 		{"a reporter that may write the repository", setIn("workflows/go-build-cache.yml", "write", "jobs", "report-red", "permissions", "contents"), "not exactly"},
 		{"a reporter that cannot write issues", setIn("workflows/go-build-cache.yml", "read", "jobs", "report-red", "permissions", "issues"), "not exactly"},
+		{"a reporter that cannot read a cancelled job's annotations", setIn("workflows/engine-vulncheck.yml", "none", "jobs", "report-red", "permissions", "checks"), "not exactly"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := VerifyWorkflowSkeletons(editedWorkflows(t, []workflowEdit{tc.edit}))

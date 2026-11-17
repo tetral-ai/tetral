@@ -70,6 +70,15 @@ func (ghIssueAPI) JobLog(id int64) (string, error) {
 	return string(body), nil
 }
 
+func (ghIssueAPI) Annotations(id int64) ([]ciflow.ScheduledAnnotation, error) {
+	body, err := readAPI(fmt.Sprintf("repos/{owner}/{repo}/check-runs/%d/annotations?per_page=100", id))
+	if err != nil {
+		return nil, err
+	}
+	var annotations []ciflow.ScheduledAnnotation
+	return annotations, json.Unmarshal(body, &annotations)
+}
+
 func (ghIssueAPI) OpenIssues(label string) ([]ciflow.ScheduledIssue, error) {
 	body, err := readAPI("repos/{owner}/{repo}/issues?state=open&per_page=100&labels=" + url.QueryEscape(label))
 	if err != nil {
