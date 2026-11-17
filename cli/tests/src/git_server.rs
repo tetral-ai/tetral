@@ -409,6 +409,10 @@ type Answer = (u16, Vec<(String, String)>, Vec<u8>);
 fn answer(shared: &Shared, request: &Request) -> Answer {
     let ticket = request.header(TICKET_HEADER).map(str::to_owned);
     let answer = checked(shared, request, ticket.as_deref());
+    crate::timeline::note(
+        "git server",
+        format!("{} {} answered {}", request.method, request.path, answer.0),
+    );
     let mut state = shared.state.lock().unwrap();
     state.requests.push(GitRequest {
         path: request.path.clone(),

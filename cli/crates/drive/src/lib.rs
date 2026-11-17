@@ -28,6 +28,8 @@ pub mod sync;
 pub mod sync_point;
 pub mod transfer;
 pub mod upload;
+#[cfg(any(test, feature = "test-seams"))]
+pub mod watch;
 
 pub use final_upload::{FinalMode, FinalUpload, FinalUploadRequest};
 pub use sync::{DriveSync, SyncConfig};

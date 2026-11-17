@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::binaries;
 use crate::seams::{SOCKET_VARIABLE, Seams, WAIT_LIMIT};
 use crate::socket_directory::{self, SocketContext};
+use crate::timeline;
 
 /// A finished run.
 #[derive(Debug)]
@@ -93,6 +94,9 @@ pub struct Tetral {
     sockets: SocketContext,
     stderr_backpressure: bool,
     output_limit: usize,
+    /// What the timeline calls the process: its program and the words of
+    /// its command line before the first option.
+    kind: String,
 }
 
 impl Tetral {
@@ -112,6 +116,20 @@ impl Tetral {
         S: AsRef<OsStr>,
     {
         let mut command = Command::new(program);
+        let arguments: Vec<S> = arguments.into_iter().collect();
+        let mut kind = program
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for word in arguments
+            .iter()
+            .map(|argument| argument.as_ref().to_string_lossy())
+            .take_while(|word| !word.starts_with('-') && !word.contains('/'))
+            .take(2)
+        {
+            kind.push(' ');
+            kind.push_str(&word);
+        }
         command.args(arguments).env_clear();
         let sockets = socket_directory::context();
         command.env(
@@ -125,6 +143,7 @@ impl Tetral {
             sockets,
             stderr_backpressure: false,
             output_limit: OUTPUT_LIMIT,
+            kind,
         }
     }
 
@@ -245,8 +264,11 @@ impl Tetral {
             .stderr(stderr)
             .spawn()
             .expect("tetral starts");
+        let label = timeline::label(&self.kind);
+        timeline::note(&label, format!("starts as process {}", child.id()));
         RunningChild::new(
             child,
+            label,
             self.sockets,
             self.stdin,
             self.stdin_open,
@@ -270,39 +292,62 @@ const READER_WAIT_LIMIT: Duration = Duration::from_secs(1);
 /// The socket context stays alive until the process and its readers end.
 pub struct RunningChild {
     child: Child,
+    label: String,
     stdout: Option<Reader>,
     stderr: Option<Reader>,
     blocked_stderr: Option<std::fs::File>,
     input: Option<Input>,
     output_limit: usize,
+    /// Set once the test has reaped the process and noted its exit.
+    exit_noted: Arc<AtomicBool>,
+    _at_failure: timeline::Registered,
     _sockets: SocketContext,
 }
 
 impl RunningChild {
     fn new(
         child: Child,
+        label: String,
         sockets: SocketContext,
         stdin: Vec<u8>,
         stdin_open: bool,
         blocked_stderr: Option<std::fs::File>,
         output_limit: usize,
     ) -> Self {
+        let exit_noted = Arc::new(AtomicBool::new(false));
+        let at_failure = {
+            let (pid, exit_noted) = (child.id(), exit_noted.clone());
+            timeline::at_failure(&label, move || timeline::AtFailure {
+                lines: unnoticed_exit(pid, &exit_noted)
+                    .map(|line| vec![(timeline::now(), line)])
+                    .unwrap_or_default(),
+                files: Vec::new(),
+            })
+        };
         let mut running = Self {
             child,
+            label,
             stdout: None,
             stderr: None,
             blocked_stderr,
             input: None,
             output_limit,
+            exit_noted,
+            _at_failure: at_failure,
             _sockets: sockets,
         };
         running.stdout = Some(Reader::start(
             running.child.stdout.take().expect("stdout is piped"),
             output_limit,
+            format!("{} stdout", running.label),
         ));
         if running.blocked_stderr.is_none() {
             let stderr = running.child.stderr.take().expect("stderr is piped");
-            running.stderr = Some(Reader::start(stderr, output_limit));
+            running.stderr = Some(Reader::start(
+                stderr,
+                output_limit,
+                format!("{} stderr", running.label),
+            ));
         }
         running.input = Some(Input::start(
             running.child.stdin.take().expect("stdin is piped"),
@@ -316,19 +361,39 @@ impl RunningChild {
         self.child.id()
     }
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
+        let status = self.child.try_wait();
+        if let Ok(Some(status)) = &status {
+            self.exited(*status);
+        }
+        status
     }
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.child.wait()
+        let status = self.child.wait();
+        if let Ok(status) = &status {
+            self.exited(*status);
+        }
+        status
     }
     pub fn kill(&mut self) -> io::Result<()> {
+        timeline::note(&self.label, "is killed");
         self.child.kill()
+    }
+
+    /// Notes the exit once, at the first wait that sees it.
+    fn exited(&mut self, status: ExitStatus) {
+        if !self.exit_noted.swap(true, Ordering::SeqCst) {
+            timeline::note(&self.label, format!("exits: {status}"));
+        }
     }
 
     /// Releases the explicit backpressure mode while the process still runs.
     pub fn drain_stderr(&mut self) {
         if let Some(pipe) = self.blocked_stderr.take() {
-            self.stderr = Some(Reader::start(pipe, self.output_limit));
+            self.stderr = Some(Reader::start(
+                pipe,
+                self.output_limit,
+                format!("{} stderr", self.label),
+            ));
         }
     }
 
@@ -352,13 +417,41 @@ impl RunningChild {
 
 impl Drop for RunningChild {
     fn drop(&mut self) {
-        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+        if !matches!(self.try_wait(), Ok(Some(_))) {
+            timeline::note(&self.label, "is killed as the test drops it");
             let _ = self.child.kill();
         }
-        let _ = self.child.wait();
+        let _ = self.wait();
         // Worker drops cancel nonblocking operations before joining; inherited
         // pipe handles cannot leave a reader or stdin writer waiting forever.
     }
+}
+
+/// At a failure, whether the process `pid` still runs or has exited without
+/// the test having waited for it, read without reaping it, so its pid stays
+/// its own; nothing once the test has reaped it.
+fn unnoticed_exit(pid: u32, exit_noted: &AtomicBool) -> Option<String> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    if exit_noted.load(Ordering::SeqCst) {
+        return None;
+    }
+    let pid = Pid::from_raw(i32::try_from(pid).ok()?)?;
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    Some(match waitid(WaitId::Pid(pid), options) {
+        Ok(None) => "still runs".to_owned(),
+        Ok(Some(status)) => {
+            let raw = match (status.exit_status(), status.terminating_signal()) {
+                (Some(code), _) => code << 8,
+                (None, Some(signal)) => signal | if status.dumped() { 0x80 } else { 0 },
+                (None, None) => return Some("has changed state without exiting".to_owned()),
+            };
+            format!(
+                "has exited, before the test waited for it: {}",
+                <ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(raw)
+            )
+        }
+        Err(error) => format!("cannot be asked whether it has exited: {error}"),
+    })
 }
 
 /// Waits for a started process and collects output already being drained.
@@ -433,7 +526,9 @@ struct Reader {
 }
 
 impl Reader {
-    fn start(mut pipe: impl Read + AsFd + Send + 'static, limit: usize) -> Self {
+    /// Reads `pipe` until its end, keeping `limit` bytes, and notes each of
+    /// its lines that holds more than blanks on the timeline as `source`.
+    fn start(mut pipe: impl Read + AsFd + Send + 'static, limit: usize, source: String) -> Self {
         nonblocking(&pipe);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
@@ -445,6 +540,7 @@ impl Reader {
                 error: None,
             };
             let mut buffer = [0; 16 * 1024];
+            let mut line = Vec::new();
             while !stopped.load(Ordering::Relaxed) {
                 match pipe.read(&mut buffer) {
                     Ok(0) => {
@@ -455,6 +551,14 @@ impl Reader {
                         result.total = result.total.saturating_add(read);
                         let retained = read.min(limit.saturating_sub(result.bytes.len()));
                         result.bytes.extend_from_slice(&buffer[..retained]);
+                        for byte in &buffer[..read] {
+                            if *byte == b'\n' {
+                                note_line(&source, &line);
+                                line.clear();
+                            } else if line.len() < LONGEST_NOTED_LINE {
+                                line.push(*byte);
+                            }
+                        }
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -466,6 +570,7 @@ impl Reader {
                     }
                 }
             }
+            note_line(&source, &line);
             result
         });
         Self {
@@ -544,6 +649,16 @@ impl Drop for Input {
     }
 }
 
+/// The most bytes of one output line the timeline gets.
+const LONGEST_NOTED_LINE: usize = 4 * 1024;
+
+fn note_line(source: &str, line: &[u8]) {
+    let text = String::from_utf8_lossy(line);
+    if !text.trim().is_empty() {
+        timeline::note(source, text.trim_end());
+    }
+}
+
 fn nonblocking(pipe: &impl AsFd) {
     let flags = rustix::fs::fcntl_getfl(pipe).expect("read pipe flags");
     rustix::fs::fcntl_setfl(pipe, flags | rustix::fs::OFlags::NONBLOCK)
@@ -568,6 +683,7 @@ mod tests {
             .unwrap();
         RunningChild::new(
             child,
+            "python3".to_owned(),
             socket_directory::context(),
             Vec::new(),
             false,
@@ -625,7 +741,7 @@ mod tests {
     fn an_open_pipe_cannot_keep_a_reader_or_stdin_writer_alive_after_cancellation() {
         let (reader, mut writer) = std::io::pipe().unwrap();
         writer.write_all(b"last output").unwrap();
-        let reader = Reader::start(reader, 1024);
+        let reader = Reader::start(reader, 1024, "pipe".to_owned());
         let start = Instant::now();
         let captured = reader.finish(start + Duration::from_millis(50));
         assert!(!captured.complete, "the live writer has not sent EOF");

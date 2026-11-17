@@ -676,7 +676,14 @@ mod tests {
                     });
                 }
             }
-            String::from_utf8(command.output().unwrap().stdout).unwrap()
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "sh {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
         };
         assert_eq!(seen(None), "inherited\n");
         assert_eq!(seen(Some(false)), "closed\n");

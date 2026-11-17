@@ -13,6 +13,9 @@
 
 mod support;
 
+// The seam clock, included from the harness, names the timeline at the root.
+use support::timeline;
+
 #[allow(dead_code)]
 #[path = "../../../tests/src/seams.rs"]
 mod seams;

@@ -13,11 +13,14 @@ pub mod record;
 pub mod reference;
 pub mod run;
 pub mod seams;
+#[cfg(test)]
+mod seams_tests;
 pub mod sessions;
 pub mod small_volume;
 pub mod snapshot;
 pub mod socket_directory;
 pub mod tasks;
+pub mod timeline;
 
 use std::path::{Path, PathBuf};
 
