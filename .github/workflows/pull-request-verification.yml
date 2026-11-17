@@ -151,7 +151,7 @@ jobs:
     needs: decide
     if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -201,7 +201,7 @@ jobs:
     needs: decide
     if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 24
+    timeout-minutes: 30
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -209,7 +209,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify Kubernetes and Helm definitions
-        timeout-minutes: 12
+        timeout-minutes: 18
         uses: ./.github/actions/run-test-evidence
         with:
           group: deployment
@@ -217,7 +217,7 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           needs-helm: 'true'
-          time-limit-minutes: 9
+          time-limit-minutes: 15
           go-cache: 'true'
       - name: Verify protocol contracts
         if: ${{ !cancelled() }}

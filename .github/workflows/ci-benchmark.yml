@@ -150,7 +150,7 @@ jobs:
     needs: [resolve, produce]
     if: ${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.produce.result) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -183,7 +183,7 @@ jobs:
     needs: [resolve, produce]
     if: ${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.produce.result) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

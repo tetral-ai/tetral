@@ -59,7 +59,7 @@ jobs:
     needs: changed
     if: needs.changed.outputs.cli == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 26
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -165,7 +165,7 @@ jobs:
     needs: changed
     if: needs.changed.outputs.cli == 'true'
     runs-on: macos-15
-    timeout-minutes: 26
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

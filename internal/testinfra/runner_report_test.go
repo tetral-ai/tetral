@@ -33,9 +33,9 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 		pkg     string
 		timeout string
 	}{
-		{name: "full integration", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
-		{name: "affected integration", profile: ProfileAffected, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
-		{name: "integration slice of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=15m"},
+		{name: "full integration", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=80m"},
+		{name: "affected integration", profile: ProfileAffected, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=80m"},
+		{name: "integration slice of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=35m"},
 		{name: "other package of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
 		{name: "unrelated package", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
 		{name: "integration subpackage", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration/static", timeout: "-timeout=20m"},
@@ -78,11 +78,58 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 		if err != nil || len(commands) != 1 {
 			t.Fatalf("serial commands = %v/%v; want one command", commands, err)
 		}
-		want := append([]string{"go", "test", "-json", "-count=1", "-race", "-timeout=25m"}, packages...)
+		want := append([]string{"go", "test", "-json", "-count=1", "-race", "-timeout=80m"}, packages...)
 		if !slices.Equal(commands[0].Arguments, want) {
 			t.Fatalf("serial multi-package command = %v; want %v", commands[0].Arguments, want)
 		}
 	})
+}
+
+func TestWholeIntegrationPackageRaceBudgetIsTwiceItsMeasuredTime(t *testing.T) {
+	commands, err := commandsForSelection(Plan{Profile: ProfileFull}, Selection{Group: "go", Packages: []string{"github.com/tetral-ai/tetral/integration"}}, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+	if err != nil || len(commands) != 1 {
+		t.Fatalf("commands = %v/%v; want one command", commands, err)
+	}
+	budget := goTestBudget(t, commands[0].Arguments)
+	if measured := integrationRaceTotal(t); budget < 2*measured {
+		t.Fatalf("the whole integration package's Race budget %s does not leave twofold headroom over its measured Race time %s", budget, measured)
+	}
+}
+
+func goTestBudget(t *testing.T, arguments []string) time.Duration {
+	t.Helper()
+	var budget time.Duration
+	for _, argument := range arguments {
+		value, ok := strings.CutPrefix(argument, "-timeout=")
+		if !ok {
+			continue
+		}
+		if budget != 0 {
+			t.Fatalf("Go command %v names more than one timeout", arguments)
+		}
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			t.Fatalf("Go timeout %q is malformed: %v", value, err)
+		}
+		budget = parsed
+	}
+	if budget == 0 {
+		t.Fatalf("Go command %v has no whole-package budget", arguments)
+	}
+	return budget
+}
+
+func integrationRaceTotal(t *testing.T) time.Duration {
+	t.Helper()
+	weights, err := loadGoShardWeights()
+	if err != nil {
+		t.Fatal(err)
+	}
+	measured := time.Duration(weights.Packages["github.com/tetral-ai/tetral/integration"].ElapsedMS) * time.Millisecond
+	if measured == 0 {
+		t.Fatal("the shard weights hold no Race time of the integration package")
+	}
+	return measured
 }
 
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
@@ -110,35 +157,11 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 		t.Fatalf("third coverage command = %v; want Go tests after dependency setup", commands[2].Arguments)
 	}
 
-	// Without an explicit budget go test stops every package binary after ten
-	// minutes. Coverage runs the integration package as one sequential binary,
-	// so its budget must leave twofold headroom over that package's run time.
 	// Coverage times are not in the repository, so this checks the package's
 	// summed Race time from the shard weights: lower than a coverage run, and
 	// growing with the package.
-	var budget time.Duration
-	for _, argument := range commands[2].Arguments {
-		value, ok := strings.CutPrefix(argument, "-timeout=")
-		if !ok {
-			continue
-		}
-		if budget != 0 {
-			t.Fatalf("coverage Go command %v names more than one timeout", commands[2].Arguments)
-		}
-		budget, err = time.ParseDuration(value)
-		if err != nil || budget <= 0 {
-			t.Fatalf("coverage Go timeout %q is malformed: %v", value, err)
-		}
-	}
-	if budget == 0 {
-		t.Fatalf("coverage Go command %v has no whole-package budget", commands[2].Arguments)
-	}
-	weights, err := loadGoShardWeights()
-	if err != nil {
-		t.Fatal(err)
-	}
-	measured := time.Duration(weights.Packages["github.com/tetral-ai/tetral/integration"].ElapsedMS) * time.Millisecond
-	if measured == 0 || budget < 2*measured {
+	budget := goTestBudget(t, commands[2].Arguments)
+	if measured := integrationRaceTotal(t); budget < 2*measured {
 		t.Fatalf("coverage Go budget %s does not leave twofold headroom over the integration package's Race time %s", budget, measured)
 	}
 

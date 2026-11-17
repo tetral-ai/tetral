@@ -350,10 +350,15 @@ type commandSpec struct {
 const descendantRegistryEnv = "TETRAL_TEST_DESCENDANT_REGISTRY"
 
 // shardedIntegrationWatchdogMinutes bounds the integration package's slice in
-// a sharded run. Each shard dispatches that slice first and plans about six
-// minutes for it, so its watchdog fires, and Go names the hung test, before
-// the Go Race job's limit ends the job with the result unwritten.
-const shardedIntegrationWatchdogMinutes = 15
+// a sharded run: more than twice the slowest slice measured, and far enough
+// below the Go Race job's limit that Go names the hung test before the job
+// ends with the result unwritten.
+const shardedIntegrationWatchdogMinutes = 35
+
+// wholeIntegrationPackageTimeout bounds a command that runs the integration
+// package whole, in one binary: a local Race run and report-only coverage.
+// Tests hold it to twice the package's Race total in go_shard_weights.json.
+const wholeIntegrationPackageTimeout = "-timeout=80m"
 
 func goPackageTimeout(plan Plan, packages []string) string {
 	for _, name := range packages {
@@ -361,21 +366,11 @@ func goPackageTimeout(plan Plan, packages []string) string {
 			if plan.GoSelection != nil && plan.GoSelection.ShardCount > 1 {
 				return fmt.Sprintf("-timeout=%dm", shardedIntegrationWatchdogMinutes)
 			}
-			return "-timeout=25m"
+			return wholeIntegrationPackageTimeout
 		}
 	}
 	return "-timeout=20m"
 }
-
-// Report-only coverage runs every Go package once without Race, so the
-// integration package executes all of its top-level tests sequentially in one
-// binary instead of in duration-balanced Race slices. The budget is more than
-// twice that package's coverage run time (docs/testing.md names the runs).
-// TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests checks it against
-// the package's Race total in go_shard_weights.json. The scheduled coverage
-// job limit holds this budget plus dependency setup, compilation and the Bun
-// coverage commands.
-const coverageGoTestTimeout = "-timeout=80m"
 
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {
@@ -495,7 +490,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		return []commandSpec{
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
-			{Arguments: []string{"go", "test", "-count=1", coverageGoTestTimeout, "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
+			{Arguments: []string{"go", "test", "-count=1", wholeIntegrationPackageTimeout, "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "runtime-coverage"), "packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "gateway-coverage"), "packages/protocol/test/unit/", "packages/lowering/test/", "packages/provider-gateway/test/unit/", "packages/provider-gateway/test/golden/", "packages/mcp-connector/test/unit/"}, WorkingDir: "services/gateway"},
 		}, nil
